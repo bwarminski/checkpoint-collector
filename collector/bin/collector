@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+# ABOUTME: Provides the executable entry point for the Postgres stats collector.
+# ABOUTME: Connects the collector to Postgres and ClickHouse for one polling pass.
+require_relative "../lib/collector"
+require_relative "../lib/clickhouse_connection"
+require_relative "../lib/sample_query_lookup"
+require "pg"
+
+stats_connection = PG.connect(ENV.fetch("POSTGRES_URL"))
+clickhouse_connection = ClickhouseConnection.new(base_url: ENV.fetch("CLICKHOUSE_URL"))
+sample_query_lookup = SampleQueryLookup.new(stats_connection)
+
+Collector.new(
+  stats_connection: stats_connection,
+  clickhouse_connection: clickhouse_connection,
+  sample_query_lookup: sample_query_lookup
+).run_once

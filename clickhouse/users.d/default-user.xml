@@ -1,0 +1,12 @@
+<!-- ABOUTME: Allows the compose services to use the default ClickHouse HTTP account. -->
+<!-- ABOUTME: Expands the default user network list so the collector can connect. -->
+<clickhouse>
+  <users>
+    <default>
+      <networks>
+        <ip>::/0</ip>
+        <ip>0.0.0.0/0</ip>
+      </networks>
+    </default>
+  </users>
+</clickhouse>

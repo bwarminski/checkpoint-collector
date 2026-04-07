@@ -1,0 +1,6 @@
+# ABOUTME: Declares the Ruby dependencies for the collector service.
+# ABOUTME: Installs the gems needed for Postgres polling and ClickHouse inserts.
+source "https://rubygems.org"
+
+gem "minitest", "5.16.3"
+gem "pg", "~> 1.5"

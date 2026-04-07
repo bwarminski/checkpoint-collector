@@ -1,0 +1,3 @@
+**/.bundle/
+**/.pytest_cache/
+collector/vendor/bundle/
