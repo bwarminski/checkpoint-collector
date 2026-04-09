@@ -4,19 +4,9 @@ require_relative "query_comment_parser"
 
 class Collector
   STATS_SQL = "SELECT queryid, calls, mean_exec_time, rows, shared_blks_hit, shared_blks_read, local_blks_hit, local_blks_read, temp_blks_read, temp_blks_written FROM pg_stat_statements".freeze
-  BLOCK_COUNTER_KEYS = [
-    "shared_blks_hit",
-    "shared_blks_read",
-    "local_blks_hit",
-    "local_blks_read",
-    "temp_blks_read",
-    "temp_blks_written"
-  ].freeze
+  BLOCK_COUNTER_KEYS = %w[shared_blks_hit shared_blks_read local_blks_hit local_blks_read temp_blks_read temp_blks_written].freeze
   COMMENT_BLOCK_PATTERN = %r{/\*.*?\*/}m
-  COMMENT_METADATA_MARKERS = [
-    "source_location:",
-    "source_location="
-  ].freeze
+  COMMENT_METADATA_MARKERS = %w[source_location: source_location=].freeze
 
   def initialize(stats_connection: nil, clickhouse_connection: nil, sample_query_lookup: nil, clock: -> { Time.now.utc })
     @stats_connection = stats_connection
