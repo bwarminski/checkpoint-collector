@@ -14,10 +14,6 @@ class Collector
   ].freeze
   COMMENT_BLOCK_PATTERN = %r{/\*.*?\*/}m
   COMMENT_METADATA_MARKERS = [
-    "controller:",
-    "controller=",
-    "action:",
-    "action=",
     "source_location:",
     "source_location="
   ].freeze

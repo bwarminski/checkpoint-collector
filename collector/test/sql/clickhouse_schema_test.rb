@@ -9,6 +9,7 @@ class ClickhouseSchemaTest < Minitest::Test
     refute_match(/\bORDER BY\b/i, sql)
     assert_includes sql, "CREATE MATERIALIZED VIEW"
     refute_match(/\banyState\b/i, sql)
+    assert_match(/SELECT\n  fingerprint,\n  argMaxState/, sql)
     assert_includes sql, "argMaxState((source_file, sample_query), collected_at) AS representative_state"
     assert_includes sql, "sumState(total_exec_count * mean_exec_time_ms) AS total_exec_time_ms_state"
     assert_includes sql, "GROUP BY fingerprint"
@@ -18,6 +19,7 @@ class ClickhouseSchemaTest < Minitest::Test
     sql = read_sql("002_query_fingerprints.sql")
 
     assert_includes sql, "representative_state AggregateFunction(argMax, Tuple(Nullable(String), Nullable(String)), DateTime64(3))"
+    assert_match(/fingerprint String,\n  representative_state/, sql)
     assert_includes sql, "total_exec_time_ms_state AggregateFunction(sum, Float64)"
     assert_includes sql, "ORDER BY (fingerprint)"
   end
@@ -30,6 +32,7 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_includes sql, "DROP TABLE IF EXISTS query_fingerprints"
     assert_includes sql, "CREATE TABLE query_fingerprints"
     assert_includes sql, "INSERT INTO query_fingerprints"
+    assert_match(/INSERT INTO query_fingerprints\nSELECT\n  fingerprint,\n  argMaxState/, sql)
     assert_includes sql, "argMaxState((source_file, sample_query), collected_at) AS representative_state"
     assert_includes sql, "sumState(rows_returned_or_affected) AS rows_returned_or_affected_state"
     assert_includes sql, "sumState(shared_blks_hit) AS shared_blks_hit_state"
@@ -40,6 +43,7 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_includes sql, "sumState(temp_blks_written) AS temp_blks_written_state"
     assert_includes sql, "sumState(total_block_accesses) AS total_block_accesses_state"
     assert_includes sql, "CREATE MATERIALIZED VIEW top_offenders_mv"
+    assert_match(/CREATE MATERIALIZED VIEW top_offenders_mv\nTO query_fingerprints AS\nSELECT\n  fingerprint,\n  argMaxState/, sql)
   end
 
   def test_query_events_store_subsecond_collection_times
