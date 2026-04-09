@@ -1,5 +1,5 @@
 # ABOUTME: Defines the collector stack that now lives in the sibling repo.
-# ABOUTME: Runs Postgres, ClickHouse, Redpanda, and the collector together.
+# ABOUTME: Runs Postgres, ClickHouse, and the collector together.
 services:
   postgres:
     build:
@@ -27,27 +27,6 @@ services:
       - ./clickhouse/users.d:/etc/clickhouse-server/users.d:ro
     ports: ["8123:8123", "9000:9000"]
 
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.1.9
-    command:
-      - redpanda
-      - start
-      - --overprovisioned
-      - --smp
-      - "1"
-      - --memory
-      - "512M"
-      - --reserve-memory
-      - "0M"
-      - --node-id
-      - "0"
-      - --check=false
-      - --kafka-addr
-      - PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr
-      - PLAINTEXT://redpanda:9092
-    ports: ["9092:9092"]
-
   collector:
     build:
       context: ./collector
@@ -57,9 +36,6 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-      redpanda:
-        condition: service_started
     environment:
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/checkpoint_demo
       CLICKHOUSE_URL: http://clickhouse:8123
-      REDPANDA_BROKERS: redpanda:9092
