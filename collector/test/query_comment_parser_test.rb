@@ -10,8 +10,8 @@ class QueryCommentParserTest < Minitest::Test
 
     parsed = QueryCommentParser.parse(comment)
 
-    assert_equal "todos#index", parsed[:source_tag]
     assert_equal "/app/controllers/todos_controller.rb:12", parsed[:source_file]
+    refute parsed.key?(:source_tag)
   end
 
   def test_parses_live_rails_equals_format_without_source_location
@@ -19,35 +19,36 @@ class QueryCommentParserTest < Minitest::Test
 
     parsed = QueryCommentParser.parse(comment)
 
-    assert_equal "todos#index", parsed[:source_tag]
     assert_nil parsed[:source_file]
+    refute parsed.key?(:source_tag)
   end
 
-  def test_returns_empty_tag_when_comment_is_missing
+  def test_returns_nil_source_file_when_comment_is_missing
     parsed = QueryCommentParser.parse(nil)
 
-    assert_equal "", parsed[:source_tag]
     assert_nil parsed[:source_file]
+    refute parsed.key?(:source_tag)
   end
 
-  def test_returns_empty_tag_when_comment_has_no_metadata_fields
+  def test_returns_nil_source_file_when_comment_has_no_metadata_fields
     parsed = QueryCommentParser.parse("/* plain comment, no key=value pairs */")
 
-    assert_equal "", parsed[:source_tag]
     assert_nil parsed[:source_file]
+    refute parsed.key?(:source_tag)
   end
 
-  def test_returns_partial_tag_when_only_controller_is_present
+  def test_returns_nil_source_file_when_only_controller_is_present
     parsed = QueryCommentParser.parse("/*controller:todos*/")
 
-    assert_equal "todos", parsed[:source_tag]
     assert_nil parsed[:source_file]
+    refute parsed.key?(:source_tag)
   end
 
   def test_ignores_malformed_parts_without_separator
     # Parts with no colon or equals sign should be silently ignored
     parsed = QueryCommentParser.parse("/*garbage,controller:todos,action:index*/")
 
-    assert_equal "todos#index", parsed[:source_tag]
+    assert_nil parsed[:source_file]
+    refute parsed.key?(:source_tag)
   end
 end

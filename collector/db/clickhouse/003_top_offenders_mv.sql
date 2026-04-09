@@ -4,7 +4,6 @@ CREATE MATERIALIZED VIEW top_offenders_mv
 TO query_fingerprints AS
 SELECT
   fingerprint,
-  source_tag,
   argMaxState((source_file, sample_query), collected_at) AS representative_state,
   sumState(total_exec_count) AS total_exec_count_state,
   sumState(total_exec_count * mean_exec_time_ms) AS total_exec_time_ms_state,
@@ -18,4 +17,4 @@ SELECT
   sumState(total_block_accesses) AS total_block_accesses_state,
   quantileState(0.95)(mean_exec_time_ms) AS p95_exec_time_state
 FROM query_events
-GROUP BY fingerprint, source_tag;
+GROUP BY fingerprint;

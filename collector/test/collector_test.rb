@@ -97,7 +97,6 @@ class CollectorTest < Minitest::Test
       {
         collected_at: Time.utc(2026, 4, 4, 12, 0, 0),
         fingerprint: "42",
-        source_tag: "todos#index",
         source_file: "/app/controllers/todos_controller.rb:12",
         sample_query: sample_query,
         total_exec_count: 7,
@@ -115,6 +114,7 @@ class CollectorTest < Minitest::Test
     ]
 
     assert_equal expected_rows, rows
+    refute_includes rows.first.keys, :source_tag
     assert_equal "query_events", clickhouse_connection.table
     assert_equal expected_rows, clickhouse_connection.rows
   end
@@ -176,11 +176,11 @@ class CollectorTest < Minitest::Test
 
     row = collector.run_once.fetch(0)
 
-    assert_equal "todos#index", row[:source_tag]
     assert_equal "/app/controllers/todos_controller.rb:12", row[:source_file]
+    refute_includes row.keys, :source_tag
   end
 
-  def test_extracts_source_tag_from_live_rails_equals_style_comments
+  def test_handles_live_rails_equals_style_comments_without_source_location
     stats_connection = StatsConnection.new([
       {
         "queryid" => "42",
@@ -200,8 +200,8 @@ class CollectorTest < Minitest::Test
 
     row = collector.run_once.fetch(0)
 
-    assert_equal "todos#index", row[:source_tag]
     assert_nil row[:source_file]
+    refute_includes row.keys, :source_tag
   end
 
   class StatsConnection

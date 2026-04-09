@@ -8,7 +8,6 @@ class RedpandaConsumer
   def normalize(payload)
     {
       fingerprint: payload.fetch("fingerprint"),
-      source_tag: payload["source_tag"],
       sample_query: payload["sample_query"]
     }
   end

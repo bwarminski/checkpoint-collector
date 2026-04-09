@@ -54,7 +54,6 @@ class Collector
     {
       collected_at: collected_at,
       fingerprint: queryid,
-      source_tag: presence(parsed[:source_tag]),
       source_file: presence(parsed[:source_file]),
       sample_query: sample_query,
       total_exec_count: stats_row.fetch("calls").to_i,

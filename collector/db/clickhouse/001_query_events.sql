@@ -3,7 +3,6 @@
 CREATE TABLE query_events (
   collected_at DateTime64(3),
   fingerprint String,
-  source_tag Nullable(String),
   source_file Nullable(String),
   sample_query Nullable(String),
   total_exec_count UInt64,
