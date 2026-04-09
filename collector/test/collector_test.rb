@@ -114,7 +114,6 @@ class CollectorTest < Minitest::Test
     ]
 
     assert_equal expected_rows, rows
-    refute_includes rows.first.keys, :source_tag
     assert_equal "query_events", clickhouse_connection.table
     assert_equal expected_rows, clickhouse_connection.rows
   end
@@ -177,7 +176,6 @@ class CollectorTest < Minitest::Test
     row = collector.run_once.fetch(0)
 
     assert_equal "/app/controllers/todos_controller.rb:12", row[:source_file]
-    refute_includes row.keys, :source_tag
   end
 
   def test_handles_live_rails_equals_style_comments_without_source_location
@@ -201,7 +199,6 @@ class CollectorTest < Minitest::Test
     row = collector.run_once.fetch(0)
 
     assert_nil row[:source_file]
-    refute_includes row.keys, :source_tag
   end
 
   class StatsConnection

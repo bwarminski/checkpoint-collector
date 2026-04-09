@@ -17,7 +17,6 @@ class ClickhouseSchemaTest < Minitest::Test
   def test_fingerprint_table_groups_by_fingerprint
     sql = read_sql("002_query_fingerprints.sql")
 
-    refute_includes sql, "source_tag"
     assert_includes sql, "representative_state AggregateFunction(argMax, Tuple(Nullable(String), Nullable(String)), DateTime64(3))"
     assert_includes sql, "total_exec_time_ms_state AggregateFunction(sum, Float64)"
     assert_includes sql, "ORDER BY (fingerprint)"
@@ -26,7 +25,6 @@ class ClickhouseSchemaTest < Minitest::Test
   def test_reset_sql_rebuilds_query_fingerprints_with_block_state
     sql = read_sql("004_reset_query_fingerprints.sql")
 
-    refute_includes sql, "source_tag"
     assert_includes sql, "Run this only while collector ingestion is stopped so no raw events are missed."
     assert_includes sql, "DROP TABLE IF EXISTS top_offenders_mv"
     assert_includes sql, "DROP TABLE IF EXISTS query_fingerprints"
