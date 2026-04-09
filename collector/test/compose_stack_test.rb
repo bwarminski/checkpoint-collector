@@ -16,6 +16,12 @@ class ComposeStackTest < Minitest::Test
     refute_includes dockerfile, "librdkafka-dev"
   end
 
+  def test_postgres_image_bootstraps_init_scripts
+    dockerfile = File.read(File.expand_path("../../postgres/Dockerfile", __dir__))
+
+    assert_includes dockerfile, "COPY init/ /docker-entrypoint-initdb.d/"
+  end
+
   def test_redpanda_consumer_runtime_is_removed
     refute File.exist?(File.expand_path("../lib/redpanda_consumer.rb", __dir__))
   end
