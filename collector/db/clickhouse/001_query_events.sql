@@ -24,4 +24,4 @@ CREATE TABLE query_events (
   mean_exec_time_ms Float64,
   stddev_exec_time_ms Float64
 ) ENGINE = MergeTree
-ORDER BY (fingerprint, collected_at);
+ORDER BY (dbid, userid, toplevel, queryid, collected_at);

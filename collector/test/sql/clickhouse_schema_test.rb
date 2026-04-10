@@ -11,6 +11,7 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_match(/toplevel\s+Bool/, sql)
     assert_match(/queryid\s+String/, sql)
     assert_match(/total_exec_time_ms\s+Float64/, sql)
+    assert_match(/ORDER BY \(dbid, userid, toplevel, queryid, collected_at\)/, sql)
     refute_match(/mean_block_accesses_per_call/, sql)
   end
 

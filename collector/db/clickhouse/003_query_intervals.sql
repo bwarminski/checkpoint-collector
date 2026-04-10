@@ -1,5 +1,6 @@
 -- ABOUTME: Creates a delta-oriented view over raw query event snapshots.
 -- ABOUTME: Derives reset-aware interval metrics for query fingerprint findings.
+SET allow_experimental_analyzer = 0;
 CREATE VIEW query_intervals AS
 WITH interval_candidates AS (
   SELECT
@@ -26,6 +27,7 @@ WITH interval_candidates AS (
     e.mean_exec_time_ms,
     e.stddev_exec_time_ms,
     s.stats_reset,
+    row_number() OVER statement_window AS snapshot_position,
     lagInFrame(e.collected_at) OVER statement_window AS previous_collected_at,
     lagInFrame(e.total_exec_count) OVER statement_window AS previous_total_exec_count,
     lagInFrame(e.total_exec_time_ms) OVER statement_window AS previous_total_exec_time_ms,
@@ -41,6 +43,14 @@ WITH interval_candidates AS (
   FROM query_events AS e
   LEFT JOIN collector_state AS s USING (collected_at)
   WINDOW statement_window AS (PARTITION BY e.dbid, e.userid, e.toplevel, e.queryid ORDER BY e.collected_at)
+),
+valid_intervals AS (
+  SELECT *
+  FROM interval_candidates
+  WHERE snapshot_position > 1
+    AND stats_reset = previous_stats_reset
+    AND total_exec_count >= previous_total_exec_count
+    AND total_exec_time_ms >= previous_total_exec_time_ms
 )
 SELECT
   previous_collected_at AS interval_started_at,
@@ -67,8 +77,4 @@ SELECT
   max_exec_time_ms,
   mean_exec_time_ms,
   stddev_exec_time_ms
-FROM interval_candidates
-WHERE previous_collected_at IS NOT NULL
-  AND stats_reset = previous_stats_reset
-  AND total_exec_count >= previous_total_exec_count
-  AND total_exec_time_ms >= previous_total_exec_time_ms;
+FROM valid_intervals;
