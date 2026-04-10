@@ -1,5 +1,6 @@
 # ABOUTME: Polls Postgres statement stats and shapes rows for ClickHouse inserts.
 # ABOUTME: Enriches sampled SQL with source metadata parsed from Rails query comments.
+require "time"
 require_relative "query_comment_parser"
 
 class Collector
@@ -97,8 +98,17 @@ class Collector
     {
       collected_at: collected_at,
       dealloc: info_row.fetch("dealloc").to_i,
-      stats_reset: info_row.fetch("stats_reset")
+      stats_reset: format_stats_reset(info_row.fetch("stats_reset"))
     }
+  end
+
+  def format_stats_reset(value)
+    return nil unless value
+    # Postgres returns timestamptz with microseconds and tz offset.
+    # ClickHouse DateTime column accepts "YYYY-MM-DD HH:MM:SS" only.
+    Time.parse(value.to_s).utc.strftime("%Y-%m-%d %H:%M:%S")
+  rescue ArgumentError
+    nil
   end
 
   def stat_value(stats_row, key)

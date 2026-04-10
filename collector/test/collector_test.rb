@@ -324,7 +324,7 @@ class CollectorTest < Minitest::Test
     assert_equal 150, rows.first[:total_block_accesses]
     assert_equal [
       ["query_events", rows],
-      ["collector_state", [{ collected_at: Time.utc(2026, 4, 9, 12, 5, 0), dealloc: 3, stats_reset: "2026-04-09 12:00:00+00" }]],
+      ["collector_state", [{ collected_at: Time.utc(2026, 4, 9, 12, 5, 0), dealloc: 3, stats_reset: "2026-04-09 12:00:00" }]],
     ], clickhouse_connection.inserts
   end
 
@@ -354,8 +354,26 @@ class CollectorTest < Minitest::Test
 
     assert_equal [], rows
     assert_equal [
-      ["collector_state", [{ collected_at: Time.utc(2026, 4, 9, 12, 45, 0), dealloc: 8, stats_reset: "2026-04-09 12:30:00+00" }]],
+      ["collector_state", [{ collected_at: Time.utc(2026, 4, 9, 12, 45, 0), dealloc: 8, stats_reset: "2026-04-09 12:30:00" }]],
     ], clickhouse_connection.inserts
+  end
+
+  def test_formats_stats_reset_as_clickhouse_datetime_string
+    stats_connection = StatsConnection.new(
+      stats_rows: [],
+      info_rows: [{ "dealloc" => "0", "stats_reset" => "2026-04-09 12:00:00.055815+00" }],
+    )
+    clickhouse_connection = RecordingClickhouseConnection.new
+    collector = Collector.new(
+      stats_connection: stats_connection,
+      clickhouse_connection: clickhouse_connection,
+      clock: -> { Time.utc(2026, 4, 9, 12, 5, 0) }
+    )
+
+    collector.run_once
+
+    state_row = clickhouse_connection.inserts.first.last.first
+    assert_equal "2026-04-09 12:00:00", state_row[:stats_reset]
   end
 
   class StatsConnection
