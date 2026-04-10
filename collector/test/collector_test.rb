@@ -113,8 +113,7 @@ class CollectorTest < Minitest::Test
         local_blks_read: 0,
         temp_blks_read: 0,
         temp_blks_written: 0,
-        total_block_accesses: 0,
-        mean_block_accesses_per_call: 0.0
+        total_block_accesses: 0
       }
     ]
 
@@ -153,8 +152,32 @@ class CollectorTest < Minitest::Test
     assert_equal 3, row[:temp_blks_read]
     assert_equal 2, row[:temp_blks_written]
     assert_equal 170, row[:total_block_accesses]
-    assert_in_delta 17.0, row[:mean_block_accesses_per_call], 0.001
     assert_equal Collector::STATS_SQL, stats_connection.sql_calls.fetch(0)
+  end
+
+  def test_run_once_does_not_emit_mean_block_accesses_per_call
+    stats_connection = StatsConnection.new([
+      {
+        "queryid" => "123",
+        "calls" => "10",
+        "mean_exec_time" => "15.5",
+        "rows" => "2500",
+        "shared_blks_hit" => "100",
+        "shared_blks_read" => "40",
+        "local_blks_hit" => "20",
+        "local_blks_read" => "5",
+        "temp_blks_read" => "3",
+        "temp_blks_written" => "2"
+      }
+    ])
+    collector = Collector.new(
+      stats_connection: stats_connection,
+      clock: -> { Time.utc(2026, 4, 5, 12, 0, 0) }
+    )
+
+    row = collector.run_once.first
+
+    refute row.key?(:mean_block_accesses_per_call)
   end
 
   def test_uses_only_the_rails_metadata_block_when_query_has_multiple_comments

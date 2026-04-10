@@ -86,8 +86,7 @@ class Collector
       local_blks_read: stat_value(stats_row, "local_blks_read"),
       temp_blks_read: stat_value(stats_row, "temp_blks_read"),
       temp_blks_written: stat_value(stats_row, "temp_blks_written"),
-      total_block_accesses: total_block_accesses(stats_row),
-      mean_block_accesses_per_call: mean_block_accesses_per_call(stats_row)
+      total_block_accesses: total_block_accesses(stats_row)
     }
   end
 
@@ -105,11 +104,6 @@ class Collector
 
   def total_block_accesses(stats_row)
     BLOCK_COUNTER_KEYS.sum { |key| stat_value(stats_row, key) }
-  end
-
-  def mean_block_accesses_per_call(stats_row)
-    calls = stats_row.fetch("calls").to_i
-    calls.zero? ? 0.0 : total_block_accesses(stats_row).to_f / calls
   end
 
   def extract_comment(sample_query)
