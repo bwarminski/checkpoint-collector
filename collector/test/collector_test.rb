@@ -285,6 +285,26 @@ class CollectorTest < Minitest::Test
     assert_equal Collector::INFO_SQL, stats_connection.sql_calls.fetch(1)
   end
 
+  def test_inserts_collector_state_when_info_row_exists_without_stats_rows
+    stats_connection = StatsConnection.new(
+      stats_rows: [],
+      info_rows: [{ "dealloc" => "8", "stats_reset" => "2026-04-09 12:30:00+00" }],
+    )
+    clickhouse_connection = RecordingClickhouseConnection.new
+    collector = Collector.new(
+      stats_connection: stats_connection,
+      clickhouse_connection: clickhouse_connection,
+      clock: -> { Time.utc(2026, 4, 9, 12, 45, 0) }
+    )
+
+    rows = collector.run_once
+
+    assert_equal [], rows
+    assert_equal [
+      ["collector_state", [{ collected_at: Time.utc(2026, 4, 9, 12, 45, 0), dealloc: 8, stats_reset: "2026-04-09 12:30:00+00" }]],
+    ], clickhouse_connection.inserts
+  end
+
   class StatsConnection
     attr_reader :sql, :sql_calls
 

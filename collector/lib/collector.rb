@@ -41,7 +41,13 @@ class Collector
 
     stats_rows = Array(@stats_connection.exec(STATS_SQL))
     info_row = Array(@stats_connection.exec(INFO_SQL)).first
-    return [] if stats_rows.empty?
+    if stats_rows.empty?
+      if info_row
+        collected_at = @clock.call
+        @clickhouse_connection&.insert("collector_state", [build_state_row(info_row, collected_at)])
+      end
+      return []
+    end
 
     collected_at = @clock.call
     rows = stats_rows.map do |stats_row|
