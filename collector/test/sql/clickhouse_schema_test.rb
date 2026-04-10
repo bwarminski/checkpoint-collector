@@ -1,92 +1,89 @@
-# ABOUTME: Verifies the ClickHouse schema files for the query collector.
-# ABOUTME: Guards the materialized view definition against embedding ORDER BY.
+# ABOUTME: Verifies the ClickHouse schema files for raw query, state, and interval data.
+# ABOUTME: Ensures reset SQL matches canonical raw tables and interval view definitions.
 require "minitest/autorun"
 
 class ClickhouseSchemaTest < Minitest::Test
-  def test_materialized_view_groups_by_fingerprint
-    sql = read_sql("003_top_offenders_mv.sql")
-
-    refute_match(/\bORDER BY\b/i, sql)
-    assert_includes sql, "CREATE MATERIALIZED VIEW"
-    refute_match(/\banyState\b/i, sql)
-    assert_match(/SELECT\n  fingerprint,\n  argMaxState/, sql)
-    assert_includes sql, "argMaxState((source_file, sample_query), collected_at) AS representative_state"
-    assert_includes sql, "sumState(total_exec_count * mean_exec_time_ms) AS total_exec_time_ms_state"
-    assert_includes sql, "GROUP BY fingerprint"
-  end
-
-  def test_fingerprint_table_groups_by_fingerprint
-    sql = read_sql("002_query_fingerprints.sql")
-
-    assert_includes sql, "representative_state AggregateFunction(argMax, Tuple(Nullable(String), Nullable(String)), DateTime64(3))"
-    assert_match(/fingerprint String,\n  representative_state/, sql)
-    assert_includes sql, "total_exec_time_ms_state AggregateFunction(sum, Float64)"
-    assert_includes sql, "ORDER BY (fingerprint)"
-  end
-
-  def test_reset_sql_rebuilds_query_fingerprints_with_block_state
-    sql = read_sql("004_reset_query_fingerprints.sql")
-
-    assert_includes sql, "Run this only while collector ingestion is stopped so no raw events are missed."
-    assert_includes sql, "DROP TABLE IF EXISTS top_offenders_mv"
-    assert_includes sql, "DROP TABLE IF EXISTS query_fingerprints"
-    assert_includes sql, "CREATE TABLE query_fingerprints"
-    assert_includes sql, "INSERT INTO query_fingerprints"
-    assert_match(/INSERT INTO query_fingerprints\nSELECT\n  fingerprint,\n  argMaxState/, sql)
-    assert_includes sql, "argMaxState((source_file, sample_query), collected_at) AS representative_state"
-    assert_includes sql, "sumState(rows_returned_or_affected) AS rows_returned_or_affected_state"
-    assert_includes sql, "sumState(shared_blks_hit) AS shared_blks_hit_state"
-    assert_includes sql, "sumState(shared_blks_read) AS shared_blks_read_state"
-    assert_includes sql, "sumState(local_blks_hit) AS local_blks_hit_state"
-    assert_includes sql, "sumState(local_blks_read) AS local_blks_read_state"
-    assert_includes sql, "sumState(temp_blks_read) AS temp_blks_read_state"
-    assert_includes sql, "sumState(temp_blks_written) AS temp_blks_written_state"
-    assert_includes sql, "sumState(total_block_accesses) AS total_block_accesses_state"
-    assert_includes sql, "CREATE MATERIALIZED VIEW top_offenders_mv"
-    assert_match(/CREATE MATERIALIZED VIEW top_offenders_mv\nTO query_fingerprints AS\nSELECT\n  fingerprint,\n  argMaxState/, sql)
-  end
-
-  def test_query_events_store_subsecond_collection_times
+  def test_query_events_store_snapshot_identity_and_counter_columns
     sql = read_sql("001_query_events.sql")
 
-    assert_includes sql, "collected_at DateTime64(3)"
+    assert_match(/dbid\s+UInt64/, sql)
+    assert_match(/userid\s+UInt64/, sql)
+    assert_match(/toplevel\s+Bool/, sql)
+    assert_match(/queryid\s+String/, sql)
+    assert_match(/total_exec_time_ms\s+Float64/, sql)
+    assert_match(/ORDER BY \(dbid, userid, toplevel, queryid, collected_at\)/, sql)
+    refute_match(/mean_block_accesses_per_call/, sql)
   end
 
-  def test_query_events_and_fingerprints_track_row_and_block_metrics
-    query_events_sql = read_sql("001_query_events.sql")
-    fingerprints_sql = read_sql("002_query_fingerprints.sql")
-    mv_sql = read_sql("003_top_offenders_mv.sql")
+  def test_collector_state_tracks_pg_stat_statements_info_snapshots
+    sql = read_sql("002_collector_state.sql")
 
-    assert_match(/rows_returned_or_affected\s+UInt64/, query_events_sql)
-    assert_match(/shared_blks_hit\s+UInt64/, query_events_sql)
-    assert_match(/shared_blks_read\s+UInt64/, query_events_sql)
-    assert_match(/local_blks_hit\s+UInt64/, query_events_sql)
-    assert_match(/local_blks_read\s+UInt64/, query_events_sql)
-    assert_match(/temp_blks_read\s+UInt64/, query_events_sql)
-    assert_match(/temp_blks_written\s+UInt64/, query_events_sql)
-    assert_match(/total_block_accesses\s+UInt64/, query_events_sql)
-    assert_match(/mean_block_accesses_per_call\s+Float64/, query_events_sql)
-    assert_match(/rows_returned_or_affected_state\s+AggregateFunction\(sum,\s+UInt64\)/, fingerprints_sql)
-    assert_match(/shared_blks_hit_state\s+AggregateFunction\(sum,\s+UInt64\)/, fingerprints_sql)
-    assert_match(/shared_blks_read_state\s+AggregateFunction\(sum,\s+UInt64\)/, fingerprints_sql)
-    assert_match(/local_blks_hit_state\s+AggregateFunction\(sum,\s+UInt64\)/, fingerprints_sql)
-    assert_match(/local_blks_read_state\s+AggregateFunction\(sum,\s+UInt64\)/, fingerprints_sql)
-    assert_match(/temp_blks_read_state\s+AggregateFunction\(sum,\s+UInt64\)/, fingerprints_sql)
-    assert_match(/temp_blks_written_state\s+AggregateFunction\(sum,\s+UInt64\)/, fingerprints_sql)
-    assert_match(/total_block_accesses_state\s+AggregateFunction\(sum,\s+UInt64\)/, fingerprints_sql)
-    assert_includes mv_sql, "sumState(rows_returned_or_affected) AS rows_returned_or_affected_state"
-    assert_includes mv_sql, "sumState(shared_blks_hit) AS shared_blks_hit_state"
-    assert_includes mv_sql, "sumState(shared_blks_read) AS shared_blks_read_state"
-    assert_includes mv_sql, "sumState(local_blks_hit) AS local_blks_hit_state"
-    assert_includes mv_sql, "sumState(local_blks_read) AS local_blks_read_state"
-    assert_includes mv_sql, "sumState(temp_blks_read) AS temp_blks_read_state"
-    assert_includes mv_sql, "sumState(temp_blks_written) AS temp_blks_written_state"
-    assert_includes mv_sql, "sumState(total_block_accesses) AS total_block_accesses_state"
+    assert_match(/dealloc\s+UInt64/, sql)
+    assert_match(/stats_reset\s+DateTime/, sql)
+  end
+
+  def test_query_intervals_is_a_view_over_raw_snapshots
+    sql = read_sql("003_query_intervals.sql")
+
+    assert_match(/CREATE VIEW query_intervals AS/, sql)
+    assert_includes sql, "interval_started_at"
+    assert_includes sql, "interval_ended_at"
+    assert_includes sql, "interval_duration_ms"
+    assert_includes sql, "lagInFrame(e.total_exec_count)"
+  end
+
+  def test_query_intervals_casts_delta_columns_to_clickhouse_24_compatible_types
+    sql = read_sql("003_query_intervals.sql")
+
+    assert_includes sql, "CAST(total_exec_time_ms - previous_total_exec_time_ms AS Float64)"
+    assert_includes sql, "CAST(shared_blks_hit - previous_shared_blks_hit AS Int64)"
+  end
+
+  def test_reset_sql_rebuilds_raw_state_and_interval_objects
+    sql = read_sql("004_reset_query_analytics.sql")
+
+    assert_includes sql, "DROP VIEW IF EXISTS query_intervals"
+    assert_includes sql, "DROP TABLE IF EXISTS collector_state"
+    assert_includes sql, "DROP TABLE IF EXISTS query_events"
+    assert_includes sql, "CREATE TABLE query_events"
+    assert_includes sql, "CREATE TABLE collector_state"
+    assert_includes sql, "CREATE VIEW query_intervals"
+  end
+
+  def test_reset_sql_matches_query_events_definition
+    canonical_sql = strip_header(read_sql("001_query_events.sql"))
+    reset_sql = strip_header(read_sql("004_reset_query_analytics.sql"))
+
+    assert_includes reset_sql, canonical_sql
+  end
+
+  def test_reset_sql_matches_collector_state_definition
+    canonical_sql = strip_header(read_sql("002_collector_state.sql"))
+    reset_sql = strip_header(read_sql("004_reset_query_analytics.sql"))
+
+    assert_includes reset_sql, canonical_sql
+  end
+
+  def test_reset_sql_matches_query_intervals_definition
+    canonical_sql = strip_header(read_sql("003_query_intervals.sql"))
+    reset_sql = strip_header(read_sql("004_reset_query_analytics.sql"))
+
+    assert_includes reset_sql, canonical_sql
+  end
+
+  def test_stale_aggregate_layer_files_are_removed
+    refute File.exist?(File.expand_path("../../db/clickhouse/004_query_fingerprints.sql", __dir__))
+    refute File.exist?(File.expand_path("../../db/clickhouse/005_top_offenders_mv.sql", __dir__))
+    refute File.exist?(File.expand_path("../../db/clickhouse/006_reset_query_analytics.sql", __dir__))
   end
 
   private
 
   def read_sql(name)
     File.read(File.expand_path("../../db/clickhouse/#{name}", __dir__))
+  end
+
+  def strip_header(sql)
+    sql.sub(/\A(?:--.*\n)+/, "")
   end
 end

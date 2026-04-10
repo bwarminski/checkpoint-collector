@@ -1,5 +1,6 @@
 # ABOUTME: Polls Postgres statement stats and shapes rows for ClickHouse inserts.
 # ABOUTME: Enriches sampled SQL with source metadata parsed from Rails query comments.
+require "time"
 require_relative "query_comment_parser"
 
 class Collector
@@ -77,7 +78,10 @@ class Collector
       sample_query: sample_query,
       total_exec_count: stats_row.fetch("calls").to_i,
       total_exec_time_ms: stats_row.fetch("total_exec_time", 0).to_f,
+      min_exec_time_ms: stats_row.fetch("min_exec_time", 0).to_f,
+      max_exec_time_ms: stats_row.fetch("max_exec_time", 0).to_f,
       mean_exec_time_ms: stats_row.fetch("mean_exec_time").to_f,
+      stddev_exec_time_ms: stats_row.fetch("stddev_exec_time", 0).to_f,
       # pg_stat_statements.rows reports rows returned or affected, not rows visited.
       rows_returned_or_affected: stats_row.fetch("rows", 0).to_i,
       shared_blks_hit: stat_value(stats_row, "shared_blks_hit"),
@@ -86,8 +90,7 @@ class Collector
       local_blks_read: stat_value(stats_row, "local_blks_read"),
       temp_blks_read: stat_value(stats_row, "temp_blks_read"),
       temp_blks_written: stat_value(stats_row, "temp_blks_written"),
-      total_block_accesses: total_block_accesses(stats_row),
-      mean_block_accesses_per_call: mean_block_accesses_per_call(stats_row)
+      total_block_accesses: total_block_accesses(stats_row)
     }
   end
 
@@ -95,8 +98,17 @@ class Collector
     {
       collected_at: collected_at,
       dealloc: info_row.fetch("dealloc").to_i,
-      stats_reset: info_row.fetch("stats_reset")
+      stats_reset: format_stats_reset(info_row.fetch("stats_reset"))
     }
+  end
+
+  def format_stats_reset(value)
+    return nil unless value
+    # Postgres returns timestamptz with microseconds and tz offset.
+    # ClickHouse DateTime column accepts "YYYY-MM-DD HH:MM:SS" only.
+    Time.parse(value.to_s).utc.strftime("%Y-%m-%d %H:%M:%S")
+  rescue ArgumentError
+    nil
   end
 
   def stat_value(stats_row, key)
@@ -105,11 +117,6 @@ class Collector
 
   def total_block_accesses(stats_row)
     BLOCK_COUNTER_KEYS.sum { |key| stat_value(stats_row, key) }
-  end
-
-  def mean_block_accesses_per_call(stats_row)
-    calls = stats_row.fetch("calls").to_i
-    calls.zero? ? 0.0 : total_block_accesses(stats_row).to_f / calls
   end
 
   def extract_comment(sample_query)
