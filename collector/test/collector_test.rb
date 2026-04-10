@@ -96,10 +96,15 @@ class CollectorTest < Minitest::Test
     expected_rows = [
       {
         collected_at: Time.utc(2026, 4, 4, 12, 0, 0),
+        dbid: 0,
+        userid: 0,
+        toplevel: false,
+        queryid: "42",
         fingerprint: "42",
         source_file: "/app/controllers/todos_controller.rb:12",
         sample_query: sample_query,
         total_exec_count: 7,
+        total_exec_time_ms: 0.0,
         mean_exec_time_ms: 12.5,
         rows_returned_or_affected: 0,
         shared_blks_hit: 0,
@@ -149,10 +154,7 @@ class CollectorTest < Minitest::Test
     assert_equal 2, row[:temp_blks_written]
     assert_equal 170, row[:total_block_accesses]
     assert_in_delta 17.0, row[:mean_block_accesses_per_call], 0.001
-    assert_equal(
-      "SELECT queryid, calls, mean_exec_time, rows, shared_blks_hit, shared_blks_read, local_blks_hit, local_blks_read, temp_blks_read, temp_blks_written FROM pg_stat_statements",
-      stats_connection.sql,
-    )
+    assert_equal Collector::STATS_SQL, stats_connection.sql_calls.fetch(0)
   end
 
   def test_uses_only_the_rails_metadata_block_when_query_has_multiple_comments
@@ -224,16 +226,87 @@ class CollectorTest < Minitest::Test
     assert_nil row[:source_file]
   end
 
-  class StatsConnection
-    attr_reader :sql
+  def test_inserts_counter_snapshots_into_query_events_and_collector_state
+    stats_connection = StatsConnection.new(
+      stats_rows: [
+        {
+          "dbid" => "5",
+          "userid" => "9",
+          "toplevel" => "t",
+          "queryid" => "42",
+          "calls" => "7",
+          "total_exec_time" => "125.5",
+          "min_exec_time" => "10.0",
+          "max_exec_time" => "30.0",
+          "mean_exec_time" => "17.9",
+          "stddev_exec_time" => "8.4",
+          "rows" => "20",
+          "shared_blks_hit" => "100",
+          "shared_blks_read" => "40",
+          "local_blks_hit" => "3",
+          "local_blks_read" => "2",
+          "temp_blks_read" => "1",
+          "temp_blks_written" => "4"
+        }
+      ],
+      info_rows: [{ "dealloc" => "3", "stats_reset" => "2026-04-09 12:00:00+00" }],
+    )
+    clickhouse_connection = RecordingClickhouseConnection.new
+    sample_query_lookup = SampleQueryLookupStub.new("42" => "SELECT 1 /*source_location:/app/models/todo.rb:7*/")
+    collector = Collector.new(
+      stats_connection: stats_connection,
+      clickhouse_connection: clickhouse_connection,
+      sample_query_lookup: sample_query_lookup,
+      clock: -> { Time.utc(2026, 4, 9, 12, 5, 0) }
+    )
 
-    def initialize(rows)
+    rows = collector.run_once
+
+    assert_equal 1, rows.length
+    assert_equal 5, rows.first[:dbid]
+    assert_equal 9, rows.first[:userid]
+    assert_equal true, rows.first[:toplevel]
+    assert_equal "42", rows.first[:queryid]
+    assert_equal 125.5, rows.first[:total_exec_time_ms]
+    assert_equal 150, rows.first[:total_block_accesses]
+    assert_equal [
+      ["query_events", rows],
+      ["collector_state", [{ collected_at: Time.utc(2026, 4, 9, 12, 5, 0), dealloc: 3, stats_reset: "2026-04-09 12:00:00+00" }]],
+    ], clickhouse_connection.inserts
+  end
+
+  def test_run_once_uses_widened_stats_and_info_queries
+    stats_connection = StatsConnection.new(stats_rows: [], info_rows: [])
+    collector = Collector.new(stats_connection: stats_connection)
+
+    collector.run_once
+
+    assert_equal Collector::STATS_SQL, stats_connection.sql_calls.fetch(0)
+    assert_equal Collector::INFO_SQL, stats_connection.sql_calls.fetch(1)
+  end
+
+  class StatsConnection
+    attr_reader :sql, :sql_calls
+
+    def initialize(rows = nil, stats_rows: nil, info_rows: nil)
       @rows = rows
+      @stats_rows = stats_rows
+      @info_rows = info_rows
+      @sql_calls = []
     end
 
     def exec(sql)
       @sql = sql
-      @rows
+      @sql_calls << sql
+      if @sql_calls.length == 1 && !@stats_rows.nil?
+        @stats_rows
+      elsif @sql_calls.length == 2 && !@info_rows.nil?
+        @info_rows
+      elsif @sql_calls.length == 2
+        []
+      else
+        @rows
+      end
     end
   end
 
@@ -243,6 +316,18 @@ class CollectorTest < Minitest::Test
     def insert(table, rows)
       @table = table
       @rows = rows
+    end
+  end
+
+  class RecordingClickhouseConnection
+    attr_reader :inserts
+
+    def initialize
+      @inserts = []
+    end
+
+    def insert(table, rows)
+      @inserts << [table, rows]
     end
   end
 

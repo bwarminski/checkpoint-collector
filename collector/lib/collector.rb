@@ -3,7 +3,28 @@
 require_relative "query_comment_parser"
 
 class Collector
-  STATS_SQL = "SELECT queryid, calls, mean_exec_time, rows, shared_blks_hit, shared_blks_read, local_blks_hit, local_blks_read, temp_blks_read, temp_blks_written FROM pg_stat_statements".freeze
+  STATS_SQL = <<~SQL.freeze
+    SELECT
+      dbid,
+      userid,
+      toplevel,
+      queryid,
+      calls,
+      total_exec_time,
+      min_exec_time,
+      max_exec_time,
+      mean_exec_time,
+      stddev_exec_time,
+      rows,
+      shared_blks_hit,
+      shared_blks_read,
+      local_blks_hit,
+      local_blks_read,
+      temp_blks_read,
+      temp_blks_written
+    FROM pg_stat_statements
+  SQL
+  INFO_SQL = "SELECT dealloc, stats_reset FROM pg_stat_statements_info".freeze
   BLOCK_COUNTER_KEYS = %w[shared_blks_hit shared_blks_read local_blks_hit local_blks_read temp_blks_read temp_blks_written].freeze
   COMMENT_BLOCK_PATTERN = %r{/\*.*?\*/}m
   COMMENT_METADATA_MARKERS = %w[source_location: source_location=].freeze
@@ -19,6 +40,7 @@ class Collector
     return [] unless @stats_connection
 
     stats_rows = Array(@stats_connection.exec(STATS_SQL))
+    info_row = Array(@stats_connection.exec(INFO_SQL)).first
     return [] if stats_rows.empty?
 
     collected_at = @clock.call
@@ -27,6 +49,7 @@ class Collector
     end
 
     @clickhouse_connection&.insert("query_events", rows)
+    @clickhouse_connection&.insert("collector_state", [build_state_row(info_row, collected_at)]) if info_row
     rows
   end
 
@@ -39,10 +62,15 @@ class Collector
 
     {
       collected_at: collected_at,
+      dbid: stats_row.fetch("dbid", 0).to_i,
+      userid: stats_row.fetch("userid", 0).to_i,
+      toplevel: toplevel_value(stats_row.fetch("toplevel", nil)),
+      queryid: queryid,
       fingerprint: queryid,
       source_file: presence(parsed[:source_file]),
       sample_query: sample_query,
       total_exec_count: stats_row.fetch("calls").to_i,
+      total_exec_time_ms: stats_row.fetch("total_exec_time", 0).to_f,
       mean_exec_time_ms: stats_row.fetch("mean_exec_time").to_f,
       # pg_stat_statements.rows reports rows returned or affected, not rows visited.
       rows_returned_or_affected: stats_row.fetch("rows", 0).to_i,
@@ -54,6 +82,14 @@ class Collector
       temp_blks_written: stat_value(stats_row, "temp_blks_written"),
       total_block_accesses: total_block_accesses(stats_row),
       mean_block_accesses_per_call: mean_block_accesses_per_call(stats_row)
+    }
+  end
+
+  def build_state_row(info_row, collected_at)
+    {
+      collected_at: collected_at,
+      dealloc: info_row.fetch("dealloc").to_i,
+      stats_reset: info_row.fetch("stats_reset")
     }
   end
 
@@ -78,5 +114,9 @@ class Collector
 
   def presence(value)
     value unless value.to_s.empty?
+  end
+
+  def toplevel_value(value)
+    value == true || value.to_s == "t"
   end
 end
