@@ -21,21 +21,31 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_match(/stats_reset\s+DateTime/, sql)
   end
 
-  def test_query_intervals_capture_reset_aware_deltas
+  def test_query_intervals_is_a_view_over_raw_snapshots
     sql = read_sql("003_query_intervals.sql")
 
+    assert_match(/CREATE VIEW query_intervals AS/, sql)
     assert_includes sql, "interval_started_at"
     assert_includes sql, "interval_ended_at"
     assert_includes sql, "interval_duration_ms"
     assert_includes sql, "lagInFrame(total_exec_count)"
   end
 
-  def test_findings_view_aggregates_from_query_intervals
-    sql = read_sql("005_top_offenders_mv.sql")
+  def test_reset_sql_rebuilds_raw_state_and_interval_objects
+    sql = read_sql("004_reset_query_analytics.sql")
 
-    assert_match(/FROM query_intervals/, sql)
-    assert_match(/GROUP BY fingerprint/, sql)
-    assert_includes sql, "quantileState(0.95)(delta_exec_time_ms)"
+    assert_includes sql, "DROP VIEW IF EXISTS query_intervals"
+    assert_includes sql, "DROP TABLE IF EXISTS collector_state"
+    assert_includes sql, "DROP TABLE IF EXISTS query_events"
+    assert_includes sql, "CREATE TABLE query_events"
+    assert_includes sql, "CREATE TABLE collector_state"
+    assert_includes sql, "CREATE VIEW query_intervals"
+  end
+
+  def test_stale_aggregate_layer_files_are_removed
+    refute File.exist?(File.expand_path("../../db/clickhouse/004_query_fingerprints.sql", __dir__))
+    refute File.exist?(File.expand_path("../../db/clickhouse/005_top_offenders_mv.sql", __dir__))
+    refute File.exist?(File.expand_path("../../db/clickhouse/006_reset_query_analytics.sql", __dir__))
   end
 
   private
