@@ -28,7 +28,7 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_includes sql, "interval_started_at"
     assert_includes sql, "interval_ended_at"
     assert_includes sql, "interval_duration_ms"
-    assert_includes sql, "lagInFrame(total_exec_count)"
+    assert_includes sql, "lagInFrame(e.total_exec_count)"
   end
 
   def test_query_intervals_casts_delta_columns_to_clickhouse_24_compatible_types
