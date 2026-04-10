@@ -31,6 +31,13 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_includes sql, "lagInFrame(total_exec_count)"
   end
 
+  def test_query_intervals_casts_delta_columns_to_clickhouse_24_compatible_types
+    sql = read_sql("003_query_intervals.sql")
+
+    assert_includes sql, "CAST(total_exec_time_ms - previous_total_exec_time_ms AS Float64)"
+    assert_includes sql, "CAST(shared_blks_hit - previous_shared_blks_hit AS Int64)"
+  end
+
   def test_reset_sql_rebuilds_raw_state_and_interval_objects
     sql = read_sql("004_reset_query_analytics.sql")
 

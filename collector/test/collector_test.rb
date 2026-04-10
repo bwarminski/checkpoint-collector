@@ -105,7 +105,10 @@ class CollectorTest < Minitest::Test
         sample_query: sample_query,
         total_exec_count: 7,
         total_exec_time_ms: 0.0,
+        min_exec_time_ms: 0.0,
+        max_exec_time_ms: 0.0,
         mean_exec_time_ms: 12.5,
+        stddev_exec_time_ms: 0.0,
         rows_returned_or_affected: 0,
         shared_blks_hit: 0,
         shared_blks_read: 0,
@@ -178,6 +181,33 @@ class CollectorTest < Minitest::Test
     row = collector.run_once.first
 
     refute row.key?(:mean_block_accesses_per_call)
+  end
+
+  def test_run_once_emits_exec_shape_columns_defined_by_query_events_schema
+    stats_connection = StatsConnection.new([
+      {
+        "dbid" => "5",
+        "userid" => "9",
+        "toplevel" => "t",
+        "queryid" => "42",
+        "calls" => "7",
+        "total_exec_time" => "125.5",
+        "min_exec_time" => "10.0",
+        "max_exec_time" => "30.0",
+        "mean_exec_time" => "17.9",
+        "stddev_exec_time" => "8.4"
+      }
+    ])
+
+    row = Collector.new(
+      stats_connection: stats_connection,
+      clock: -> { Time.utc(2026, 4, 9, 12, 5, 0) }
+    ).run_once.first
+
+    assert_equal 10.0, row[:min_exec_time_ms]
+    assert_equal 30.0, row[:max_exec_time_ms]
+    assert_equal 17.9, row[:mean_exec_time_ms]
+    assert_equal 8.4, row[:stddev_exec_time_ms]
   end
 
   def test_uses_only_the_rails_metadata_block_when_query_has_multiple_comments
