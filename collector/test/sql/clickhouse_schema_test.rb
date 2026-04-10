@@ -1,5 +1,5 @@
-# ABOUTME: Verifies the ClickHouse schema files for the query collector.
-# ABOUTME: Guards the materialized view definition against embedding ORDER BY.
+# ABOUTME: Verifies the ClickHouse schema files for raw query, state, and interval data.
+# ABOUTME: Ensures reset SQL matches canonical raw tables and interval view definitions.
 require "minitest/autorun"
 
 class ClickhouseSchemaTest < Minitest::Test
@@ -42,6 +42,27 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_includes sql, "CREATE VIEW query_intervals"
   end
 
+  def test_reset_sql_matches_query_events_definition
+    canonical_sql = strip_header(read_sql("001_query_events.sql"))
+    reset_sql = strip_header(read_sql("004_reset_query_analytics.sql"))
+
+    assert_includes reset_sql, canonical_sql
+  end
+
+  def test_reset_sql_matches_collector_state_definition
+    canonical_sql = strip_header(read_sql("002_collector_state.sql"))
+    reset_sql = strip_header(read_sql("004_reset_query_analytics.sql"))
+
+    assert_includes reset_sql, canonical_sql
+  end
+
+  def test_reset_sql_matches_query_intervals_definition
+    canonical_sql = strip_header(read_sql("003_query_intervals.sql"))
+    reset_sql = strip_header(read_sql("004_reset_query_analytics.sql"))
+
+    assert_includes reset_sql, canonical_sql
+  end
+
   def test_stale_aggregate_layer_files_are_removed
     refute File.exist?(File.expand_path("../../db/clickhouse/004_query_fingerprints.sql", __dir__))
     refute File.exist?(File.expand_path("../../db/clickhouse/005_top_offenders_mv.sql", __dir__))
@@ -52,5 +73,9 @@ class ClickhouseSchemaTest < Minitest::Test
 
   def read_sql(name)
     File.read(File.expand_path("../../db/clickhouse/#{name}", __dir__))
+  end
+
+  def strip_header(sql)
+    sql.sub(/\A(?:--.*\n)+/, "")
   end
 end
