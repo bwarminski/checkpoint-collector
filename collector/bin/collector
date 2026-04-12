@@ -7,25 +7,120 @@ require_relative "../lib/log_ingester"
 require_relative "../lib/scheduler"
 require "pg"
 
-interval_seconds = Integer(ENV.fetch("COLLECTOR_INTERVAL_SECONDS", "5"))
+class LogStateStore
+  def initialize
+    @state = {}
+  end
 
-Scheduler.new(
-  interval_seconds: interval_seconds,
-  clock: -> { Time.now.utc },
-  sleep_until: lambda { |time|
-    seconds = time - Time.now.utc
-    sleep(seconds) if seconds.positive?
-  },
-  stderr: $stderr,
-  run_once: lambda {
-    stats_connection = PG.connect(ENV.fetch("POSTGRES_URL"))
-    clickhouse_connection = ClickhouseConnection.new(base_url: ENV.fetch("CLICKHOUSE_URL"))
+  def load(log_file)
+    @state[log_file]
+  end
 
-    Collector.new(
+  def save(log_file, byte_offset:, file_size_at_last_read:, collected_at:)
+    @state[log_file] = {
+      byte_offset: byte_offset,
+      file_size_at_last_read: file_size_at_last_read,
+      collected_at: collected_at
+    }
+  end
+end
+
+class CollectorRuntime
+  DEFAULT_LOG_FILE = "/var/log/postgresql/postgresql.json".freeze
+
+  def initialize(
+    interval_seconds:,
+    postgres_url:,
+    clickhouse_url:,
+    log_file: DEFAULT_LOG_FILE,
+    clock: -> { Time.now.utc },
+    sleep_until: nil,
+    stderr: $stderr,
+    pg: PG,
+    scheduler_class: Scheduler,
+    collector_class: Collector,
+    log_ingester_class: LogIngester,
+    clickhouse_connection_class: ClickhouseConnection,
+    state_store: LogStateStore.new,
+    log_reader: nil
+  )
+    @interval_seconds = interval_seconds
+    @postgres_url = postgres_url
+    @clickhouse_url = clickhouse_url
+    @log_file = log_file
+    @clock = clock
+    @sleep_until = sleep_until || default_sleep_until
+    @stderr = stderr
+    @pg = pg
+    @scheduler_class = scheduler_class
+    @collector_class = collector_class
+    @log_ingester_class = log_ingester_class
+    @clickhouse_connection_class = clickhouse_connection_class
+    @state_store = state_store
+    @log_reader = log_reader || default_log_reader
+  end
+
+  def run_forever
+    scheduler.run_forever
+  end
+
+  def run_once_pass
+    stats_connection = @pg.connect(@postgres_url)
+    clickhouse_connection = @clickhouse_connection_class.new(base_url: @clickhouse_url)
+
+    @log_ingester_class.new(
+      log_reader: @log_reader,
+      clickhouse_connection: clickhouse_connection,
+      state_store: @state_store,
+      clock: @clock,
+      stderr: @stderr
+    ).ingest_file(@log_file)
+
+    @collector_class.new(
       stats_connection: stats_connection,
-      clickhouse_connection: clickhouse_connection
+      clickhouse_connection: clickhouse_connection,
+      clock: @clock
     ).run_once
   ensure
     stats_connection&.close
-  }
-).run_forever
+  end
+
+  private
+
+  def scheduler
+    @scheduler_class.new(
+      interval_seconds: @interval_seconds,
+      clock: @clock,
+      sleep_until: @sleep_until,
+      stderr: @stderr,
+      run_once: -> { run_once_pass }
+    )
+  end
+
+  def default_sleep_until
+    lambda do |time|
+      seconds = time - Time.now.utc
+      sleep(seconds) if seconds.positive?
+    end
+  end
+
+  def default_log_reader
+    lambda do |log_file, byte_offset|
+      File.open(log_file, "rb") do |file|
+        file.seek(byte_offset)
+        file.read.to_s
+      end
+    rescue Errno::ENOENT
+      ""
+    end
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  CollectorRuntime.new(
+    interval_seconds: Integer(ENV.fetch("COLLECTOR_INTERVAL_SECONDS", "5")),
+    postgres_url: ENV.fetch("POSTGRES_URL"),
+    clickhouse_url: ENV.fetch("CLICKHOUSE_URL"),
+    log_file: ENV.fetch("POSTGRES_LOG_PATH", CollectorRuntime::DEFAULT_LOG_FILE)
+  ).run_forever
+end
