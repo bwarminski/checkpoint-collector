@@ -69,7 +69,7 @@ class LogIngesterTest < Minitest::Test
     assert_equal(
       {
         byte_offset: 0,
-        file_size_at_last_read: 0,
+        file_size_at_last_read: 55,
         collected_at: Time.utc(2026, 4, 12, 12, 0, 3)
       },
       state_store.state_for("postgresql.json")
@@ -125,18 +125,38 @@ class LogIngesterTest < Minitest::Test
       {"timestamp":"2026-04-12 12:00:02.000 UTC","query_id":2,"statement":"SELECT 2"}
     LOG
     clickhouse = FakeClickhouseConnection.new
+    state_store = FakeStateStore.new
     stderr = StringIO.new
 
-    LogIngester.new(
-      log_reader: ->(*) { log_lines },
+    reads_by_offset = {
+      0 => log_lines,
+      log_lines.bytesize => "{\"timestamp\":\"2026-04-12 12:00:03.000 UTC\",\"query_id\":3,\"statement\":\"SELECT 3\"}\n"
+    }
+    observed_offsets = []
+
+    ingester = LogIngester.new(
+      log_reader: lambda do |_, byte_offset|
+        observed_offsets << byte_offset
+        reads_by_offset.fetch(byte_offset, "")
+      end,
       clickhouse_connection: clickhouse,
-      state_store: FakeStateStore.new,
+      state_store: state_store,
       stderr: stderr
-    ).ingest_file("postgresql.json")
+    )
+
+    ingester.ingest_file("postgresql.json")
 
     assert_equal %w[1 2], clickhouse.rows.map { |row| row.fetch(:query_id) }
     assert_includes stderr.string, "Skipping malformed log line"
     assert_includes stderr.string, "postgresql.json"
+    assert_equal log_lines.bytesize, state_store.state_for("postgresql.json").fetch(:byte_offset)
+    assert_equal log_lines.bytesize, state_store.state_for("postgresql.json").fetch(:file_size_at_last_read)
+    assert_instance_of Time, state_store.state_for("postgresql.json").fetch(:collected_at)
+
+    ingester.ingest_file("postgresql.json")
+
+    assert_equal [0, log_lines.bytesize], observed_offsets
+    assert_equal ["3"], clickhouse.rows.map { |row| row.fetch(:query_id) }
   end
 
   def test_skips_lines_with_bad_timestamps_and_keeps_ingesting_later_lines
@@ -145,18 +165,37 @@ class LogIngesterTest < Minitest::Test
       {"timestamp":"2026-04-12 12:00:02.000 UTC","query_id":2,"statement":"SELECT 2"}
     LOG
     clickhouse = FakeClickhouseConnection.new
+    state_store = FakeStateStore.new
     stderr = StringIO.new
 
-    LogIngester.new(
-      log_reader: ->(*) { log_lines },
+    reads_by_offset = {
+      0 => log_lines,
+      log_lines.bytesize => "{\"timestamp\":\"2026-04-12 12:00:03.000 UTC\",\"query_id\":3,\"statement\":\"SELECT 3\"}\n"
+    }
+    observed_offsets = []
+
+    ingester = LogIngester.new(
+      log_reader: lambda do |_, byte_offset|
+        observed_offsets << byte_offset
+        reads_by_offset.fetch(byte_offset, "")
+      end,
       clickhouse_connection: clickhouse,
-      state_store: FakeStateStore.new,
+      state_store: state_store,
       stderr: stderr
-    ).ingest_file("postgresql.json")
+    )
+
+    ingester.ingest_file("postgresql.json")
 
     assert_equal ["2"], clickhouse.rows.map { |row| row.fetch(:query_id) }
     assert_includes stderr.string, "Skipping malformed log line"
     assert_includes stderr.string, "not-a-time"
+    assert_equal log_lines.bytesize, state_store.state_for("postgresql.json").fetch(:byte_offset)
+    assert_equal log_lines.bytesize, state_store.state_for("postgresql.json").fetch(:file_size_at_last_read)
+
+    ingester.ingest_file("postgresql.json")
+
+    assert_equal [0, log_lines.bytesize], observed_offsets
+    assert_equal ["3"], clickhouse.rows.map { |row| row.fetch(:query_id) }
   end
 
   def test_stringifies_large_numeric_query_ids

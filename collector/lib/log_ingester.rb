@@ -32,10 +32,11 @@ class LogIngester
     @clickhouse_connection.insert("postgres_logs", rows) unless rows.empty?
 
     collected_at = @clock.call
+    file_size_at_last_read = read_offset + chunk.bytesize
     @state_store.save(
       log_file,
       byte_offset: next_offset,
-      file_size_at_last_read: next_offset,
+      file_size_at_last_read: file_size_at_last_read,
       collected_at: collected_at
     )
   end
