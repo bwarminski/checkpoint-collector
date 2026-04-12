@@ -48,6 +48,24 @@ class SchedulerTest < Minitest::Test
     ], starts
   end
 
+  def test_scheduler_waits_for_next_boundary_when_time_is_just_past_slot
+    fake_clock = FakeClock.new(Time.utc(2026, 4, 12, 12, 0, 5, 500_000))
+    slept_until = []
+
+    Scheduler.new(
+      interval_seconds: 5,
+      clock: -> { fake_clock.now },
+      sleep_until: ->(time) do
+        slept_until << time
+        fake_clock.travel_to(time)
+      end,
+      stderr: StringIO.new,
+      run_once: -> {}
+    ).run_iterations(1)
+
+    assert_equal [Time.utc(2026, 4, 12, 12, 0, 10)], slept_until
+  end
+
   def test_scheduler_logs_and_continues_after_exception
     stderr = StringIO.new
     fake_clock = FakeClock.new(Time.utc(2026, 4, 12, 12, 0, 0))

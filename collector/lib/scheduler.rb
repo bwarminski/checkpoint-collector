@@ -33,7 +33,7 @@ class Scheduler
   end
 
   def next_boundary(time)
-    seconds = time.to_i
+    seconds = time.to_r
     remainder = seconds % @interval_seconds
     return time if remainder.zero?
 
