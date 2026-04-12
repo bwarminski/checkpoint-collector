@@ -57,8 +57,12 @@ class ClickhouseLogStateStore
   private
 
   def build_uri(query)
-    uri = URI.parse("#{@base_url}/")
-    uri.query = URI.encode_www_form(query: query)
+    uri = URI.parse(@base_url)
+    uri.path = "/" if uri.path.nil? || uri.path.empty?
+    params = URI.decode_www_form(uri.query.to_s)
+    params.reject! { |key, _| key == "query" }
+    params << ["query", query]
+    uri.query = URI.encode_www_form(params)
     uri
   end
 

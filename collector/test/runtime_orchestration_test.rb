@@ -86,9 +86,31 @@ class RuntimeOrchestrationTest < Minitest::Test
     assert_equal [0, log_line.bytesize], observed_offsets
   end
 
+  def test_runtime_preserves_existing_clickhouse_url_query_params_for_state_requests
+    events = []
+    clickhouse_service = FakeClickhouseService.new(events: events)
+    log_line = "{\"timestamp\":\"2026-04-12 12:00:00.000 UTC\",\"query_id\":7,\"statement\":\"SELECT 1\"}\n"
+
+    runtime = build_runtime(
+      events: events,
+      clickhouse_service: clickhouse_service,
+      observed_offsets: [],
+      stats_connections: [],
+      clickhouse_connections: [],
+      clickhouse_url: "http://clickhouse:8123?database=checkpoint_demo",
+      log_reader: lambda do |_, byte_offset|
+        byte_offset.zero? ? log_line : ""
+      end,
+    )
+
+    runtime.run_once_pass
+
+    assert_equal ["checkpoint_demo", "checkpoint_demo"], clickhouse_service.database_params
+  end
+
   private
 
-  def build_runtime(events:, clickhouse_service:, observed_offsets:, stats_connections:, clickhouse_connections:, log_reader:)
+  def build_runtime(events:, clickhouse_service:, observed_offsets:, stats_connections:, clickhouse_connections:, log_reader:, clickhouse_url: "http://clickhouse:8123")
     pg = FakePg.new do |url|
       connection = StatsConnection.new(
         id: stats_connections.length + 1,
@@ -116,7 +138,7 @@ class RuntimeOrchestrationTest < Minitest::Test
     CollectorRuntime.new(
       interval_seconds: 5,
       postgres_url: "postgresql://postgres:postgres@postgres:5432/checkpoint_demo",
-      clickhouse_url: "http://clickhouse:8123",
+      clickhouse_url: clickhouse_url,
       log_file: "postgresql.json",
       clock: -> { Time.utc(2026, 4, 12, 12, 0, 5) },
       sleep_until: ->(*) {},
@@ -175,13 +197,18 @@ class RuntimeOrchestrationTest < Minitest::Test
   end
 
   class FakeClickhouseService
+    attr_reader :database_params
+
     def initialize(events:)
       @events = events
       @state = {}
+      @database_params = []
     end
 
     def call(uri, request)
-      query = URI.decode_www_form(uri.query.to_s).to_h.fetch("query")
+      params = URI.decode_www_form(uri.query.to_s).to_h
+      @database_params << params["database"]
+      query = params.fetch("query")
 
       if query.include?("SELECT byte_offset")
         log_file = query[/WHERE log_file = '([^']+)'/, 1]
