@@ -38,7 +38,7 @@ class ClickhouseIntervalViewTest < Minitest::Test
   end
 
   def test_first_snapshot_emits_no_interval_row
-    insert_event(collected_at: "2026-04-10 12:00:00.000", queryid: "q1", total_exec_count: 10, total_exec_time_ms: 100.0)
+    insert_event(collected_at: "2026-04-10 12:00:00.000", queryid: "q1", statement_text: "SELECT 1", total_exec_count: 10, total_exec_time_ms: 100.0)
     insert_state(collected_at: "2026-04-10 12:00:00.000", stats_reset: "2026-04-10 11:00:00")
 
     assert_equal [], query_intervals("q1")
