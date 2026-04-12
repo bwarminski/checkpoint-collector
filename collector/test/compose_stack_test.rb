@@ -55,7 +55,7 @@ class ComposeStackTest < Minitest::Test
   def test_postgres_runtime_command_enables_json_logging_on_every_start
     compose = File.read(File.expand_path("../../docker-compose.yml", __dir__))
 
-    assert_includes compose, 'command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "compute_query_id=on", "-c", "logging_collector=on", "-c", "log_destination=jsonlog", "-c", "log_directory=/var/log/postgresql", "-c", "log_filename=postgresql.json", "-c", "log_min_duration_statement=0"]'
+    assert_includes compose, 'command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "compute_query_id=on", "-c", "logging_collector=on", "-c", "log_destination=jsonlog", "-c", "log_directory=/var/log/postgresql", "-c", "log_filename=postgresql", "-c", "log_min_duration_statement=0"]'
   end
 
   def test_collector_mounts_only_postgres_log_volume

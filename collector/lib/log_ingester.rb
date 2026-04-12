@@ -70,7 +70,9 @@ class LogIngester
     query_id = payload["query_id"]
     return nil if query_id.nil?
 
-    statement_text = payload["statement"]
+    statement_text = extract_statement_text(payload)
+    return nil if statement_text.nil?
+
     parsed = QueryCommentParser.parse_from_query(statement_text)
 
     {
@@ -84,6 +86,15 @@ class LogIngester
       source_location: parsed[:source_file],
       raw_json: raw_json
     }
+  end
+
+  def extract_statement_text(payload)
+    statement_text = payload["statement"]
+    return statement_text unless statement_text.nil?
+
+    message = payload["message"].to_s
+    match = message.match(/ statement: (?<statement>.+)\z/m)
+    match && match[:statement]
   end
 
   def log_malformed_line(log_file, byte_offset, raw_json, error)

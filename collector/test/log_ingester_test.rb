@@ -90,6 +90,42 @@ class LogIngesterTest < Minitest::Test
     )
   end
 
+  def test_extracts_statement_text_from_real_postgres_jsonlog_message
+    io = StringIO.new(<<~LOG)
+      {"timestamp":"2026-04-12 19:27:25.329 UTC","user":"postgres","dbname":"checkpoint_demo","pid":135,"remote_host":"[local]","session_id":"69dbf21d.87","line_num":1,"ps":"SELECT","session_start":"2026-04-12 19:27:25 UTC","vxid":"3/0","txid":0,"error_severity":"LOG","message":"duration: 0.698 ms  statement: SELECT count(*) FROM todos /*source_location:/app/models/todo.rb:42*/;","application_name":"psql","backend_type":"client backend","query_id":-905623181446367861}
+    LOG
+    clickhouse = FakeClickhouseConnection.new
+
+    LogIngester.new(
+      log_reader: ->(*) { io.read.to_s },
+      clickhouse_connection: clickhouse,
+      state_store: FakeStateStore.new
+    ).ingest_file("postgresql.json")
+
+    row = clickhouse.rows.fetch(0)
+
+    assert_equal "-905623181446367861", row[:query_id]
+    assert_equal "SELECT count(*) FROM todos /*source_location:/app/models/todo.rb:42*/;", row[:statement_text]
+    assert_equal "/app/models/todo.rb:42", row[:source_location]
+    assert_equal "checkpoint_demo", row[:database]
+  end
+
+  def test_ignores_non_statement_jsonlog_entries_even_when_query_id_is_present
+    io = StringIO.new(<<~LOG)
+      {"timestamp":"2026-04-12 19:26:10.033 UTC","pid":1,"session_id":"69dbf1d1.1","line_num":6,"session_start":"2026-04-12 19:26:09 UTC","txid":0,"error_severity":"LOG","message":"database system is ready to accept connections","backend_type":"postmaster","query_id":0}
+    LOG
+    clickhouse = FakeClickhouseConnection.new
+
+    LogIngester.new(
+      log_reader: ->(*) { io.read.to_s },
+      clickhouse_connection: clickhouse,
+      state_store: FakeStateStore.new
+    ).ingest_file("postgresql.json")
+
+    assert_nil clickhouse.table
+    assert_nil clickhouse.rows
+  end
+
   def test_restart_rereads_unfinished_trailing_line_from_last_complete_offset
     first_state_store = FakeStateStore.new
 
