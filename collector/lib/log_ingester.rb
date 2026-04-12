@@ -5,21 +5,25 @@ require "time"
 require_relative "query_comment_parser"
 
 class LogIngester
-  COMMENT_BLOCK_PATTERN = %r{/\*.*?\*/}m
-  COMMENT_METADATA_MARKERS = %w[source_location: source_location=].freeze
-
-  def initialize(log_reader:, clickhouse_connection:, state_store:, clock: -> { Time.now.utc }, stderr: $stderr)
+  def initialize(log_reader:, clickhouse_connection:, state_store:, clock: -> { Time.now.utc }, stderr: $stderr, file_sizer: nil)
     @log_reader = log_reader
     @clickhouse_connection = clickhouse_connection
     @state_store = state_store
     @clock = clock
     @stderr = stderr
+    @file_sizer = file_sizer || ->(path) { File.size(path) rescue Float::INFINITY }
     @buffers = {}
   end
 
   def ingest_file(log_file)
     state = @state_store.load(log_file) || {}
     byte_offset = state.fetch(:byte_offset, 0)
+
+    if byte_offset > 0 && @file_sizer.call(log_file) < byte_offset
+      byte_offset = 0
+      @buffers[log_file] = ""
+    end
+
     buffered_prefix = @buffers.fetch(log_file, "")
     read_offset = byte_offset + buffered_prefix.bytesize
     chunk = @log_reader.call(log_file, read_offset).to_s
@@ -67,7 +71,7 @@ class LogIngester
     return nil if query_id.nil?
 
     statement_text = payload["statement"]
-    parsed = QueryCommentParser.parse(extract_comment(statement_text))
+    parsed = QueryCommentParser.parse_from_query(statement_text)
 
     {
       log_file: log_file,
@@ -77,19 +81,9 @@ class LogIngester
       statement_text: statement_text,
       database: payload["dbname"],
       session_id: payload["session_id"],
-      source_location: presence(parsed[:source_file]),
+      source_location: parsed[:source_file],
       raw_json: raw_json
     }
-  end
-
-  def extract_comment(statement_text)
-    statement_text.to_s.scan(COMMENT_BLOCK_PATTERN).find do |comment|
-      COMMENT_METADATA_MARKERS.any? { |marker| comment.include?(marker) }
-    end
-  end
-
-  def presence(value)
-    value unless value.to_s.empty?
   end
 
   def log_malformed_line(log_file, byte_offset, raw_json, error)

@@ -198,6 +198,38 @@ class LogIngesterTest < Minitest::Test
     assert_equal ["3"], clickhouse.rows.map { |row| row.fetch(:query_id) }
   end
 
+  def test_resets_offset_to_zero_when_file_shrinks_after_rotation
+    log_line_before = "{\"timestamp\":\"2026-04-12 12:00:00.000 UTC\",\"query_id\":1,\"statement\":\"SELECT 1\"}\n"
+    log_line_after  = "{\"timestamp\":\"2026-04-12 12:01:00.000 UTC\",\"query_id\":2,\"statement\":\"SELECT 2\"}\n"
+
+    state_store = FakeStateStore.new
+    # Simulate a previous ingestion run that left an offset at end of old file
+    state_store.save("postgresql.json",
+      byte_offset: log_line_before.bytesize,
+      file_size_at_last_read: log_line_before.bytesize,
+      collected_at: Time.utc(2026, 4, 12, 12, 0, 5))
+
+    observed_offsets = []
+    clickhouse = FakeClickhouseConnection.new
+
+    # File has rotated: new file is shorter than the saved byte_offset
+    ingester = LogIngester.new(
+      log_reader: lambda do |_, byte_offset|
+        observed_offsets << byte_offset
+        byte_offset.zero? ? log_line_after : ""
+      end,
+      clickhouse_connection: clickhouse,
+      state_store: state_store,
+      # Simulated file size: new file is shorter than the saved offset
+      file_sizer: ->(_) { log_line_before.bytesize - 10 }
+    )
+
+    ingester.ingest_file("postgresql.json")
+
+    assert_equal [0], observed_offsets, "should reset to offset 0 after rotation"
+    assert_equal ["2"], clickhouse.rows.map { |row| row.fetch(:query_id) }
+  end
+
   def test_stringifies_large_numeric_query_ids
     log_line = <<~LOG
       {"timestamp":"2026-04-12 12:00:00.000 UTC","query_id":9223372036854775807,"statement":"SELECT 1"}

@@ -28,8 +28,6 @@ class Collector
   SQL
   INFO_SQL = "SELECT dealloc, stats_reset FROM pg_stat_statements_info".freeze
   BLOCK_COUNTER_KEYS = %w[shared_blks_hit shared_blks_read local_blks_hit local_blks_read temp_blks_read temp_blks_written].freeze
-  COMMENT_BLOCK_PATTERN = %r{/\*.*?\*/}m
-  COMMENT_METADATA_MARKERS = %w[source_location: source_location=].freeze
 
   def initialize(stats_connection: nil, clickhouse_connection: nil, clock: -> { Time.now.utc })
     @stats_connection = stats_connection
@@ -65,7 +63,7 @@ class Collector
   def build_row(stats_row, collected_at)
     queryid = stats_row.fetch("queryid").to_s
     statement_text = stats_row.fetch("query", nil)
-    parsed = QueryCommentParser.parse(extract_comment(statement_text))
+    parsed = QueryCommentParser.parse_from_query(statement_text)
 
     {
       collected_at: collected_at,
@@ -74,7 +72,7 @@ class Collector
       toplevel: toplevel_value(stats_row.fetch("toplevel", nil)),
       queryid: queryid,
       statement_text: statement_text,
-      source_file: presence(parsed[:source_file]),
+      source_file: parsed[:source_file],
       total_exec_count: stats_row.fetch("calls").to_i,
       total_exec_time_ms: stats_row.fetch("total_exec_time", 0).to_f,
       min_exec_time_ms: stats_row.fetch("min_exec_time", 0).to_f,
@@ -116,16 +114,6 @@ class Collector
 
   def total_block_accesses(stats_row)
     BLOCK_COUNTER_KEYS.sum { |key| stat_value(stats_row, key) }
-  end
-
-  def extract_comment(sample_query)
-    sample_query.to_s.scan(COMMENT_BLOCK_PATTERN).find do |comment|
-      COMMENT_METADATA_MARKERS.any? { |marker| comment.include?(marker) }
-    end
-  end
-
-  def presence(value)
-    value unless value.to_s.empty?
   end
 
   def toplevel_value(value)
