@@ -5,5 +5,5 @@ CREATE TABLE IF NOT EXISTS postgres_log_state (
   byte_offset UInt64,
   file_size_at_last_read UInt64,
   collected_at DateTime64(3)
-) ENGINE = MergeTree
+) ENGINE = ReplacingMergeTree(collected_at)
 ORDER BY (log_file);

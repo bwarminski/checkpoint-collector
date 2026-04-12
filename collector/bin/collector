@@ -79,7 +79,7 @@ class ClickhouseLogStateStore
   end
 
   def perform_request(uri, request)
-    Net::HTTP.start(uri.host, uri.port) do |http|
+    Net::HTTP.start(uri.host, uri.port, open_timeout: 5, read_timeout: 10) do |http|
       http.request(request)
     end
   end
