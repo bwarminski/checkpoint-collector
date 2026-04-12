@@ -3,6 +3,7 @@
 # ABOUTME: Runs one collection pass per fixed interval with fresh service connections.
 require_relative "../lib/collector"
 require_relative "../lib/clickhouse_connection"
+require_relative "../lib/log_ingester"
 require_relative "../lib/scheduler"
 require "pg"
 

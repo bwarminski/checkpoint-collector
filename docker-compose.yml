@@ -13,6 +13,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     ports: ["5432:5432"]
 
   clickhouse:
@@ -39,3 +41,8 @@ services:
     environment:
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/checkpoint_demo
       CLICKHOUSE_URL: http://clickhouse:8123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data:ro
+
+volumes:
+  postgres_data:
