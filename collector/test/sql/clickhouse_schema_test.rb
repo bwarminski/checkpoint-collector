@@ -51,7 +51,7 @@ class ClickhouseSchemaTest < Minitest::Test
   def test_postgres_logs_schema_exists_with_raw_json_payload
     sql = read_sql("005_postgres_logs.sql")
 
-    assert_match(/CREATE TABLE postgres_logs/, sql)
+    assert_match(/CREATE TABLE IF NOT EXISTS postgres_logs/, sql)
     assert_match(/query_id\s+String/, sql)
     assert_match(/statement_text\s+Nullable\(String\)/, sql)
     assert_match(/raw_json\s+String/, sql)
@@ -62,7 +62,7 @@ class ClickhouseSchemaTest < Minitest::Test
   def test_postgres_log_state_schema_exists_with_resume_offsets
     sql = read_sql("006_postgres_log_state.sql")
 
-    assert_match(/CREATE TABLE postgres_log_state/, sql)
+    assert_match(/CREATE TABLE IF NOT EXISTS postgres_log_state/, sql)
     assert_match(/log_file\s+String/, sql)
     assert_match(/byte_offset\s+UInt64/, sql)
     assert_match(/file_size_at_last_read\s+UInt64/, sql)
@@ -79,8 +79,8 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_includes sql, "DROP TABLE IF EXISTS query_events"
     assert_includes sql, "CREATE TABLE query_events"
     assert_includes sql, "CREATE TABLE collector_state"
-    assert_includes sql, "CREATE TABLE postgres_logs"
-    assert_includes sql, "CREATE TABLE postgres_log_state"
+    assert_includes sql, "CREATE TABLE IF NOT EXISTS postgres_logs"
+    assert_includes sql, "CREATE TABLE IF NOT EXISTS postgres_log_state"
     assert_includes sql, "CREATE VIEW query_intervals"
   end
 

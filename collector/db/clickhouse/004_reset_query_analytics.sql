@@ -38,7 +38,7 @@ CREATE TABLE collector_state (
 ) ENGINE = MergeTree
 ORDER BY (collected_at);
 
-CREATE TABLE postgres_logs (
+CREATE TABLE IF NOT EXISTS postgres_logs (
   log_file String,
   byte_offset UInt64,
   log_timestamp DateTime64(3),
@@ -51,7 +51,7 @@ CREATE TABLE postgres_logs (
 ) ENGINE = ReplacingMergeTree
 ORDER BY (log_file, byte_offset);
 
-CREATE TABLE postgres_log_state (
+CREATE TABLE IF NOT EXISTS postgres_log_state (
   log_file String,
   byte_offset UInt64,
   file_size_at_last_read UInt64,

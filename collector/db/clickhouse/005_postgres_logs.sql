@@ -1,6 +1,6 @@
 -- ABOUTME: Creates the raw Postgres JSON log table for collector ingestion.
 -- ABOUTME: Stores statement text, source metadata, and raw payloads by file offset.
-CREATE TABLE postgres_logs (
+CREATE TABLE IF NOT EXISTS postgres_logs (
   log_file String,
   byte_offset UInt64,
   log_timestamp DateTime64(3),
