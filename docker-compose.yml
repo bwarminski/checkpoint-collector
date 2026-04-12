@@ -30,7 +30,7 @@ services:
   collector:
     build:
       context: ./collector
-    command: ["bash", "-lc", "while true; do bundle exec ruby bin/collector; sleep ${COLLECTOR_INTERVAL_SECONDS:-5}; done"]
+    command: ["bundle", "exec", "ruby", "bin/collector"]
     depends_on:
       postgres:
         condition: service_healthy

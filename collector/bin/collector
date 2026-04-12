@@ -1,14 +1,30 @@
 #!/usr/bin/env ruby
 # ABOUTME: Provides the executable entry point for the Postgres stats collector.
-# ABOUTME: Connects the collector to Postgres and ClickHouse for one polling pass.
+# ABOUTME: Runs one collection pass per fixed interval with fresh service connections.
 require_relative "../lib/collector"
 require_relative "../lib/clickhouse_connection"
+require_relative "../lib/scheduler"
 require "pg"
 
-stats_connection = PG.connect(ENV.fetch("POSTGRES_URL"))
-clickhouse_connection = ClickhouseConnection.new(base_url: ENV.fetch("CLICKHOUSE_URL"))
+interval_seconds = Integer(ENV.fetch("COLLECTOR_INTERVAL_SECONDS", "5"))
 
-Collector.new(
-  stats_connection: stats_connection,
-  clickhouse_connection: clickhouse_connection
-).run_once
+Scheduler.new(
+  interval_seconds: interval_seconds,
+  clock: -> { Time.now.utc },
+  sleep_until: lambda { |time|
+    seconds = time - Time.now.utc
+    sleep(seconds) if seconds.positive?
+  },
+  stderr: $stderr,
+  run_once: lambda {
+    stats_connection = PG.connect(ENV.fetch("POSTGRES_URL"))
+    clickhouse_connection = ClickhouseConnection.new(base_url: ENV.fetch("CLICKHOUSE_URL"))
+
+    Collector.new(
+      stats_connection: stats_connection,
+      clickhouse_connection: clickhouse_connection
+    ).run_once
+  ensure
+    stats_connection&.close
+  }
+).run_forever
