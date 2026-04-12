@@ -4,7 +4,7 @@ services:
   postgres:
     build:
       context: ./postgres
-    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "compute_query_id=on", "-c", "logging_collector=on", "-c", "log_destination=jsonlog", "-c", "log_directory=/var/log/postgresql", "-c", "log_filename=postgresql.json", "-c", "log_min_duration_statement=0"]
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: checkpoint_demo
@@ -15,6 +15,7 @@ services:
       retries: 12
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - postgres_logs:/var/log/postgresql
     ports: ["5432:5432"]
 
   clickhouse:
@@ -42,7 +43,8 @@ services:
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/checkpoint_demo
       CLICKHOUSE_URL: http://clickhouse:8123
     volumes:
-      - postgres_data:/var/lib/postgresql/data:ro
+      - postgres_logs:/var/log/postgresql:ro
 
 volumes:
   postgres_data:
+  postgres_logs:

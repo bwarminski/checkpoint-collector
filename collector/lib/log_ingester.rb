@@ -8,28 +8,29 @@ class LogIngester
   COMMENT_BLOCK_PATTERN = %r{/\*.*?\*/}m
   COMMENT_METADATA_MARKERS = %w[source_location: source_location=].freeze
 
-  def initialize(log_reader:, clickhouse_connection:, state_store:, clock: -> { Time.now.utc })
+  def initialize(log_reader:, clickhouse_connection:, state_store:, clock: -> { Time.now.utc }, stderr: $stderr)
     @log_reader = log_reader
     @clickhouse_connection = clickhouse_connection
     @state_store = state_store
     @clock = clock
+    @stderr = stderr
     @buffers = {}
   end
 
   def ingest_file(log_file)
     state = @state_store.load(log_file) || {}
     byte_offset = state.fetch(:byte_offset, 0)
-    chunk = @log_reader.call(log_file, byte_offset).to_s
+    buffered_prefix = @buffers.fetch(log_file, "")
+    read_offset = byte_offset + buffered_prefix.bytesize
+    chunk = @log_reader.call(log_file, read_offset).to_s
     return if chunk.empty?
 
-    buffered_prefix = @buffers.fetch(log_file, "")
     combined = buffered_prefix + chunk
-    rows, trailing_fragment = build_rows(log_file, byte_offset - buffered_prefix.bytesize, combined)
+    rows, trailing_fragment, next_offset = build_rows(log_file, byte_offset, combined)
     @buffers[log_file] = trailing_fragment
 
     @clickhouse_connection.insert("postgres_logs", rows) unless rows.empty?
 
-    next_offset = byte_offset + chunk.bytesize
     collected_at = @clock.call
     @state_store.save(
       log_file,
@@ -50,10 +51,13 @@ class LogIngester
     lines.each do |line|
       row = build_row(log_file, current_offset, line)
       rows << row if row
+    rescue JSON::ParserError, KeyError, ArgumentError, TypeError => error
+      log_malformed_line(log_file, current_offset, line, error)
+    ensure
       current_offset += line.bytesize + 1
     end
 
-    [rows, trailing_fragment]
+    [rows, trailing_fragment, current_offset]
   end
 
   def build_row(log_file, byte_offset, raw_json)
@@ -85,5 +89,11 @@ class LogIngester
 
   def presence(value)
     value unless value.to_s.empty?
+  end
+
+  def log_malformed_line(log_file, byte_offset, raw_json, error)
+    @stderr.puts(
+      "Skipping malformed log line in #{log_file} at byte #{byte_offset}: #{error.message}; raw=#{raw_json}"
+    )
   end
 end
