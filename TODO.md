@@ -1,3 +1,3 @@
 # TODO
 
-- [ ] Build a project-scoped `/qa` skill for this repo. The gstack `/qa` skill is web-browser-only. This project needs a Ruby-native QA workflow: run the full test suite, check schema SQL files against the running ClickHouse container, and verify the compose stack starts clean. Scope: unit tests + schema smoke + compose up/down. Model after gstack's tier system (quick = unit tests only, standard = + schema smoke, exhaustive = + full compose cycle).
+- Split PostgreSQL log ingestion into a separate pipeline. The current collector only reads the active `POSTGRES_LOG_PATH` file and resets to byte `0` when that file shrinks, so it does not recover unread history from older rotated log files after downtime. This is acceptable for the demo, but not for durable ingestion.
