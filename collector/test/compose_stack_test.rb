@@ -28,6 +28,13 @@ class ComposeStackTest < Minitest::Test
     refute_includes compose, "REDPANDA_BROKERS"
   end
 
+  def test_collector_runs_direct_scheduler_command
+    compose = File.read(File.expand_path("../../docker-compose.yml", __dir__))
+
+    assert_includes compose, 'command: ["bundle", "exec", "ruby", "bin/collector"]'
+    refute_includes compose, 'command: ["bash", "-lc", "while true; do bundle exec ruby bin/collector; sleep ${COLLECTOR_INTERVAL_SECONDS:-5}; done"]'
+  end
+
   def test_collector_image_no_longer_installs_redpanda_native_dependencies
     dockerfile = File.read(File.expand_path("../Dockerfile", __dir__))
 

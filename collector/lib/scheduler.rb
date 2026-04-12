@@ -29,7 +29,7 @@ class Scheduler
     @sleep_until.call(scheduled_time) if scheduled_time > current_time
     @run_once.call
   rescue StandardError => error
-    @stderr.puts(error.message)
+    @stderr.puts("#{error.class}: #{error.message}")
   end
 
   def next_boundary(time)
