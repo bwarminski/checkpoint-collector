@@ -28,10 +28,7 @@ class SchedulerTest < Minitest::Test
   def test_scheduler_skips_multiple_missed_boundaries_after_overrun
     starts = []
     slept_until = []
-    fake_clock = FakeClock.new(
-      Time.utc(2026, 4, 12, 12, 0, 0),
-      Time.utc(2026, 4, 12, 12, 0, 17),
-    )
+    fake_clock = FakeClock.new(Time.utc(2026, 4, 12, 12, 0, 0))
 
     Scheduler.new(
       interval_seconds: 5,
@@ -43,6 +40,7 @@ class SchedulerTest < Minitest::Test
       stderr: StringIO.new,
       run_once: lambda {
         starts << fake_clock.current_time
+        fake_clock.travel_to(Time.utc(2026, 4, 12, 12, 0, 17)) if starts.length == 1
       }
     ).run_iterations(2)
 
@@ -74,20 +72,22 @@ class SchedulerTest < Minitest::Test
   def test_scheduler_logs_and_continues_after_exception
     stderr = StringIO.new
     starts = []
-    fake_clock = FakeClock.new(
-      Time.utc(2026, 4, 12, 12, 0, 0),
-      Time.utc(2026, 4, 12, 12, 0, 5),
-    )
+    slept_until = []
+    fake_clock = FakeClock.new(Time.utc(2026, 4, 12, 12, 0, 0))
     attempts = 0
 
     Scheduler.new(
       interval_seconds: 5,
       clock: -> { fake_clock.now },
-      sleep_until: ->(time) { fake_clock.travel_to(time) },
+      sleep_until: ->(time) do
+        slept_until << time
+        fake_clock.travel_to(time)
+      end,
       stderr: stderr,
       run_once: lambda {
         starts << fake_clock.current_time
         attempts += 1
+        fake_clock.advance_by(1) if attempts == 1
         raise "boom" if attempts == 1
       }
     ).run_iterations(2)
@@ -95,6 +95,7 @@ class SchedulerTest < Minitest::Test
     assert_includes stderr.string, "RuntimeError"
     assert_includes stderr.string, "boom"
     assert_equal 2, attempts
+    assert_equal [Time.utc(2026, 4, 12, 12, 0, 5)], slept_until
     assert_equal [
       Time.utc(2026, 4, 12, 12, 0, 0),
       Time.utc(2026, 4, 12, 12, 0, 5),
@@ -102,20 +103,20 @@ class SchedulerTest < Minitest::Test
   end
 
   class FakeClock
-    def initialize(*times)
-      @times = times.dup
-      @current_time = @times.fetch(0)
-      @next_index = 0
+    def initialize(current_time)
+      @current_time = current_time
     end
 
     def now
-      @current_time = @times.fetch(@next_index)
-      @next_index += 1 if @next_index < (@times.length - 1)
       @current_time
     end
 
     def current_time
       @current_time
+    end
+
+    def advance_by(seconds)
+      @current_time += seconds
     end
 
     def travel_to(time)
