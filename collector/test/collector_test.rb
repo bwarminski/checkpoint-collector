@@ -53,11 +53,9 @@ class CollectorTest < Minitest::Test
   def test_returns_empty_array_when_no_stats_rows_exist
     stats_connection = StatsConnection.new([])
     clickhouse_connection = ClickhouseConnection.new
-    sample_query_lookup = SampleQueryLookupStub.new({})
     collector = Collector.new(
       stats_connection: stats_connection,
       clickhouse_connection: clickhouse_connection,
-      sample_query_lookup: sample_query_lookup,
       clock: -> { Time.utc(2026, 4, 4, 12, 0, 0) }
     )
 
@@ -70,6 +68,7 @@ class CollectorTest < Minitest::Test
     stats_connection = StatsConnection.new([
       {
         "queryid" => "42",
+        "query" => "SELECT * FROM todos /*application:demo,controller:todos,action:index,source_location:/app/controllers/todos_controller.rb:12*/",
         "calls" => "7",
         "mean_exec_time" => "12.5",
         "rows" => "0",
@@ -82,12 +81,9 @@ class CollectorTest < Minitest::Test
       }
     ])
     clickhouse_connection = ClickhouseConnection.new
-    sample_query = "SELECT * FROM todos /*application:demo,controller:todos,action:index,source_location:/app/controllers/todos_controller.rb:12*/"
-    sample_query_lookup = SampleQueryLookupStub.new("42" => sample_query)
     collector = Collector.new(
       stats_connection: stats_connection,
       clickhouse_connection: clickhouse_connection,
-      sample_query_lookup: sample_query_lookup,
       clock: -> { Time.utc(2026, 4, 4, 12, 0, 0) }
     )
 
@@ -100,9 +96,8 @@ class CollectorTest < Minitest::Test
         userid: 0,
         toplevel: false,
         queryid: "42",
-        fingerprint: "42",
+        statement_text: "SELECT * FROM todos /*application:demo,controller:todos,action:index,source_location:/app/controllers/todos_controller.rb:12*/",
         source_file: "/app/controllers/todos_controller.rb:12",
-        sample_query: sample_query,
         total_exec_count: 7,
         total_exec_time_ms: 0.0,
         min_exec_time_ms: 0.0,
@@ -123,6 +118,47 @@ class CollectorTest < Minitest::Test
     assert_equal expected_rows, rows
     assert_equal "query_events", clickhouse_connection.table
     assert_equal expected_rows, clickhouse_connection.rows
+  end
+
+  def test_inserts_query_event_rows_with_statement_text_and_no_sample_columns
+    stats_connection = StatsConnection.new([
+      {
+        "queryid" => "42",
+        "query" => "SELECT * FROM todos WHERE id = $1",
+        "calls" => "7",
+        "total_exec_time" => "125.5",
+        "mean_exec_time" => "17.9",
+        "rows" => "0"
+      }
+    ])
+
+    row = Collector.new(
+      stats_connection: stats_connection,
+      clock: -> { Time.utc(2026, 4, 12, 12, 0, 0) }
+    ).run_once.fetch(0)
+
+    assert_equal "SELECT * FROM todos WHERE id = $1", row[:statement_text]
+    refute row.key?(:fingerprint)
+    refute row.key?(:sample_query)
+  end
+
+  def test_preserves_nil_statement_text_for_internal_queries
+    stats_connection = StatsConnection.new([
+      {
+        "queryid" => "-1",
+        "query" => nil,
+        "calls" => "1",
+        "total_exec_time" => "1.0",
+        "mean_exec_time" => "1.0"
+      }
+    ])
+
+    row = Collector.new(
+      stats_connection: stats_connection,
+      clock: -> { Time.utc(2026, 4, 12, 12, 5, 0) }
+    ).run_once.fetch(0)
+
+    assert_nil row[:statement_text]
   end
 
   def test_run_once_captures_row_and_block_metrics
@@ -214,17 +250,15 @@ class CollectorTest < Minitest::Test
     stats_connection = StatsConnection.new([
       {
         "queryid" => "42",
+        "query" => "SELECT * FROM todos /*hint:seqscan_off*/ /*application:demo,controller:todos,action:index,source_location:/app/controllers/todos_controller.rb:12*/ /*note:trailing*/",
         "calls" => "7",
         "mean_exec_time" => "12.5"
       }
     ])
     clickhouse_connection = ClickhouseConnection.new
-    sample_query = "SELECT * FROM todos /*hint:seqscan_off*/ /*application:demo,controller:todos,action:index,source_location:/app/controllers/todos_controller.rb:12*/ /*note:trailing*/"
-    sample_query_lookup = SampleQueryLookupStub.new("42" => sample_query)
     collector = Collector.new(
       stats_connection: stats_connection,
       clickhouse_connection: clickhouse_connection,
-      sample_query_lookup: sample_query_lookup,
       clock: -> { Time.utc(2026, 4, 4, 12, 0, 0) }
     )
 
@@ -237,17 +271,15 @@ class CollectorTest < Minitest::Test
     stats_connection = StatsConnection.new([
       {
         "queryid" => "42",
+        "query" => "SELECT * FROM todos /*controller:todos,action:index*/ /*source_location:/app/controllers/todos_controller.rb:14*/",
         "calls" => "7",
         "mean_exec_time" => "12.5"
       }
     ])
     clickhouse_connection = ClickhouseConnection.new
-    sample_query = "SELECT * FROM todos /*controller:todos,action:index*/ /*source_location:/app/controllers/todos_controller.rb:14*/"
-    sample_query_lookup = SampleQueryLookupStub.new("42" => sample_query)
     collector = Collector.new(
       stats_connection: stats_connection,
       clickhouse_connection: clickhouse_connection,
-      sample_query_lookup: sample_query_lookup,
       clock: -> { Time.utc(2026, 4, 4, 12, 0, 0) }
     )
 
@@ -260,17 +292,15 @@ class CollectorTest < Minitest::Test
     stats_connection = StatsConnection.new([
       {
         "queryid" => "42",
+        "query" => "SELECT * FROM todos /*action=\\'index\\',application=\\'Demo\\',controller=\\'todos\\'*/",
         "calls" => "7",
         "mean_exec_time" => "12.5"
       }
     ])
     clickhouse_connection = ClickhouseConnection.new
-    sample_query = "SELECT * FROM todos /*action=\\'index\\',application=\\'Demo\\',controller=\\'todos\\'*/"
-    sample_query_lookup = SampleQueryLookupStub.new("42" => sample_query)
     collector = Collector.new(
       stats_connection: stats_connection,
       clickhouse_connection: clickhouse_connection,
-      sample_query_lookup: sample_query_lookup,
       clock: -> { Time.utc(2026, 4, 4, 12, 0, 0) }
     )
 
@@ -287,6 +317,7 @@ class CollectorTest < Minitest::Test
           "userid" => "9",
           "toplevel" => "t",
           "queryid" => "42",
+          "query" => "SELECT 1 /*source_location:/app/models/todo.rb:7*/",
           "calls" => "7",
           "total_exec_time" => "125.5",
           "min_exec_time" => "10.0",
@@ -305,11 +336,9 @@ class CollectorTest < Minitest::Test
       info_rows: [{ "dealloc" => "3", "stats_reset" => "2026-04-09 12:00:00+00" }],
     )
     clickhouse_connection = RecordingClickhouseConnection.new
-    sample_query_lookup = SampleQueryLookupStub.new("42" => "SELECT 1 /*source_location:/app/models/todo.rb:7*/")
     collector = Collector.new(
       stats_connection: stats_connection,
       clickhouse_connection: clickhouse_connection,
-      sample_query_lookup: sample_query_lookup,
       clock: -> { Time.utc(2026, 4, 9, 12, 5, 0) }
     )
 
@@ -419,16 +448,6 @@ class CollectorTest < Minitest::Test
 
     def insert(table, rows)
       @inserts << [table, rows]
-    end
-  end
-
-  class SampleQueryLookupStub
-    def initialize(queries)
-      @queries = queries
-    end
-
-    def find_for(queryid)
-      @queries.fetch(queryid.to_s, nil)
     end
   end
 
