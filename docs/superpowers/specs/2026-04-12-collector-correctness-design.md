@@ -9,7 +9,7 @@ This design improves collector correctness and interval reporting in four areas:
 - Store normalized statement text from `pg_stat_statements.query` as a dedicated column instead of overloading `fingerprint`.
 - Derive interval average latency from delta total execution time and delta execution count instead of aggregating means.
 
-The existing architecture stays intact: `pg_stat_statements` remains the source of cumulative execution counters, and ClickHouse remains the source of interval analytics. The new log pipeline adds a second source of truth only for statement text history and calling-path attribution.
+The existing architecture stays intact: `pg_stat_statements` remains the source of cumulative execution counters, and ClickHouse remains the source of interval analytics. The new log pipeline adds a second source of truth only for statement text history and raw query-comment attribution.
 
 ## Goals
 
@@ -17,7 +17,7 @@ The existing architecture stays intact: `pg_stat_statements` remains the source 
 - Preserve full raw logged statements for each observed `query_id`.
 - Make interval query output human-usable by exposing normalized statement text.
 - Remove mathematically incorrect percentile-of-means style rollups from the interval model.
-- Support later analysis of distinct calling paths and path changes during an interval.
+- Support later analysis of query-comment metadata and path changes during an interval.
 
 ## Non-Goals
 
@@ -35,6 +35,10 @@ The compose stack runs `bundle exec ruby bin/collector`, then sleeps for the ful
 ### Lossy Sample Query Lookup
 
 `SampleQueryLookup` queries `pg_stat_activity` by `query_id` with `LIMIT 1`. When no matching statement is active, the collector records no sample query and no source metadata, even though the statement may have executed repeatedly during the interval.
+
+### Over-Specific Source Columns
+
+The current schema carries `source_file` through snapshot and interval tables as if each query event had one authoritative call site. That is both Rails-specific and misleading: many distinct SQL comments can map to the same `queryid`, and raw log rows already show those variants.
 
 ### Misleading Interval Metrics
 
@@ -89,8 +93,10 @@ Recommended schema direction:
 
 - `query_events.queryid`: machine key (String, signed decimal representation of the pg_stat_statements bigint)
 - `query_events.statement_text`: normalized SQL text, `Nullable(String)` — NULL when `pg_stat_statements.query` is NULL (can occur for internal Postgres queries)
+- `query_events.comment_metadata`: `Map(String, String)` parsed from SQL comments in `statement_text`
 - The `fingerprint` column is removed from `query_events`. The `sample_query` column is also removed.
-- `query_intervals` view stops exposing `fingerprint` and `sample_query`, exposes `statement_text` instead.
+- The `source_file` column is removed from `query_events`.
+- `query_intervals` view stops exposing `fingerprint`, `sample_query`, and `source_file`, and exposes `statement_text` plus `comment_metadata` instead.
 
 Cross-repo note: removing `fingerprint` and `sample_query` requires coordinated updates in the sibling `checkpoint` repo. Verify no checkpoint tests or queries reference these columns before deploying.
 
@@ -116,8 +122,15 @@ ClickHouse storage:
   - `query_id` (String, signed decimal — must match the `queryid` representation used in `query_events`)
   - SQL statement text
   - database/user/session identifiers when present
-  - parsed Rails query-comment metadata such as source location
+  - parsed query-comment metadata as `Map(String, String)`
   - the original raw JSON payload for audit/debug value
+
+Comment metadata behavior:
+
+- The collector and log ingester both parse all key/value pairs found in SQL comments into `comment_metadata Map(String, String)`.
+- No metadata key is privileged in the schema. `source_location` becomes just one possible entry in the map rather than a dedicated column.
+- Duplicate keys resolve deterministically with "last value wins".
+- Metadata is descriptive only. It does not change grouping keys or query identity.
 
 Note: Postgres jsonlog emits `query_id` as a signed 64-bit integer. The ingester must stringify it using signed decimal representation to match the `queryid` String values in `query_events`. Negative values are valid.
 
@@ -142,8 +155,7 @@ Behavior:
 
 - A given interval can reference all raw statements logged for the matching `queryid` between `interval_started_at` and `interval_ended_at`.
 - Interval-facing queries can derive:
-  - representative source locations
-  - distinct source path counts
+  - distinct metadata values seen during the interval
   - whether calling paths changed during the interval
   - raw statement drill-down for debugging
 
@@ -151,9 +163,15 @@ Important constraints:
 
 - Log correlation is best-effort within the accuracy of PostgreSQL log timestamps and the collector interval boundaries. Join bounds use `[interval_started_at, interval_ended_at)` — inclusive start, exclusive end — to avoid double-attaching log lines at a boundary between two adjacent intervals.
 - Intervals with no matching logs remain valid intervals. They simply have no statement-history attachment.
-- A single `query_id` may appear in logs from multiple sessions and call sites within the same interval window. "Representative source location" is defined as the most frequent `source_location` value among matched log rows for that interval, not an arbitrary first-match. This is documented as a heuristic, not a precise attribution.
+- A single `query_id` may appear in logs from multiple sessions and call sites within the same interval window. This is expected. Raw log rows remain the authoritative history when interval consumers need to inspect all metadata variants seen during the window.
 
 This keeps execution metrics and statement history separate, which makes the system easier to reason about and avoids inventing lossy summary columns during collection.
+
+Snapshot semantics:
+
+- `query_events.comment_metadata` and `query_intervals.comment_metadata` reflect the metadata carried by the representative `pg_stat_statements.query` text in the later snapshot row.
+- They are useful for quick filtering, but they are not a complete rollup of every metadata variant observed for a shared `queryid`.
+- When consumers need all metadata variants for a `queryid` in a window, they must inspect `postgres_logs`.
 
 ### 5. Correct Interval Latency Metrics
 
@@ -182,8 +200,10 @@ Behavioral changes:
 - Add a scheduler entry point that repeatedly calls `run_once` on fixed boundaries. Exceptions from `run_once` are caught and logged; the scheduler continues to the next slot.
 - Extend `Collector::STATS_SQL` to include `query`.
 - Populate `statement_text` (Nullable) on inserted query event rows from `pg_stat_statements.query`. Preserve NULL — do not coerce to empty string.
+- Parse SQL comments into `comment_metadata Map(String, String)` for both snapshot rows and raw log rows.
 - Remove the runtime dependency on `SampleQueryLookup`. Remove `sample_query_lookup.rb`.
 - Remove `fingerprint` and `sample_query` from all inserted rows.
+- Remove `source_file` and `source_location` as dedicated inserted columns.
 
 ### Postgres Image and Compose
 
@@ -194,10 +214,10 @@ Behavioral changes:
 
 ### ClickHouse Schema
 
-- Update `query_events`: add `statement_text Nullable(String)`, remove `fingerprint`, remove `sample_query`. Update `004_reset_query_analytics.sql` to match.
-- Add a raw Postgres log table `postgres_logs` using `ReplacingMergeTree` engine keyed on `(log_file, byte_offset)` to suppress duplicates from crash-restart re-ingestion. Columns: `log_file String, byte_offset UInt64, log_timestamp DateTime64, query_id String, statement_text Nullable(String), database Nullable(String), session_id Nullable(String), source_location Nullable(String), raw_json String`.
+- Update `query_events`: add `statement_text Nullable(String)`, add `comment_metadata Map(String, String)`, remove `fingerprint`, remove `sample_query`, and remove `source_file`. Update `004_reset_query_analytics.sql` to match.
+- Add a raw Postgres log table `postgres_logs` using `ReplacingMergeTree` engine keyed on `(log_file, byte_offset)` to suppress duplicates from crash-restart re-ingestion. Columns: `log_file String, byte_offset UInt64, log_timestamp DateTime64, query_id String, statement_text Nullable(String), database Nullable(String), session_id Nullable(String), comment_metadata Map(String, String), raw_json String`.
 - Add a log position tracking table `postgres_log_state`: `log_file String, byte_offset UInt64, file_size_at_last_read UInt64, collected_at DateTime64`.
-- Update `query_intervals`: remove `fingerprint`, `sample_query`, `min_exec_time_ms`, `max_exec_time_ms`, `mean_exec_time_ms`, `stddev_exec_time_ms` from SELECT. Add `statement_text`. Add `avg_exec_time_ms Nullable(Float64)` computed with `IF(delta_exec_count > 0, delta_exec_time_ms / delta_exec_count, NULL)` guard.
+- Update `query_intervals`: remove `fingerprint`, `sample_query`, `source_file`, `min_exec_time_ms`, `max_exec_time_ms`, `mean_exec_time_ms`, `stddev_exec_time_ms` from SELECT. Add `statement_text`, `comment_metadata`, and `avg_exec_time_ms Nullable(Float64)` computed with `IF(delta_exec_count > 0, delta_exec_time_ms / delta_exec_count, NULL)` guard.
 - Add derived queries or views for interval-to-log correlation as needed.
 
 ### Tests
@@ -213,13 +233,17 @@ Collector unit tests (`test/collector_test.rb`):
 
 - `statement_text` is populated from `pg_stat_statements.query` when present.
 - `statement_text` is nil (not empty string) when `pg_stat_statements.query` is nil.
+- `comment_metadata` contains all parsed key/value pairs from SQL comments.
+- When duplicate metadata keys appear in comments, the last value wins.
 - Rows do not contain `fingerprint` or `sample_query` keys.
+- Rows do not contain `source_file`.
 
 Log ingestion tests (`test/log_ingester_test.rb`):
 
 - JSON log line with `query_id` and statement text ingests into ClickHouse with correct field mapping.
 - `query_id` from log JSON (numeric) is stringified as signed decimal to match `query_events.queryid` representation.
 - Log line missing `query_id` field (e.g., connection event, checkpoint) is skipped without error.
+- Parsed `comment_metadata` contains all extracted key/value pairs from the logged statement text.
 - Rotation/offset tracking: ingester resumes from the last recorded byte offset in `postgres_log_state`, does not re-ingest prior rows.
 - Empty log file does not fail collection.
 - Malformed JSON line is skipped; ingestion continues with remaining lines.
@@ -229,20 +253,20 @@ ClickHouse integration tests (`test/sql/clickhouse_interval_view_test.rb` — ex
 
 - `query_intervals` derives `avg_exec_time_ms` correctly from deltas when `delta_exec_count > 0`.
 - `query_intervals` returns NULL (not 0) for `avg_exec_time_ms` when `delta_exec_count` is 0.
-- Interval output exposes `statement_text` (not `fingerprint` or `sample_query`).
+- Interval output exposes `statement_text` and `comment_metadata` (not `fingerprint`, `sample_query`, or `source_file`).
 - `query_intervals` does not expose `mean_exec_time_ms` as an interval aggregate (or documents it as a snapshot column).
 
 Schema tests (`test/sql/clickhouse_schema_test.rb` — update existing):
 
-- `query_events` has `statement_text Nullable(String)`, no `fingerprint`, no `sample_query`.
-- `postgres_logs` table exists with `query_id`, `statement_text`, `raw_json` columns.
+- `query_events` has `statement_text Nullable(String)`, `comment_metadata Map(String, String)`, no `fingerprint`, no `sample_query`, and no `source_file`.
+- `postgres_logs` table exists with `query_id`, `statement_text`, `comment_metadata`, and `raw_json` columns.
 - `postgres_log_state` table exists with `log_file`, `byte_offset` columns.
 - Reset SQL rebuilds all new tables and views correctly.
 
 Cross-repo validation:
 
 - Existing smoke and integration checks in `/home/bjw/checkpoint` remain green after schema/query changes.
-- Validation should include a path where Rails query comments appear in ingested logs and are visible through interval drill-down.
+- Validation should include a path where query comments appear in ingested logs and are visible through interval drill-down.
 
 ## Error Handling
 
@@ -256,6 +280,7 @@ Cross-repo validation:
 - Enabling statement logging increases local Postgres log volume. Raw retention is intentional, so ClickHouse storage growth must be expected.
 - Correlating by `query_id` and interval timestamps is not equivalent to a perfect per-execution trace. It is still materially better than `pg_stat_activity LIMIT 1`.
 - Keeping both snapshot counters and raw logs introduces two data sources, but their responsibilities are cleanly separated.
+- Carrying `comment_metadata` on snapshots is intentionally lossy relative to raw logs because one snapshot row cannot represent every metadata variant observed for a shared `queryid`.
 - Renaming away from `fingerprint` may require coordinated updates in the sibling `checkpoint` repo.
 
 ## Open Decisions Resolved
@@ -266,6 +291,7 @@ Cross-repo validation:
 - Attribution source: PostgreSQL structured logs
 - Raw statement retention: keep full raw logged statements
 - Human-readable query field: separate `statement_text` column (Nullable), keep `queryid` as machine key
+- Query comment metadata field: `comment_metadata Map(String, String)` on snapshots and raw logs; no dedicated source columns
 - Remove `fingerprint` and `sample_query` columns entirely (not just stop exposing)
 - Log position state storage: ClickHouse table (`postgres_log_state`)
 - avg_exec_time_ms when delta_exec_count = 0: return NULL via IF guard (not 0)
