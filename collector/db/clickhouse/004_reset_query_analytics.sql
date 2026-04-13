@@ -1,6 +1,8 @@
 -- ABOUTME: Rebuilds the raw query events, collector state, and interval view schema.
 -- ABOUTME: Drops and recreates raw tables plus the query intervals view.
 DROP VIEW IF EXISTS query_intervals;
+DROP TABLE IF EXISTS postgres_log_state;
+DROP TABLE IF EXISTS postgres_logs;
 DROP TABLE IF EXISTS collector_state;
 DROP TABLE IF EXISTS query_events;
 
@@ -10,9 +12,8 @@ CREATE TABLE query_events (
   userid UInt64,
   toplevel Bool,
   queryid String,
-  fingerprint String,
-  source_file Nullable(String),
-  sample_query Nullable(String),
+  statement_text Nullable(String),
+  comment_metadata Map(String, String),
   total_exec_count UInt64,
   total_exec_time_ms Float64,
   rows_returned_or_affected UInt64,
@@ -37,6 +38,27 @@ CREATE TABLE collector_state (
 ) ENGINE = MergeTree
 ORDER BY (collected_at);
 
+CREATE TABLE IF NOT EXISTS postgres_logs (
+  log_file String,
+  byte_offset UInt64,
+  log_timestamp DateTime64(3),
+  query_id String,
+  statement_text Nullable(String),
+  database Nullable(String),
+  session_id Nullable(String),
+  comment_metadata Map(String, String),
+  raw_json String
+) ENGINE = ReplacingMergeTree
+ORDER BY (log_file, byte_offset);
+
+CREATE TABLE IF NOT EXISTS postgres_log_state (
+  log_file String,
+  byte_offset UInt64,
+  file_size_at_last_read UInt64,
+  collected_at DateTime64(3)
+) ENGINE = ReplacingMergeTree(collected_at)
+ORDER BY (log_file);
+
 SET allow_experimental_analyzer = 0;
 CREATE VIEW query_intervals AS
 WITH interval_candidates AS (
@@ -46,9 +68,8 @@ WITH interval_candidates AS (
     e.userid,
     e.toplevel,
     e.queryid,
-    e.fingerprint,
-    e.source_file,
-    e.sample_query,
+    e.statement_text,
+    e.comment_metadata,
     e.total_exec_count,
     e.total_exec_time_ms,
     e.rows_returned_or_affected,
@@ -59,10 +80,6 @@ WITH interval_candidates AS (
     e.temp_blks_read,
     e.temp_blks_written,
     e.total_block_accesses,
-    e.min_exec_time_ms,
-    e.max_exec_time_ms,
-    e.mean_exec_time_ms,
-    e.stddev_exec_time_ms,
     s.stats_reset,
     row_number() OVER statement_window AS snapshot_position,
     lagInFrame(e.collected_at) OVER statement_window AS previous_collected_at,
@@ -82,7 +99,25 @@ WITH interval_candidates AS (
   WINDOW statement_window AS (PARTITION BY e.dbid, e.userid, e.toplevel, e.queryid ORDER BY e.collected_at)
 ),
 valid_intervals AS (
-  SELECT *
+  SELECT
+    previous_collected_at,
+    collected_at,
+    dbid,
+    userid,
+    toplevel,
+    queryid,
+    statement_text,
+    comment_metadata,
+    CAST(total_exec_count - previous_total_exec_count AS Int64) AS delta_exec_count,
+    CAST(total_exec_time_ms - previous_total_exec_time_ms AS Float64) AS delta_exec_time_ms,
+    CAST(rows_returned_or_affected - previous_rows_returned_or_affected AS Int64) AS rows_returned_or_affected,
+    CAST(shared_blks_hit - previous_shared_blks_hit AS Int64) AS shared_blks_hit,
+    CAST(shared_blks_read - previous_shared_blks_read AS Int64) AS shared_blks_read,
+    CAST(local_blks_hit - previous_local_blks_hit AS Int64) AS local_blks_hit,
+    CAST(local_blks_read - previous_local_blks_read AS Int64) AS local_blks_read,
+    CAST(temp_blks_read - previous_temp_blks_read AS Int64) AS temp_blks_read,
+    CAST(temp_blks_written - previous_temp_blks_written AS Int64) AS temp_blks_written,
+    CAST(total_block_accesses - previous_total_block_accesses AS Int64) AS total_block_accesses
   FROM interval_candidates
   WHERE snapshot_position > 1
     AND stats_reset = previous_stats_reset
@@ -97,21 +132,17 @@ SELECT
   userid,
   toplevel,
   queryid,
-  fingerprint,
-  source_file,
-  sample_query,
-  CAST(total_exec_count - previous_total_exec_count AS Int64) AS total_exec_count,
-  CAST(total_exec_time_ms - previous_total_exec_time_ms AS Float64) AS delta_exec_time_ms,
-  CAST(rows_returned_or_affected - previous_rows_returned_or_affected AS Int64) AS rows_returned_or_affected,
-  CAST(shared_blks_hit - previous_shared_blks_hit AS Int64) AS shared_blks_hit,
-  CAST(shared_blks_read - previous_shared_blks_read AS Int64) AS shared_blks_read,
-  CAST(local_blks_hit - previous_local_blks_hit AS Int64) AS local_blks_hit,
-  CAST(local_blks_read - previous_local_blks_read AS Int64) AS local_blks_read,
-  CAST(temp_blks_read - previous_temp_blks_read AS Int64) AS temp_blks_read,
-  CAST(temp_blks_written - previous_temp_blks_written AS Int64) AS temp_blks_written,
-  CAST(total_block_accesses - previous_total_block_accesses AS Int64) AS total_block_accesses,
-  min_exec_time_ms,
-  max_exec_time_ms,
-  mean_exec_time_ms,
-  stddev_exec_time_ms
+  statement_text,
+  comment_metadata,
+  delta_exec_count AS total_exec_count,
+  delta_exec_time_ms,
+  IF(delta_exec_count > 0, delta_exec_time_ms / delta_exec_count, NULL) AS avg_exec_time_ms,
+  rows_returned_or_affected,
+  shared_blks_hit,
+  shared_blks_read,
+  local_blks_hit,
+  local_blks_read,
+  temp_blks_read,
+  temp_blks_written,
+  total_block_accesses
 FROM valid_intervals;

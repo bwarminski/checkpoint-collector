@@ -1,23 +1,66 @@
 # ABOUTME: Parses Rails SQL comment tags into source metadata for collector rows.
-# ABOUTME: Extracts source file locations from metadata comments.
+# ABOUTME: Extracts key-value metadata from comment blocks in raw query text.
 class QueryCommentParser
-  def self.parse(comment)
-    pairs = comment.to_s.delete_prefix("/*").delete_suffix("*/").split(",").filter_map do |part|
-      key, value =
-        if part.include?(":")
-          part.split(":", 2)
-        elsif part.include?("=")
-          part.split("=", 2)
+  PAIR_PATTERN = /\A([A-Za-z0-9_]+)\s*[:=]\s*(.*)\z/.freeze
+
+  def self.parse_from_query(query_text)
+    return {} if query_text.nil?
+
+    comment_bodies(query_text).each_with_object({}) do |body, pairs|
+      body.to_s.split(/,(?=\s*[A-Za-z0-9_]+\s*[:=])/).each do |part|
+        token = part.to_s.strip
+        next if token.empty?
+
+        match = token.match(PAIR_PATTERN)
+        next unless match
+
+        pairs[match[1]] = normalize_value(match[2])
+      end
+    end
+  end
+
+  def self.comment_bodies(query_text)
+    bodies = []
+    index = 0
+
+    while index < query_text.length
+      if query_text[index] == "'"
+        index = advance_past_string_literal(query_text, index)
+        next
+      end
+
+      if query_text[index, 2] == "/*"
+        end_index = query_text.index("*/", index + 2)
+        break unless end_index
+
+        bodies << query_text[(index + 2)...end_index]
+        index = end_index + 2
+        next
+      end
+
+      index += 1
+    end
+
+    bodies
+  end
+
+  def self.advance_past_string_literal(query_text, index)
+    index += 1
+
+    while index < query_text.length
+      if query_text[index] == "'"
+        if query_text[index + 1] == "'"
+          index += 2
+          next
         end
 
-      next unless key && value
+        return index + 1
+      end
 
-      [key.strip, normalize_value(value)]
-    end.to_h
+      index += 1
+    end
 
-    {
-      source_file: pairs["source_location"]
-    }
+    query_text.length
   end
 
   def self.normalize_value(value)

@@ -1,17 +1,189 @@
 #!/usr/bin/env ruby
 # ABOUTME: Provides the executable entry point for the Postgres stats collector.
-# ABOUTME: Connects the collector to Postgres and ClickHouse for one polling pass.
+# ABOUTME: Runs one collection pass per fixed interval with fresh service connections.
 require_relative "../lib/collector"
 require_relative "../lib/clickhouse_connection"
-require_relative "../lib/sample_query_lookup"
+require_relative "../lib/log_ingester"
+require_relative "../lib/scheduler"
+require "json"
+require "net/http"
 require "pg"
+require "time"
+require "uri"
 
-stats_connection = PG.connect(ENV.fetch("POSTGRES_URL"))
-clickhouse_connection = ClickhouseConnection.new(base_url: ENV.fetch("CLICKHOUSE_URL"))
-sample_query_lookup = SampleQueryLookup.new(stats_connection)
+class ClickhouseLogStateStore
+  def initialize(base_url:, transport: nil)
+    @base_url = base_url
+    @transport = transport || method(:perform_request)
+  end
 
-Collector.new(
-  stats_connection: stats_connection,
-  clickhouse_connection: clickhouse_connection,
-  sample_query_lookup: sample_query_lookup
-).run_once
+  def load(log_file)
+    uri = build_uri(
+      "SELECT byte_offset, file_size_at_last_read, collected_at " \
+      "FROM postgres_log_state " \
+      "WHERE log_file = #{quoted(log_file)} " \
+      "ORDER BY collected_at DESC LIMIT 1 FORMAT JSONEachRow"
+    )
+    response = @transport.call(uri, Net::HTTP::Get.new(uri))
+    raise "ClickHouse state load failed: #{response.code} #{response.body}" if response.code.to_i >= 400
+
+    row = response.body.to_s.each_line.first
+    return nil unless row
+
+    payload = JSON.parse(row)
+    {
+      byte_offset: payload.fetch("byte_offset").to_i,
+      file_size_at_last_read: payload.fetch("file_size_at_last_read").to_i,
+      collected_at: parse_time(payload["collected_at"])
+    }
+  end
+
+  def save(log_file, byte_offset:, file_size_at_last_read:, collected_at:)
+    uri = build_uri("INSERT INTO postgres_log_state FORMAT JSONEachRow")
+    request = Net::HTTP::Post.new(uri)
+    request.body = JSON.generate(
+      log_file: log_file,
+      byte_offset: byte_offset,
+      file_size_at_last_read: file_size_at_last_read,
+      collected_at: collected_at.utc.strftime("%Y-%m-%d %H:%M:%S.%L")
+    ) + "\n"
+
+    response = @transport.call(uri, request)
+    return if response.code.to_i < 400
+
+    raise "ClickHouse state save failed: #{response.code} #{response.body}"
+  end
+
+  private
+
+  def build_uri(query)
+    uri = URI.parse(@base_url)
+    uri.path = "/" if uri.path.nil? || uri.path.empty?
+    params = URI.decode_www_form(uri.query.to_s)
+    params.reject! { |key, _| key == "query" }
+    params << ["query", query]
+    uri.query = URI.encode_www_form(params)
+    uri
+  end
+
+  def quoted(value)
+    "'#{value.to_s.gsub("\\", "\\\\\\").gsub("'", "\\\\'")}'"
+  end
+
+  def parse_time(value)
+    return nil if value.nil? || value.empty?
+
+    Time.parse(value).utc
+  rescue ArgumentError
+    nil
+  end
+
+  def perform_request(uri, request)
+    Net::HTTP.start(uri.host, uri.port, open_timeout: 5, read_timeout: 10) do |http|
+      http.request(request)
+    end
+  end
+end
+
+class CollectorRuntime
+  DEFAULT_LOG_FILE = "/var/log/postgresql/postgresql.json".freeze
+
+  def initialize(
+    interval_seconds:,
+    postgres_url:,
+    clickhouse_url:,
+    log_file: DEFAULT_LOG_FILE,
+    clock: -> { Time.now.utc },
+    sleep_until: nil,
+    stderr: $stderr,
+    pg: PG,
+    scheduler_class: Scheduler,
+    collector_class: Collector,
+    log_ingester_class: LogIngester,
+    clickhouse_connection_class: ClickhouseConnection,
+    state_store_class: ClickhouseLogStateStore,
+    state_store_transport: nil,
+    log_reader: nil
+  )
+    @interval_seconds = interval_seconds
+    @postgres_url = postgres_url
+    @clickhouse_url = clickhouse_url
+    @log_file = log_file
+    @clock = clock
+    @sleep_until = sleep_until || default_sleep_until
+    @stderr = stderr
+    @pg = pg
+    @scheduler_class = scheduler_class
+    @collector_class = collector_class
+    @log_ingester_class = log_ingester_class
+    @clickhouse_connection_class = clickhouse_connection_class
+    @state_store_class = state_store_class
+    @state_store_transport = state_store_transport
+    @log_reader = log_reader || default_log_reader
+  end
+
+  def run_forever
+    scheduler.run_forever
+  end
+
+  def run_once_pass
+    stats_connection = @pg.connect(@postgres_url)
+    clickhouse_connection = @clickhouse_connection_class.new(base_url: @clickhouse_url)
+    state_store = @state_store_class.new(base_url: @clickhouse_url, transport: @state_store_transport)
+
+    @log_ingester_class.new(
+      log_reader: @log_reader,
+      clickhouse_connection: clickhouse_connection,
+      state_store: state_store,
+      clock: @clock,
+      stderr: @stderr
+    ).ingest_file(@log_file)
+
+    @collector_class.new(
+      stats_connection: stats_connection,
+      clickhouse_connection: clickhouse_connection,
+      clock: @clock
+    ).run_once
+  ensure
+    stats_connection&.close
+  end
+
+  private
+
+  def scheduler
+    @scheduler_class.new(
+      interval_seconds: @interval_seconds,
+      clock: @clock,
+      sleep_until: @sleep_until,
+      stderr: @stderr,
+      run_once: -> { run_once_pass }
+    )
+  end
+
+  def default_sleep_until
+    lambda do |time|
+      seconds = time - Time.now.utc
+      sleep(seconds) if seconds.positive?
+    end
+  end
+
+  def default_log_reader
+    lambda do |log_file, byte_offset|
+      File.open(log_file, "rb") do |file|
+        file.seek(byte_offset)
+        file.read.to_s
+      end
+    rescue Errno::ENOENT
+      ""
+    end
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  CollectorRuntime.new(
+    interval_seconds: Integer(ENV.fetch("COLLECTOR_INTERVAL_SECONDS", "5")),
+    postgres_url: ENV.fetch("POSTGRES_URL"),
+    clickhouse_url: ENV.fetch("CLICKHOUSE_URL"),
+    log_file: ENV.fetch("POSTGRES_LOG_PATH", CollectorRuntime::DEFAULT_LOG_FILE)
+  ).run_forever
+end

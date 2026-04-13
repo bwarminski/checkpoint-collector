@@ -2,3 +2,4 @@
 **/.pytest_cache/
 collector/vendor/bundle/
 .idea/
+__pycache__/

@@ -1,46 +1,115 @@
 # ABOUTME: Verifies parsing of Rails SQL comment metadata for collector events.
-# ABOUTME: Extracts only source file locations from metadata blocks.
+# ABOUTME: Extracts key-value pairs from SQL comment blocks.
 require "minitest/autorun"
 require_relative "../lib/query_comment_parser"
 
 class QueryCommentParserTest < Minitest::Test
-  def test_parses_source_location_comment
+  def test_parses_all_key_value_pairs_from_comment_blocks
     comment = "/*application:demo,controller:todos,action:index,source_location:/app/controllers/todos_controller.rb:12*/"
 
-    parsed = QueryCommentParser.parse(comment)
+    parsed = QueryCommentParser.parse_from_query("SELECT 1 #{comment}")
 
-    assert_equal({ source_file: "/app/controllers/todos_controller.rb:12" }, parsed)
+    assert_equal(
+      {
+        "application" => "demo",
+        "controller" => "todos",
+        "action" => "index",
+        "source_location" => "/app/controllers/todos_controller.rb:12"
+      },
+      parsed
+    )
   end
 
-  def test_returns_nil_source_file_when_source_location_missing
-    comment = "/*action='index',application='Demo',controller='todos'*/"
+  def test_last_duplicate_key_wins
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*controller:todos*/ /*controller:archived_todos,action:index*/"
+    )
 
-    parsed = QueryCommentParser.parse(comment)
-
-    assert_equal({ source_file: nil }, parsed)
+    assert_equal(
+      {
+        "controller" => "archived_todos",
+        "action" => "index"
+      },
+      parsed
+    )
   end
 
-  def test_returns_nil_source_file_when_comment_is_missing
-    parsed = QueryCommentParser.parse(nil)
+  def test_parses_values_that_contain_commas
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*note:hello, world,source_location:/app/a,b.rb:12*/"
+    )
 
-    assert_equal({ source_file: nil }, parsed)
+    assert_equal(
+      {
+        "note" => "hello, world",
+        "source_location" => "/app/a,b.rb:12"
+      },
+      parsed
+    )
   end
 
-  def test_returns_nil_source_file_when_comment_has_no_metadata_fields
-    parsed = QueryCommentParser.parse("/* plain comment, no key=value pairs */")
+  def test_parses_equal_separators_and_quoted_values_with_commas
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*application='Demo',controller='todos',action='index',note='hello, world'*/"
+    )
 
-    assert_equal({ source_file: nil }, parsed)
+    assert_equal(
+      {
+        "application" => "Demo",
+        "controller" => "todos",
+        "action" => "index",
+        "note" => "hello, world"
+      },
+      parsed
+    )
   end
 
-  def test_returns_nil_source_file_when_only_controller_is_present
-    parsed = QueryCommentParser.parse("/*controller:todos*/")
+  def test_parses_mixed_separator_styles_in_one_comment_block
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*application:demo,controller='todos',action=index*/"
+    )
 
-    assert_equal({ source_file: nil }, parsed)
+    assert_equal(
+      {
+        "application" => "demo",
+        "controller" => "todos",
+        "action" => "index"
+      },
+      parsed
+    )
   end
 
-  def test_returns_nil_source_file_when_parts_are_malformed
-    parsed = QueryCommentParser.parse("/*garbage,controller:todos,action:index*/")
+  def test_ignores_comment_looking_text_inside_string_literals
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT '/*controller:todos,action:index*/' AS statement_text"
+    )
 
-    assert_equal({ source_file: nil }, parsed)
+    assert_equal({}, parsed)
+  end
+
+  def test_ignores_comment_looking_text_inside_string_literals_with_escaped_quotes
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 'abc''/*controller:todos*/' AS statement_text"
+    )
+
+    assert_equal({}, parsed)
+  end
+
+  def test_preserves_blank_metadata_values
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*controller:,action:index*/"
+    )
+
+    assert_equal(
+      {
+        "controller" => "",
+        "action" => "index"
+      },
+      parsed
+    )
+  end
+
+  def test_returns_empty_hash_when_no_metadata_is_present
+    assert_equal({}, QueryCommentParser.parse_from_query("SELECT 1"))
   end
 end

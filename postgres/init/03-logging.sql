@@ -1,0 +1,2 @@
+-- ABOUTME: Describes the structured logging contract used by the local collector stack.
+-- ABOUTME: Runtime startup flags provide JSON logs with query IDs in /var/log/postgresql.
