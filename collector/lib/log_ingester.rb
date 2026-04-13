@@ -83,7 +83,7 @@ class LogIngester
       statement_text: statement_text,
       database: payload["dbname"],
       session_id: payload["session_id"],
-      source_location: parsed[:source_file],
+      comment_metadata: parsed,
       raw_json: raw_json
     }
   end

@@ -72,7 +72,7 @@ class Collector
       toplevel: toplevel_value(stats_row.fetch("toplevel", nil)),
       queryid: queryid,
       statement_text: statement_text,
-      source_file: parsed[:source_file],
+      comment_metadata: parsed,
       total_exec_count: stats_row.fetch("calls").to_i,
       total_exec_time_ms: stats_row.fetch("total_exec_time", 0).to_f,
       min_exec_time_ms: stats_row.fetch("min_exec_time", 0).to_f,

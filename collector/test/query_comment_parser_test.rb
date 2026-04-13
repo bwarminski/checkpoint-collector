@@ -64,6 +64,21 @@ class QueryCommentParserTest < Minitest::Test
     )
   end
 
+  def test_parses_mixed_separator_styles_in_one_comment_block
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*application:demo,controller='todos',action=index*/"
+    )
+
+    assert_equal(
+      {
+        "application" => "demo",
+        "controller" => "todos",
+        "action" => "index"
+      },
+      parsed
+    )
+  end
+
   def test_returns_empty_hash_when_no_metadata_is_present
     assert_equal({}, QueryCommentParser.parse_from_query("SELECT 1"))
   end

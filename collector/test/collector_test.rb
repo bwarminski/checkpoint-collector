@@ -97,7 +97,12 @@ class CollectorTest < Minitest::Test
         toplevel: false,
         queryid: "42",
         statement_text: "SELECT * FROM todos /*application:demo,controller:todos,action:index,source_location:/app/controllers/todos_controller.rb:12*/",
-        source_file: "/app/controllers/todos_controller.rb:12",
+        comment_metadata: {
+          "application" => "demo",
+          "controller" => "todos",
+          "action" => "index",
+          "source_location" => "/app/controllers/todos_controller.rb:12"
+        },
         total_exec_count: 7,
         total_exec_time_ms: 0.0,
         min_exec_time_ms: 0.0,
@@ -118,6 +123,30 @@ class CollectorTest < Minitest::Test
     assert_equal expected_rows, rows
     assert_equal "query_events", clickhouse_connection.table
     assert_equal expected_rows, clickhouse_connection.rows
+  end
+
+  def test_collector_inserts_comment_metadata_hash
+    stats_row = {
+      "queryid" => "42",
+      "query" => "SELECT * FROM todos /*application:demo,controller:todos,action:index*/",
+      "calls" => "1",
+      "total_exec_time" => "1.0",
+      "mean_exec_time" => "1.0"
+    }
+    stats_connection = StatsConnection.new([
+      stats_row
+    ])
+
+    row = Collector.new(
+      stats_connection: stats_connection,
+      clock: -> { Time.utc(2026, 4, 12, 12, 0, 0) }
+    ).send(:build_row, stats_row, Time.utc(2026, 4, 12, 12, 0, 0))
+
+    assert_equal(
+      { "application" => "demo", "controller" => "todos", "action" => "index" },
+      row[:comment_metadata]
+    )
+    refute row.key?(:source_file)
   end
 
   def test_inserts_query_event_rows_with_statement_text_and_no_sample_columns
@@ -264,7 +293,17 @@ class CollectorTest < Minitest::Test
 
     row = collector.run_once.fetch(0)
 
-    assert_equal "/app/controllers/todos_controller.rb:12", row[:source_file]
+    assert_equal(
+      {
+        "hint" => "seqscan_off",
+        "application" => "demo",
+        "controller" => "todos",
+        "action" => "index",
+        "source_location" => "/app/controllers/todos_controller.rb:12",
+        "note" => "trailing"
+      },
+      row[:comment_metadata]
+    )
   end
 
   def test_prefers_block_with_source_location_over_controller_only_comment
@@ -285,7 +324,14 @@ class CollectorTest < Minitest::Test
 
     row = collector.run_once.fetch(0)
 
-    assert_equal "/app/controllers/todos_controller.rb:14", row[:source_file]
+    assert_equal(
+      {
+        "controller" => "todos",
+        "action" => "index",
+        "source_location" => "/app/controllers/todos_controller.rb:14"
+      },
+      row[:comment_metadata]
+    )
   end
 
   def test_handles_live_rails_equals_style_comments_without_source_location
@@ -306,7 +352,14 @@ class CollectorTest < Minitest::Test
 
     row = collector.run_once.fetch(0)
 
-    assert_nil row[:source_file]
+    assert_equal(
+      {
+        "action" => "index",
+        "application" => "Demo",
+        "controller" => "todos"
+      },
+      row[:comment_metadata]
+    )
   end
 
   def test_inserts_counter_snapshots_into_query_events_and_collector_state

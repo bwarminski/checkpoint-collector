@@ -32,7 +32,7 @@ class LogIngesterTest < Minitest::Test
     assert_equal "SELECT 1 /*source_location:/app/models/todo.rb:5*/", row[:statement_text]
     assert_equal "checkpoint_demo", row[:database]
     assert_equal "s1", row[:session_id]
-    assert_equal "/app/models/todo.rb:5", row[:source_location]
+    assert_equal({ "source_location" => "/app/models/todo.rb:5" }, row[:comment_metadata])
     assert_equal "{\"timestamp\":\"2026-04-12 12:00:00.000 UTC\",\"query_id\":-7,\"statement\":\"SELECT 1 /*source_location:/app/models/todo.rb:5*/\",\"session_id\":\"s1\",\"dbname\":\"checkpoint_demo\"}", row[:raw_json]
     assert_equal(
       {
@@ -106,8 +106,24 @@ class LogIngesterTest < Minitest::Test
 
     assert_equal "-905623181446367861", row[:query_id]
     assert_equal "SELECT count(*) FROM todos /*source_location:/app/models/todo.rb:42*/;", row[:statement_text]
-    assert_equal "/app/models/todo.rb:42", row[:source_location]
+    assert_equal({ "source_location" => "/app/models/todo.rb:42" }, row[:comment_metadata])
     assert_equal "checkpoint_demo", row[:database]
+  end
+
+  def test_log_ingester_inserts_comment_metadata_hash
+    log_line = "{\"timestamp\":\"2026-04-12 12:00:00.000 UTC\",\"query_id\":7,\"statement\":\"SELECT 1 /*controller:todos,action:index*/\",\"session_id\":\"s1\",\"dbname\":\"checkpoint_demo\"}\n"
+    clickhouse = FakeClickhouseConnection.new
+
+    LogIngester.new(
+      log_reader: ->(*) { log_line },
+      clickhouse_connection: clickhouse,
+      state_store: FakeStateStore.new
+    ).ingest_file("postgresql.json")
+
+    row = clickhouse.rows.fetch(0)
+
+    assert_equal({ "controller" => "todos", "action" => "index" }, row[:comment_metadata])
+    refute row.key?(:source_location)
   end
 
   def test_ignores_non_statement_jsonlog_entries_even_when_query_id_is_present
