@@ -20,10 +20,6 @@ class QueryCommentParser
     end
   end
 
-  def self.parse(comment)
-    parse_from_query(comment)
-  end
-
   def self.normalize_value(value)
     value.strip.delete_prefix("\\'").delete_suffix("\\'").delete_prefix("'").delete_suffix("'")
   end
