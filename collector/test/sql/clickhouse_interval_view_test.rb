@@ -57,6 +57,7 @@ class ClickhouseIntervalViewTest < Minitest::Test
     assert_equal 50.0, rows.first.fetch("delta_exec_time_ms").to_f
     assert_equal 10.0, rows.first.fetch("avg_exec_time_ms").to_f
     assert_equal "SELECT 1", rows.first.fetch("statement_text")
+    assert_equal({ "source_location" => "/app/models/todo.rb:5" }, rows.first.fetch("comment_metadata"))
   end
 
   def test_stats_reset_change_emits_no_interval_row
@@ -94,13 +95,13 @@ class ClickhouseIntervalViewTest < Minitest::Test
   def insert_event(collected_at:, queryid:, statement_text:, total_exec_count:, total_exec_time_ms:, dbid: 1, userid: 1, toplevel: true)
     exec_sql(<<~SQL)
       INSERT INTO query_events (
-        collected_at, dbid, userid, toplevel, queryid, statement_text, source_file,
+        collected_at, dbid, userid, toplevel, queryid, statement_text, comment_metadata,
         total_exec_count, total_exec_time_ms, rows_returned_or_affected,
         shared_blks_hit, shared_blks_read, local_blks_hit, local_blks_read,
         temp_blks_read, temp_blks_written, total_block_accesses,
         min_exec_time_ms, max_exec_time_ms, mean_exec_time_ms, stddev_exec_time_ms
       ) VALUES (
-        '#{collected_at}', #{dbid}, #{userid}, #{toplevel ? 1 : 0}, '#{queryid}', '#{statement_text}', NULL,
+        '#{collected_at}', #{dbid}, #{userid}, #{toplevel ? 1 : 0}, '#{queryid}', '#{statement_text}', map('source_location', '/app/models/todo.rb:5'),
         #{total_exec_count}, #{total_exec_time_ms}, 0,
         0, 0, 0, 0,
         0, 0, 0,

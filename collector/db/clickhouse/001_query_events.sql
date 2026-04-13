@@ -7,7 +7,7 @@ CREATE TABLE query_events (
   toplevel Bool,
   queryid String,
   statement_text Nullable(String),
-  source_file Nullable(String),
+  comment_metadata Map(String, String),
   total_exec_count UInt64,
   total_exec_time_ms Float64,
   rows_returned_or_affected UInt64,

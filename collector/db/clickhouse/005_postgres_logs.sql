@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS postgres_logs (
   statement_text Nullable(String),
   database Nullable(String),
   session_id Nullable(String),
-  source_location Nullable(String),
+  comment_metadata Map(String, String),
   raw_json String
 ) ENGINE = ReplacingMergeTree
 ORDER BY (log_file, byte_offset);

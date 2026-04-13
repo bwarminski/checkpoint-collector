@@ -11,8 +11,10 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_match(/toplevel\s+Bool/, sql)
     assert_match(/queryid\s+String/, sql)
     assert_match(/statement_text\s+Nullable\(String\)/, sql)
+    assert_match(/comment_metadata\s+Map\(String,\s*String\)/, sql)
     assert_match(/total_exec_time_ms\s+Float64/, sql)
     assert_match(/ORDER BY \(dbid, userid, toplevel, queryid, collected_at\)/, sql)
+    refute_match(/source_file\s+Nullable\(String\)/, sql)
     refute_match(/fingerprint\s+String/, sql)
     refute_match(/sample_query\s+Nullable\(String\)/, sql)
     refute_match(/mean_block_accesses_per_call/, sql)
@@ -34,7 +36,9 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_includes sql, "interval_duration_ms"
     assert_includes sql, "lagInFrame(e.total_exec_count)"
     assert_includes sql, "statement_text"
+    assert_includes sql, "comment_metadata"
     assert_includes sql, "avg_exec_time_ms"
+    refute_includes sql, "source_file"
     refute_includes sql, "fingerprint"
     refute_includes sql, "sample_query"
   end
@@ -54,9 +58,11 @@ class ClickhouseSchemaTest < Minitest::Test
     assert_match(/CREATE TABLE IF NOT EXISTS postgres_logs/, sql)
     assert_match(/query_id\s+String/, sql)
     assert_match(/statement_text\s+Nullable\(String\)/, sql)
+    assert_match(/comment_metadata\s+Map\(String,\s*String\)/, sql)
     assert_match(/raw_json\s+String/, sql)
     assert_match(/ENGINE = ReplacingMergeTree/, sql)
     assert_match(/ORDER BY \(log_file, byte_offset\)/, sql)
+    refute_match(/source_location\s+Nullable\(String\)/, sql)
   end
 
   def test_postgres_log_state_schema_exists_with_resume_offsets
