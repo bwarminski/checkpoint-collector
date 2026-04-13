@@ -79,6 +79,28 @@ class QueryCommentParserTest < Minitest::Test
     )
   end
 
+  def test_ignores_comment_looking_text_inside_string_literals
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT '/*controller:todos,action:index*/' AS statement_text"
+    )
+
+    assert_equal({}, parsed)
+  end
+
+  def test_preserves_blank_metadata_values
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*controller:,action:index*/"
+    )
+
+    assert_equal(
+      {
+        "controller" => "",
+        "action" => "index"
+      },
+      parsed
+    )
+  end
+
   def test_returns_empty_hash_when_no_metadata_is_present
     assert_equal({}, QueryCommentParser.parse_from_query("SELECT 1"))
   end

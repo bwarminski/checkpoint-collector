@@ -60,6 +60,32 @@ class ClickhouseIntervalViewTest < Minitest::Test
     assert_equal({ "source_location" => "/app/models/todo.rb:5" }, rows.first.fetch("comment_metadata"))
   end
 
+  def test_second_snapshot_comment_metadata_wins_for_interval_row
+    insert_event(
+      collected_at: "2026-04-10 12:00:00.000",
+      queryid: "q1",
+      statement_text: "SELECT 1",
+      total_exec_count: 10,
+      total_exec_time_ms: 100.0,
+      comment_metadata: { "source_location" => "/app/models/todo.rb:5" }
+    )
+    insert_event(
+      collected_at: "2026-04-10 12:05:00.000",
+      queryid: "q1",
+      statement_text: "SELECT 1",
+      total_exec_count: 15,
+      total_exec_time_ms: 150.0,
+      comment_metadata: { "source_location" => "/app/models/todo.rb:42" }
+    )
+    insert_state(collected_at: "2026-04-10 12:00:00.000", stats_reset: "2026-04-10 11:00:00")
+    insert_state(collected_at: "2026-04-10 12:05:00.000", stats_reset: "2026-04-10 11:00:00")
+
+    rows = query_intervals("q1")
+
+    assert_equal 1, rows.length
+    assert_equal({ "source_location" => "/app/models/todo.rb:42" }, rows.first.fetch("comment_metadata"))
+  end
+
   def test_stats_reset_change_emits_no_interval_row
     insert_event(collected_at: "2026-04-10 12:00:00.000", queryid: "q1", statement_text: "SELECT 1", total_exec_count: 10, total_exec_time_ms: 100.0)
     insert_event(collected_at: "2026-04-10 12:05:00.000", queryid: "q1", statement_text: "SELECT 1", total_exec_count: 3, total_exec_time_ms: 30.0)
@@ -92,7 +118,7 @@ class ClickhouseIntervalViewTest < Minitest::Test
 
   private
 
-  def insert_event(collected_at:, queryid:, statement_text:, total_exec_count:, total_exec_time_ms:, dbid: 1, userid: 1, toplevel: true)
+  def insert_event(collected_at:, queryid:, statement_text:, total_exec_count:, total_exec_time_ms:, comment_metadata: { "source_location" => "/app/models/todo.rb:5" }, dbid: 1, userid: 1, toplevel: true)
     exec_sql(<<~SQL)
       INSERT INTO query_events (
         collected_at, dbid, userid, toplevel, queryid, statement_text, comment_metadata,
@@ -101,7 +127,7 @@ class ClickhouseIntervalViewTest < Minitest::Test
         temp_blks_read, temp_blks_written, total_block_accesses,
         min_exec_time_ms, max_exec_time_ms, mean_exec_time_ms, stddev_exec_time_ms
       ) VALUES (
-        '#{collected_at}', #{dbid}, #{userid}, #{toplevel ? 1 : 0}, '#{queryid}', '#{statement_text}', map('source_location', '/app/models/todo.rb:5'),
+        '#{collected_at}', #{dbid}, #{userid}, #{toplevel ? 1 : 0}, '#{queryid}', '#{statement_text}', #{clickhouse_map(comment_metadata)},
         #{total_exec_count}, #{total_exec_time_ms}, 0,
         0, 0, 0, 0,
         0, 0, 0,
@@ -161,5 +187,10 @@ class ClickhouseIntervalViewTest < Minitest::Test
 
   def strip_header(sql)
     sql.sub(/\A(?:--.*\n)+/, "")
+  end
+
+  def clickhouse_map(hash)
+    pairs = hash.flat_map { |key, value| ["'#{key}'", "'#{value}'"] }
+    "map(#{pairs.join(', ')})"
   end
 end
