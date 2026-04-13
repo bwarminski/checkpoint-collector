@@ -8,7 +8,7 @@ class QueryCommentParser
     return {} if query_text.nil?
 
     query_text.scan(COMMENT_PATTERN).each_with_object({}) do |(body), pairs|
-      body.to_s.split(",").each do |part|
+      body.to_s.split(/,(?=\s*[A-Za-z0-9_]+\s*[:=])/).each do |part|
         token = part.to_s.strip
         next if token.empty?
 

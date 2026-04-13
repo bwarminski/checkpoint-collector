@@ -34,6 +34,36 @@ class QueryCommentParserTest < Minitest::Test
     )
   end
 
+  def test_parses_values_that_contain_commas
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*note:hello, world,source_location:/app/a,b.rb:12*/"
+    )
+
+    assert_equal(
+      {
+        "note" => "hello, world",
+        "source_location" => "/app/a,b.rb:12"
+      },
+      parsed
+    )
+  end
+
+  def test_parses_equal_separators_and_quoted_values_with_commas
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 1 /*application='Demo',controller='todos',action='index',note='hello, world'*/"
+    )
+
+    assert_equal(
+      {
+        "application" => "Demo",
+        "controller" => "todos",
+        "action" => "index",
+        "note" => "hello, world"
+      },
+      parsed
+    )
+  end
+
   def test_returns_empty_hash_when_no_metadata_is_present
     assert_equal({}, QueryCommentParser.parse_from_query("SELECT 1"))
   end
