@@ -1,5 +1,5 @@
 # ABOUTME: Polls Postgres statement stats and shapes rows for ClickHouse inserts.
-# ABOUTME: Parses query text for source metadata in Rails query comments.
+# ABOUTME: Parses query text into comment_metadata maps from Rails query comments.
 require "time"
 require_relative "query_comment_parser"
 

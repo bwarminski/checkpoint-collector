@@ -275,7 +275,7 @@ class CollectorTest < Minitest::Test
     assert_equal 8.4, row[:stddev_exec_time_ms]
   end
 
-  def test_uses_only_the_rails_metadata_block_when_query_has_multiple_comments
+  def test_collects_comment_metadata_from_the_rails_metadata_block_when_query_has_multiple_comments
     stats_connection = StatsConnection.new([
       {
         "queryid" => "42",
@@ -306,7 +306,7 @@ class CollectorTest < Minitest::Test
     )
   end
 
-  def test_prefers_block_with_source_location_over_controller_only_comment
+  def test_collects_comment_metadata_from_the_block_with_source_location_over_controller_only_comment
     stats_connection = StatsConnection.new([
       {
         "queryid" => "42",
