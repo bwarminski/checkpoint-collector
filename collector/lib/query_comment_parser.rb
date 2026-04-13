@@ -49,7 +49,11 @@ class QueryCommentParser
 
     while index < query_text.length
       if query_text[index] == "'"
-        return index + 2 if query_text[index + 1] == "'"
+        if query_text[index + 1] == "'"
+          index += 2
+          next
+        end
+
         return index + 1
       end
 

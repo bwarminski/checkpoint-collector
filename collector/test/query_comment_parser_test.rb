@@ -87,6 +87,14 @@ class QueryCommentParserTest < Minitest::Test
     assert_equal({}, parsed)
   end
 
+  def test_ignores_comment_looking_text_inside_string_literals_with_escaped_quotes
+    parsed = QueryCommentParser.parse_from_query(
+      "SELECT 'abc''/*controller:todos*/' AS statement_text"
+    )
+
+    assert_equal({}, parsed)
+  end
+
   def test_preserves_blank_metadata_values
     parsed = QueryCommentParser.parse_from_query(
       "SELECT 1 /*controller:,action:index*/"
