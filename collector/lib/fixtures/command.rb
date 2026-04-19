@@ -24,21 +24,21 @@ module Fixtures
       manifest = @manifest_loader.load(fixture_name)
       options = parse_flags(manifest: manifest)
 
-      if verb == "all"
-        %w[reset drive assert].each do |step|
-          @registry.fetch([fixture_name, step]).call(manifest: manifest, options: options)
-        end
-      else
-        handler = @registry[[fixture_name, verb]]
+      steps = verb == "all" ? %w[reset drive assert] : [verb]
+      steps.each do |step|
+        handler = @registry[[fixture_name, step]]
         return usage_error if handler.nil?
 
         handler.call(manifest: manifest, options: options)
       end
 
       0
-    rescue OptionParser::ParseError, RuntimeError => error
+    rescue OptionParser::ParseError => error
       @stderr.puts(error.message)
       usage_error
+    rescue StandardError => error
+      @stderr.puts(error.message)
+      1
     end
 
     private
@@ -76,7 +76,11 @@ module Fixtures
         parser.on("--rebuild-template") { options[:rebuild_template] = true }
         parser.on("--seconds N", Integer) { |value| options[:seconds] = value }
         parser.on("--concurrency N", Integer) { |value| options[:concurrency] = value }
-        parser.on("--rate VALUE") { |value| options[:rate] = value == "unlimited" ? "unlimited" : Integer(value) }
+        parser.on("--rate VALUE") do |value|
+          options[:rate] = value == "unlimited" ? "unlimited" : Integer(value)
+        rescue ArgumentError
+          raise OptionParser::InvalidArgument, value
+        end
         parser.on("--base-url URL") { |value| options[:base_url] = value }
         parser.on("--timeout-seconds N", Integer) { |value| options[:timeout_seconds] = value }
       end.parse!(@argv)

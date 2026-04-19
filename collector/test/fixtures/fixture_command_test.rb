@@ -40,4 +40,61 @@ class FixtureCommandTest < Minitest::Test
     assert_equal 1, exit_code
     assert_includes stderr.string, "Usage:"
   end
+
+  def test_invalid_rate_prints_usage_instead_of_raising
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    exit_code = Fixtures::Command.new(
+      argv: ["missing-index", "drive", "--rate", "fast"],
+      registry: {
+        ["missing-index", "drive"] => ->(**) { flunk("handler should not run") },
+      },
+      manifest_loader: Class.new { define_singleton_method(:load) { |_| Struct.new(:seconds, :concurrency, :rate).new(60, 16, "unlimited") } },
+      stdout: stdout,
+      stderr: stderr,
+    ).run
+
+    assert_equal 1, exit_code
+    assert_includes stderr.string, "Usage:"
+  end
+
+  def test_runtime_failure_keeps_runtime_error_message
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    exit_code = Fixtures::Command.new(
+      argv: ["missing-index", "drive"],
+      registry: {
+        ["missing-index", "drive"] => ->(**) { raise RuntimeError, "boom" },
+      },
+      manifest_loader: Class.new { define_singleton_method(:load) { |_| Struct.new(:seconds, :concurrency, :rate).new(60, 16, "unlimited") } },
+      stdout: stdout,
+      stderr: stderr,
+    ).run
+
+    assert_equal 1, exit_code
+    refute_includes stderr.string, "Usage:"
+    assert_includes stderr.string, "boom"
+  end
+
+  def test_all_without_a_registered_handler_fails_without_key_error
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    exit_code = Fixtures::Command.new(
+      argv: ["missing-index", "all"],
+      registry: {
+        ["missing-index", "reset"] => ->(**) {},
+        ["missing-index", "drive"] => ->(**) {},
+      },
+      manifest_loader: Class.new { define_singleton_method(:load) { |_| Struct.new(:seconds, :concurrency, :rate).new(60, 16, "unlimited") } },
+      stdout: stdout,
+      stderr: stderr,
+    ).run
+
+    assert_equal 1, exit_code
+    refute_includes stderr.string, "KeyError"
+    assert_includes stderr.string, "Usage:"
+  end
 end
