@@ -54,7 +54,7 @@ module Fixtures
 
       def load_sql(url, name)
         connection = @pg.connect(url)
-        connection.exec(File.read(File.expand_path(name, File.expand_path(__dir__))))
+        connection.exec(File.read(File.expand_path(name, __dir__)))
       ensure
         connection&.close
       end
