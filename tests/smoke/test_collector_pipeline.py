@@ -63,6 +63,17 @@ def wait_for_rows(table: str, min_count: int = 1, timeout: int = 30) -> None:
     raise AssertionError(f"Expected >= {min_count} rows in {table}, got {actual} after {timeout}s")
 
 
+def wait_for_json_row(query: str, timeout: int = 30) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rows_json = clickhouse_query(query)
+        data = json.loads(rows_json)["data"]
+        if data:
+            return data[0]
+        time.sleep(1)
+    raise AssertionError(f"Expected matching row within {timeout}s for query: {query}")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -78,17 +89,13 @@ def test_postgres_logs_ingested_with_statement_text_from_message_field(running_s
         "/*source_location:/app/models/todo.rb:10*/;"
     )
 
-    wait_for_rows("postgres_logs", min_count=1, timeout=30)
-
-    rows_json = clickhouse_query(
+    row = wait_for_json_row(
         "SELECT statement_text, comment_metadata, database "
         "FROM postgres_logs "
         "WHERE statement_text LIKE '%pg_stat_statements%' "
         "AND statement_text LIKE '%source_location%' "
         "LIMIT 1 FORMAT JSON"
     )
-    assert rows_json, "No matching row found in postgres_logs"
-    row = json.loads(rows_json)["data"][0]
 
     assert "pg_stat_statements" in row["statement_text"]
     assert "source_location:/app/models/todo.rb:10" in row["statement_text"]

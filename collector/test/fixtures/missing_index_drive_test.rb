@@ -121,6 +121,53 @@ class MissingIndexDriveTest < Minitest::Test
     thread&.join
   end
 
+  def test_timeout_reports_last_health_probe_status
+    fake_clock = FakeClock.new(Time.utc(2026, 4, 19, 0, 0, 0))
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.local_address.ip_port
+    thread = Thread.new do
+      loop do
+        client = server.accept
+        request_line = client.gets
+        next unless request_line
+
+        while (line = client.gets)
+          break if line == "\r\n"
+        end
+
+        body = "not ready"
+        client.write("HTTP/1.1 404 Not Found\r\nContent-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}")
+        client.close
+      rescue IOError, Errno::EBADF
+        break
+      ensure
+        client&.close
+      end
+    end
+
+    manifest = Fixtures::Manifest.load("missing-index")
+    drive = Fixtures::MissingIndex::Drive.new(
+      manifest: manifest,
+      options: {
+        base_url: "http://127.0.0.1:#{port}",
+        seconds: 1,
+        concurrency: 1,
+        rate: "unlimited",
+        output_dir: Dir.mktmpdir,
+      },
+      clock: -> { fake_clock.now },
+      sleeper: ->(seconds) { fake_clock.advance_by(seconds) },
+    )
+
+    error = assert_raises(RuntimeError) { drive.run }
+
+    assert_includes error.message, "Timed out waiting for"
+    assert_includes error.message, "last status: 404"
+  ensure
+    server&.close
+    thread&.join
+  end
+
   private
 
   def with_rate_limiter_stub(limiter, counter)

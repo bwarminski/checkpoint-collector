@@ -13,8 +13,22 @@ This fixture reproduces the broken `todos.status` plan against the external demo
 Start the collector stack in `checkpoint-collector`, then start the demo app separately:
 
 ```bash
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/fixture_01 ~/db-specialist-demo/bin/rails server
+BUNDLE_USER_HOME=/tmp/bundle BUNDLE_PATH=vendor/bundle \
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/fixture_01 \
+bundle exec rails server -b 127.0.0.1 -p 3000
 ```
+
+Run that command from `~/db-specialist-demo`.
+
+Before `bin/fixture missing-index drive` or `all`, verify the readiness probe:
+
+```bash
+curl -i http://127.0.0.1:3000/up
+```
+
+`bin/fixture` waits for `/up` to return `200`. On the current `ab679e7` baseline app, `/up`
+returns `404`, so `drive` and `all` time out with a message that includes the last observed
+health status.
 
 ## Commands
 

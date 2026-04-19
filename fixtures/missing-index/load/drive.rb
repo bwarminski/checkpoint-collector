@@ -55,9 +55,15 @@ module Fixtures
 
       def wait_until_up!
         deadline = @clock.call + 120
+        last_health_result = nil
 
         until healthy?
-          raise "Timed out waiting for #{@options.fetch(:base_url)}#{@manifest.health_endpoint}" if @clock.call >= deadline
+          last_health_result = @last_health_result
+          if @clock.call >= deadline
+            message = "Timed out waiting for #{@options.fetch(:base_url)}#{@manifest.health_endpoint}"
+            message = "#{message} (last status: #{last_health_result})" if last_health_result
+            raise message
+          end
 
           @sleeper.call(1)
         end
@@ -65,8 +71,10 @@ module Fixtures
 
       def healthy?
         response = Net::HTTP.get_response(URI.join(@options.fetch(:base_url), @manifest.health_endpoint))
+        @last_health_result = response.code.to_i
         response.code.to_i == 200
       rescue Errno::ECONNREFUSED
+        @last_health_result = "connection refused"
         false
       end
 
