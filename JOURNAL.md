@@ -9,3 +9,5 @@
 - The fixture command registry now defers each fixture file `require` until that verb runs, so `reset` can work before `drive` and `assert` exist.
 - The missing-index template must create `pg_stat_statements` itself; otherwise `fixture_01` clones successfully but `pg_stat_statements_reset()` fails at the end of reset.
 - If template bootstrap fails after creating `fixture_01_tmpl`, reset must drop the template before re-raising so later runs do not reuse a poisoned database.
+- Task 4 drive code uses a per-thread `RateLimiter` instance instead of sharing one limiter across worker threads.
+- The live `bin/fixture missing-index drive --seconds 1 --concurrency 2 --rate unlimited` smoke run against a tiny local HTTP server wrote `tmp/fixture-last-run.json` with `request_count: 1194` and no stdout/stderr output.
