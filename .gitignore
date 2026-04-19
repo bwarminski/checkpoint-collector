@@ -1,5 +1,6 @@
 **/.bundle/
 **/.pytest_cache/
 collector/vendor/bundle/
+.worktrees/
 .idea/
 __pycache__/
