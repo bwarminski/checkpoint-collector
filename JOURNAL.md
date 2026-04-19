@@ -6,3 +6,4 @@
 - Task 2 command dispatch should treat handler failures as runtime errors, not usage errors.
 - Invalid `--rate` input should be converted into an `OptionParser` parse error so the CLI prints usage instead of crashing.
 - `bin/fixture missing-index reset` currently loads the full registry and therefore requires Task 4/5 files to exist before the CLI can run successfully.
+- The fixture command registry now defers each fixture file `require` until that verb runs, so `reset` can work before `drive` and `assert` exist.

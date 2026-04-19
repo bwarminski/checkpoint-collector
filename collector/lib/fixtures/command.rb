@@ -49,14 +49,19 @@ module Fixtures
     end
 
     def default_registry
-      require File.expand_path("../../../fixtures/missing-index/setup/reset", __dir__)
-      require File.expand_path("../../../fixtures/missing-index/load/drive", __dir__)
-      require File.expand_path("../../../fixtures/missing-index/validate/assert", __dir__)
-
       {
-        ["missing-index", "reset"] => ->(manifest:, options:) { Fixtures::MissingIndex::Reset.new(manifest: manifest, options: options).run },
-        ["missing-index", "drive"] => ->(manifest:, options:) { Fixtures::MissingIndex::Drive.new(manifest: manifest, options: options).run },
-        ["missing-index", "assert"] => ->(manifest:, options:) { Fixtures::MissingIndex::Assert.new(manifest: manifest, options: options, stdout: @stdout).run },
+        ["missing-index", "reset"] => ->(manifest:, options:) do
+          require File.expand_path("../../../fixtures/missing-index/setup/reset", __dir__)
+          Fixtures::MissingIndex::Reset.new(manifest: manifest, options: options).run
+        end,
+        ["missing-index", "drive"] => ->(manifest:, options:) do
+          require File.expand_path("../../../fixtures/missing-index/load/drive", __dir__)
+          Fixtures::MissingIndex::Drive.new(manifest: manifest, options: options).run
+        end,
+        ["missing-index", "assert"] => ->(manifest:, options:) do
+          require File.expand_path("../../../fixtures/missing-index/validate/assert", __dir__)
+          Fixtures::MissingIndex::Assert.new(manifest: manifest, options: options, stdout: @stdout).run
+        end,
       }
     end
 
