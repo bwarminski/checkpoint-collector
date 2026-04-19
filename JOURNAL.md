@@ -15,3 +15,4 @@
 - Task 5 live `EXPLAIN` output on `fixture_01` has a `Gather` root with the `Seq Scan` on `todos` beneath it, so the assertion needs to walk the plan tree instead of assuming the scan is the top node.
 - The real `bin/fixture missing-index assert --timeout-seconds 180` run in this environment completed the explain check and then timed out with `ClickHouse saw only 0 calls before timeout`.
 - Task 5 output should stay structured: `FIXTURE: missing-index`, then detailed `PASS: explain (...)` and `PASS: clickhouse (...)` lines.
+- Task 6 adds a manual `make fixture-smoke` target that runs `bin/fixture missing-index all`; without the external demo app running it prints the underlying command, shows the Postgres `fixture_01` notice if needed, and then waits until interrupted or timed out.
