@@ -24,20 +24,29 @@ module Fixtures
         finish_at = start_time + @options.fetch(:seconds)
         request_count = 0
         mutex = Mutex.new
+        limiter = RateLimiter.new(@options.fetch(:rate), clock: @clock, sleeper: @sleeper)
+        stop_requested = false
+        worker_error = nil
 
         threads = Array.new(@options.fetch(:concurrency)) do
           Thread.new do
-            limiter = RateLimiter.new(@options.fetch(:rate), clock: @clock, sleeper: @sleeper)
+            while !mutex.synchronize { stop_requested } && @clock.call < finish_at
+              limiter.wait_turn
+              break if mutex.synchronize { stop_requested } || @clock.call >= finish_at
 
-            while @clock.call < finish_at
               request_endpoint
               mutex.synchronize { request_count += 1 }
-              limiter.wait_turn
+            end
+          rescue StandardError => error
+            mutex.synchronize do
+              worker_error ||= error
+              stop_requested = true
             end
           end
         end
 
         threads.each(&:join)
+        raise worker_error if worker_error
 
         write_last_run(start_time: start_time, end_time: @clock.call, request_count: request_count)
       end
@@ -84,16 +93,19 @@ module Fixtures
           @clock = clock
           @sleeper = sleeper
           @next_allowed_at = nil
+          @mutex = Mutex.new
         end
 
         def wait_turn
-          return if @rate == "unlimited"
+          @mutex.synchronize do
+            return if @rate == "unlimited"
 
-          now = @clock.call
-          @next_allowed_at ||= now
-          sleep_for = @next_allowed_at - now
-          @sleeper.call(sleep_for) if sleep_for.positive?
-          @next_allowed_at = [@next_allowed_at, now].max + (1.0 / @rate)
+            now = @clock.call
+            @next_allowed_at ||= now
+            sleep_for = @next_allowed_at - now
+            @sleeper.call(sleep_for) if sleep_for.positive?
+            @next_allowed_at = [@next_allowed_at, now].max + (1.0 / @rate)
+          end
         end
       end
     end
