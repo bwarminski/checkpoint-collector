@@ -14,3 +14,4 @@
 - Task 4 fix: the drive path now shares one synchronized limiter across workers and rescues worker exceptions inside the run loop before re-raising in the main thread.
 - Task 5 live `EXPLAIN` output on `fixture_01` has a `Gather` root with the `Seq Scan` on `todos` beneath it, so the assertion needs to walk the plan tree instead of assuming the scan is the top node.
 - The real `bin/fixture missing-index assert --timeout-seconds 180` run in this environment completed the explain check and then timed out with `ClickHouse saw only 0 calls before timeout`.
+- Task 5 output should stay structured: `FIXTURE: missing-index`, then detailed `PASS: explain (...)` and `PASS: clickhouse (...)` lines.

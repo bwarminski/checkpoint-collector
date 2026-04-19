@@ -23,8 +23,9 @@ module Fixtures
         verify_plan!(plan)
         clickhouse = wait_for_clickhouse!
 
-        @stdout.puts("PASS: explain")
-        @stdout.puts("PASS: clickhouse")
+        @stdout.puts("FIXTURE: #{@manifest.name}")
+        @stdout.puts("PASS: explain (#{plan.fetch("Node Type")} on #{plan.fetch("Relation Name")}, root node confirmed)")
+        @stdout.puts("PASS: clickhouse (#{clickhouse.fetch("calls")} calls; mean #{clickhouse.fetch("mean_ms")}ms)")
 
         [plan, clickhouse]
       end
