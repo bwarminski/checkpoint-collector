@@ -1354,3 +1354,32 @@ git commit -m "test: verify fixture harness end to end"
   Task 7 covers preserving `load/harness.rb` and `load/test/harness_test.rb`, re-running `tests/smoke/`, and recording verification evidence in `JOURNAL.md`.
 - Placeholder scan: no `TODO`, `TBD`, or “similar to Task N” placeholders remain.
 - Type consistency: all tasks use the same fixture name (`missing-index`), DB names (`fixture_01`, `fixture_01_tmpl`), oracle tags, command verbs, and last-run file path.
+
+## GSTACK REVIEW REPORT (Implementation Review — 2026-04-19)
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | DONE_WITH_CONCERNS (fixed inline) | 4 issues, all resolved |
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 1 | Used as outside voice | 1 actionable finding incorporated |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+### Issues Found and Resolved
+
+| Severity | Confidence | Location | Finding | Resolution |
+|----------|------------|----------|---------|------------|
+| P1 | 10/10 | `fixture_command_test.rb:with_require_guard` | Test isolation bug: `remove_const :Reset` destroys constant between test files; suite fails non-deterministically (confirmed with seed 12215) | Save+restore original const with `$VERBOSE=nil` suppression |
+| P1 | 9/10 | `assert.rb:query_clickhouse` | `sum(total_exec_count)` double-counts cumulative pg_stat_statements snapshots; after reset, actual calls ≠ SUM across intervals | Changed to `max(total_exec_count)` |
+| P2 | 9/10 | `drive.rb:RateLimiter` | `wait_turn` timing algorithm not unit tested; only tested via stub | Added 2 direct unit tests (finite rate + unlimited) |
+| P3 | 9/10 | `reset.rb:load_sql` | `File.expand_path(name, File.expand_path(__dir__))` — inner expand is redundant | Simplified to `File.expand_path(name, __dir__)` |
+
+### Codex Outside Voice — Cross-Model Tensions
+
+**Resolved:** ClickHouse SUM → MAX (codex correct, incorporated).
+
+**Disagree:** Codex flagged HTTP-driving the external app as “unnecessary complexity” vs direct SQL. Intentional — the fixture exists to capture ORM-generated query patterns through a real app stack, not just raw SQL. HTTP approach stays.
+
+**Known limitation (not fixing):** 90-second ClickHouse wait is timing-based, not barrier-based. Acceptable for an MVP dev tool. `tmp/fixture-last-run.json` is shared globally; parallel runs would stomp each other. Both are scoped to “first fixture” MVP and noted for future work.
+
+**VERDICT:** DONE — all P1/P2 issues resolved. Suite clean across random seeds. 23 runs, 94 assertions, 0 failures.
