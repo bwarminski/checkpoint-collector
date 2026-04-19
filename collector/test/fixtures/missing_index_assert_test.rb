@@ -40,7 +40,7 @@ class MissingIndexAssertTest < Minitest::Test
     ).run
 
     assert_includes stdout.string, "FIXTURE: missing-index"
-    assert_includes stdout.string, "PASS: explain (Seq Scan on todos, root node confirmed)"
+    assert_includes stdout.string, "PASS: explain (Seq Scan on todos, plan node confirmed)"
     assert_includes stdout.string, "PASS: clickhouse (600 calls; mean 42.3ms)"
   end
 
