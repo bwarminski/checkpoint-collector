@@ -27,7 +27,12 @@ bin/fixture missing-index all
 
 ## Oracle Verification
 
+`bin/fixture missing-index assert` reads `tmp/fixture-last-run.json`, so run
+`drive` first or reuse an existing last-run file from the same fixture window.
+
 ```bash
+bin/fixture missing-index reset --rebuild-template
+bin/fixture missing-index drive
 git -C ~/db-specialist-demo checkout oracle/add-index
 bin/fixture missing-index assert --timeout-seconds 180
 git -C ~/db-specialist-demo checkout master
