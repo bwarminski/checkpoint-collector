@@ -12,3 +12,5 @@
 - Task 4 drive code uses a per-thread `RateLimiter` instance instead of sharing one limiter across worker threads.
 - The live `bin/fixture missing-index drive --seconds 1 --concurrency 2 --rate unlimited` smoke run against a tiny local HTTP server wrote `tmp/fixture-last-run.json` with `request_count: 1194` and no stdout/stderr output.
 - Task 4 fix: the drive path now shares one synchronized limiter across workers and rescues worker exceptions inside the run loop before re-raising in the main thread.
+- Task 5 live `EXPLAIN` output on `fixture_01` has a `Gather` root with the `Seq Scan` on `todos` beneath it, so the assertion needs to walk the plan tree instead of assuming the scan is the top node.
+- The real `bin/fixture missing-index assert --timeout-seconds 180` run in this environment completed the explain check and then timed out with `ClickHouse saw only 0 calls before timeout`.
