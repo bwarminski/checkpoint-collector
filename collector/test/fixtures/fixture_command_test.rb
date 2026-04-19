@@ -129,11 +129,18 @@ class FixtureCommandTest < Minitest::Test
       Fixtures.const_set(:MissingIndex, Module.new)
     end
 
+    # Save the pre-existing :Reset (if any) so we can restore it instead of removing it.
+    original_reset = fixture_module.const_defined?(:Reset, false) ? fixture_module.const_get(:Reset) : nil
+
     Kernel.module_eval do
       define_method(:require) do |path|
         case path
         when %r{/fixtures/missing-index/setup/reset$}
           events << :reset_require
+          # Suppress the "already initialized constant" warning when a previous
+          # test has already required the real reset.rb into this module.
+          prev_verbose = $VERBOSE
+          $VERBOSE = nil
           fixture_module.const_set(:Reset, Class.new do
             def initialize(**); end
 
@@ -141,6 +148,7 @@ class FixtureCommandTest < Minitest::Test
               0
             end
           end)
+          $VERBOSE = prev_verbose
           true
         when %r{/fixtures/missing-index/load/drive$}, %r{/fixtures/missing-index/validate/assert$}
           raise "unexpected require: #{path}"
@@ -157,7 +165,15 @@ class FixtureCommandTest < Minitest::Test
       define_method(:require, original_require)
     end
 
-    fixture_module.send(:remove_const, :Reset) if fixture_module.const_defined?(:Reset, false)
+    if original_reset
+      # Restore the class that existed before the stub, silently.
+      prev_verbose = $VERBOSE
+      $VERBOSE = nil
+      fixture_module.const_set(:Reset, original_reset)
+      $VERBOSE = prev_verbose
+    elsif fixture_module.const_defined?(:Reset, false)
+      fixture_module.send(:remove_const, :Reset)
+    end
     Fixtures.send(:remove_const, :MissingIndex) if fixture_module_created
   end
 end
