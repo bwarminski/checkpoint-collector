@@ -12,7 +12,10 @@ class MissingIndexResetTest < Minitest::Test
     Fixtures::MissingIndex::Reset.new(
       manifest: manifest,
       options: { admin_url: "postgresql://localhost/postgres", rebuild_template: true },
-      pg: FakePg.new(FakeConnection.new(statements, exists: false)),
+      pg: FakePg.new(
+        admin: FakeConnection.new(statements, exists: false),
+        template: FakeConnection.new(statements, exists: false),
+      ),
     ).run
 
     assert_includes statements, 'DROP DATABASE IF EXISTS "fixture_01"'
@@ -29,11 +32,36 @@ class MissingIndexResetTest < Minitest::Test
     Fixtures::MissingIndex::Reset.new(
       manifest: manifest,
       options: { admin_url: "postgresql://localhost/postgres", rebuild_template: false },
-      pg: FakePg.new(FakeConnection.new(statements, exists: true)),
+      pg: FakePg.new(
+        admin: FakeConnection.new(statements, exists: true),
+        template: FakeConnection.new(statements, exists: true),
+      ),
     ).run
 
     refute_includes statements, 'CREATE DATABASE "fixture_01_tmpl"'
     assert_includes statements, 'CREATE DATABASE "fixture_01" TEMPLATE "fixture_01_tmpl"'
+  end
+
+  def test_template_build_failure_drops_poisoned_template
+    statements = []
+    manifest = Fixtures::Manifest.load("missing-index")
+    pg = FakePg.new(
+      admin: FakeConnection.new(statements, exists: false),
+      template: FailingTemplateConnection.new(statements, exists: false),
+    )
+
+    error = assert_raises(RuntimeError) do
+      Fixtures::MissingIndex::Reset.new(
+        manifest: manifest,
+        options: { admin_url: "postgresql://localhost/postgres", rebuild_template: false },
+        pg: pg,
+      ).run
+    end
+
+    assert_equal "seed failed", error.message
+    assert_includes statements, 'CREATE DATABASE "fixture_01_tmpl"'
+    assert_includes statements, 'DROP DATABASE IF EXISTS "fixture_01_tmpl"'
+    refute_includes statements, 'CREATE DATABASE "fixture_01" TEMPLATE "fixture_01_tmpl"'
   end
 
   def test_schema_file_creates_user_id_index_and_no_status_index
@@ -48,11 +76,14 @@ class MissingIndexResetTest < Minitest::Test
   # Returns the same connection for every connect() call so load_sql's additional
   # connects don't exhaust a finite pool.
   class FakePg
-    def initialize(connection)
-      @connection = connection
+    def initialize(admin:, template:)
+      @admin = admin
+      @template = template
     end
 
-    def connect(*) = @connection
+    def connect(url)
+      url.include?("/fixture_01_tmpl") ? @template : @admin
+    end
   end
 
   FakeResult = Struct.new(:ntuples)
@@ -75,5 +106,14 @@ class MissingIndexResetTest < Minitest::Test
     end
 
     def close; end
+  end
+
+  class FailingTemplateConnection < FakeConnection
+    def exec(sql)
+      super
+      raise "seed failed" if sql.include?("INSERT INTO todos")
+
+      []
+    end
   end
 end

@@ -30,6 +30,9 @@ module Fixtures
         create_database(admin, template_name)
         load_sql(template_url, "01_schema.sql")
         load_sql(template_url, "02_seed.sql")
+      rescue StandardError
+        drop_database(admin, template_name)
+        raise
       end
 
       def rebuild_template(admin)
