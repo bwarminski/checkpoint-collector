@@ -1,6 +1,7 @@
 # ABOUTME: Shared pytest fixtures for collector integration tests.
 # ABOUTME: Provides compose stack lifecycle helpers used across smoke test modules.
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -8,12 +9,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+COMPOSE_ENV = {**os.environ, "COMPOSE_PROJECT_NAME": "checkpoint-collector"}
 
 
 def compose(*args, **kwargs):
     return subprocess.run(
         ["docker", "compose", *args],
         cwd=ROOT,
+        env=kwargs.pop("env", COMPOSE_ENV),
         check=kwargs.pop("check", True),
         capture_output=kwargs.pop("capture_output", True),
         text=kwargs.pop("text", True),

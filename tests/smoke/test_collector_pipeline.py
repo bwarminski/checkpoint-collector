@@ -5,7 +5,7 @@
 #   - Postgres emits jsonlog entries with statement text embedded in the "message" field
 #     (the real format: "duration: X ms  statement: <sql>")
 #   - LogIngester extracts statement_text correctly from that format
-#   - postgres_logs rows have the expected shape including source_location from query comments
+#   - postgres_logs rows preserve query comments in comment_metadata
 #   - query_events rows carry statement_text from pg_stat_statements
 #   - After two collection passes, query_intervals produces non-null avg_exec_time_ms
 #
@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from tests.conftest import ROOT, compose, wait_healthy, clickhouse_query, postgres_exec
+from tests.conftest import ROOT, COMPOSE_ENV, compose, wait_healthy, clickhouse_query, postgres_exec
 
 COLLECTOR_INTERVAL = 5  # seconds, matches COLLECTOR_INTERVAL_SECONDS default
 
@@ -26,6 +26,7 @@ def stack_is_buildable() -> bool:
     result = subprocess.run(
         ["docker", "compose", "config", "--quiet"],
         cwd=ROOT,
+        env=COMPOSE_ENV,
         capture_output=True,
         check=False,
     )
@@ -80,7 +81,7 @@ def test_postgres_logs_ingested_with_statement_text_from_message_field(running_s
     wait_for_rows("postgres_logs", min_count=1, timeout=30)
 
     rows_json = clickhouse_query(
-        "SELECT statement_text, source_location, database "
+        "SELECT statement_text, comment_metadata, database "
         "FROM postgres_logs "
         "WHERE statement_text LIKE '%pg_stat_statements%' "
         "AND statement_text LIKE '%source_location%' "
@@ -91,7 +92,7 @@ def test_postgres_logs_ingested_with_statement_text_from_message_field(running_s
 
     assert "pg_stat_statements" in row["statement_text"]
     assert "source_location:/app/models/todo.rb:10" in row["statement_text"]
-    assert row["source_location"] == "/app/models/todo.rb:10"
+    assert row["comment_metadata"]["source_location"] == "/app/models/todo.rb:10"
     assert row["database"] == "checkpoint_demo"
 
 
@@ -115,7 +116,7 @@ def test_postgres_logs_row_has_required_columns(running_stack):
     assert "statement_text" in columns
     assert "database" in columns
     assert "session_id" in columns
-    assert "source_location" in columns
+    assert "comment_metadata" in columns
     assert "raw_json" in columns
 
 
@@ -182,7 +183,7 @@ def test_non_statement_jsonlog_entries_do_not_appear_in_postgres_logs(running_st
 def test_source_location_round_trips_through_full_pipeline(running_stack):
     """
     A Rails-style query comment survives Postgres logging, ingestion, and
-    ClickHouse storage with the source path intact.
+    ClickHouse storage with the source path intact in comment_metadata.
     """
     unique_path = "/app/controllers/integration_test_controller.rb:99"
     postgres_exec(
@@ -194,11 +195,12 @@ def test_source_location_round_trips_through_full_pipeline(running_stack):
     while time.time() < deadline:
         result = clickhouse_query(
             f"SELECT count() FROM postgres_logs "
-            f"WHERE source_location = '{unique_path}'"
+            f"WHERE mapContains(comment_metadata, 'source_location') "
+            f"AND comment_metadata['source_location'] = '{unique_path}'"
         )
         if int(result) > 0:
             found = True
             break
         time.sleep(1)
 
-    assert found, f"source_location '{unique_path}' not found in postgres_logs after 30s"
+    assert found, f"source_location '{unique_path}' not found in postgres_logs comment_metadata after 30s"
