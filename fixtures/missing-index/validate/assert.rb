@@ -73,7 +73,7 @@ module Fixtures
       def query_clickhouse(window)
         sql = <<~SQL
           SELECT
-            toString(coalesce(sum(total_exec_count), 0)) AS calls,
+            toString(coalesce(max(total_exec_count), 0)) AS calls,
             toString(round(coalesce(avg(mean_exec_time_ms), 0), 1)) AS mean_ms
           FROM query_events
           WHERE collected_at BETWEEN parseDateTime64BestEffort('#{window.fetch("start_ts")}') AND parseDateTime64BestEffort('#{window.fetch("end_ts")}') + INTERVAL 90 SECOND
