@@ -5,3 +5,4 @@
 - `bin/fixture` is the top-level entrypoint and should stay thin; fixture behavior belongs under `collector/lib/fixtures/` and `fixtures/`.
 - Task 2 command dispatch should treat handler failures as runtime errors, not usage errors.
 - Invalid `--rate` input should be converted into an `OptionParser` parse error so the CLI prints usage instead of crashing.
+- `bin/fixture missing-index reset` currently loads the full registry and therefore requires Task 4/5 files to exist before the CLI can run successfully.
