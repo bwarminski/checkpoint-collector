@@ -121,6 +121,35 @@ class MissingIndexDriveTest < Minitest::Test
     thread&.join
   end
 
+  def test_rate_limiter_spaces_calls_at_fixed_interval
+    clock = FakeClock.new(Time.utc(2026, 1, 1))
+    sleeps = []
+    limiter = Fixtures::MissingIndex::Drive::RateLimiter.new(
+      2,
+      clock: -> { clock.now },
+      sleeper: ->(s) { sleeps << s; clock.advance_by(s) },
+    )
+
+    3.times { limiter.wait_turn }
+
+    # First call sets @next_allowed_at and returns immediately (sleep_for = 0).
+    # Calls 2 and 3 each sleep 0.5s (1 / rate).
+    assert_equal [0.5, 0.5], sleeps
+  end
+
+  def test_rate_limiter_unlimited_never_sleeps
+    sleeps = []
+    limiter = Fixtures::MissingIndex::Drive::RateLimiter.new(
+      "unlimited",
+      clock: -> { Time.now },
+      sleeper: ->(s) { sleeps << s },
+    )
+
+    5.times { limiter.wait_turn }
+
+    assert_empty sleeps
+  end
+
   def test_timeout_reports_last_health_probe_status
     fake_clock = FakeClock.new(Time.utc(2026, 4, 19, 0, 0, 0))
     server = TCPServer.new("127.0.0.1", 0)
