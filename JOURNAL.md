@@ -7,3 +7,4 @@
 - Invalid `--rate` input should be converted into an `OptionParser` parse error so the CLI prints usage instead of crashing.
 - `bin/fixture missing-index reset` currently loads the full registry and therefore requires Task 4/5 files to exist before the CLI can run successfully.
 - The fixture command registry now defers each fixture file `require` until that verb runs, so `reset` can work before `drive` and `assert` exist.
+- The missing-index template must create `pg_stat_statements` itself; otherwise `fixture_01` clones successfully but `pg_stat_statements_reset()` fails at the end of reset.

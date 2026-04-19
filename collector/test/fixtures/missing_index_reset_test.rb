@@ -39,6 +39,7 @@ class MissingIndexResetTest < Minitest::Test
   def test_schema_file_creates_user_id_index_and_no_status_index
     sql = File.read(File.expand_path("../../../fixtures/missing-index/setup/01_schema.sql", __dir__))
 
+    assert_includes sql, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
     assert_includes sql, "CREATE INDEX index_todos_on_user_id"
     refute_match(/CREATE INDEX .*status/i, sql)
     refute_includes sql, "index_todos_on_status"
