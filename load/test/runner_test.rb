@@ -19,13 +19,33 @@ class RunnerTest < Minitest::Test
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new
     stop_flag = StopFlag.new
-    runner = Load::Runner.new(workload: FakeWorkload.new, adapter_client: adapter, run_record:, clock: fake_clock, sleeper: ->(*) {}, http: FakeHttp.new, stop_flag:)
+    sleeper = ->(*) { stop_flag.trigger(:sigint) }
+    runner = Load::Runner.new(workload: FakeWorkload.new, adapter_client: adapter, run_record:, clock: fake_clock, sleeper:, http: FakeHttp.new, stop_flag:)
 
-    Thread.new { sleep(0.01); stop_flag.trigger(:sigint) }
     runner.run
 
     assert_equal true, run_record.outcome.fetch(:aborted)
     assert_equal 1, adapter.stop_calls
+  end
+
+  def test_runner_returns_one_when_adapter_describe_fails
+    run_record = FakeRunRecord.new
+    adapter = FakeAdapterClient.new(describe_error: Load::AdapterClient::AdapterError.new("boom"))
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+    )
+
+    exit_code = runner.run
+
+    assert_equal 1, exit_code
+    assert_equal "adapter_error", run_record.outcome.fetch(:error_code)
+    assert_equal 0, adapter.stop_calls
   end
 
   def test_runner_readiness_probe_exits_one_on_timeout
@@ -62,6 +82,7 @@ class RunnerTest < Minitest::Test
       clock: fake_clock,
       sleeper: ->(*) {},
       http: FakeHttp.new,
+      adapter_bin: "adapters/rails/bin/bench-adapter",
     )
 
     runner.run
@@ -70,6 +91,7 @@ class RunnerTest < Minitest::Test
     assert_equal "rails-postgres-adapter", run_record.adapter.fetch(:describe).fetch("name")
     assert_equal "rails", run_record.adapter.fetch(:describe).fetch("framework")
     assert_equal "ruby-3.3", run_record.adapter.fetch(:describe).fetch("runtime")
+    assert_equal "adapters/rails/bin/bench-adapter", run_record.adapter.fetch(:bin)
   end
 
   def test_runner_pins_window_start_ts_at_first_successful_request
@@ -124,17 +146,21 @@ class RunnerTest < Minitest::Test
   end
 
   class FakeAdapterClient
-    attr_reader :stop_calls, :describe_calls
+    attr_reader :stop_calls, :describe_calls, :adapter_bin
 
-    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" })
+    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, adapter_bin: nil)
       @start_response = start_response
       @describe_response = describe_response
+      @describe_error = describe_error
+      @adapter_bin = adapter_bin
       @stop_calls = 0
       @describe_calls = 0
     end
 
     def describe
       @describe_calls += 1
+      raise @describe_error if @describe_error
+
       @describe_response
     end
 

@@ -5,10 +5,14 @@ require "open3"
 
 module Load
   class AdapterClient
+    AdapterError = Class.new(StandardError)
+
     def initialize(adapter_bin:, capture3: nil)
       @adapter_bin = adapter_bin
       @capture3 = capture3 || ->(*argv) { Open3.capture3(*argv) }
     end
+
+    attr_reader :adapter_bin
 
     def describe
       invoke("describe")
@@ -39,7 +43,7 @@ module Load
 
     def invoke(*argv)
       stdout, stderr, status = @capture3.call(@adapter_bin, *argv)
-      raise RuntimeError, stderr unless status.success?
+      raise AdapterError, stderr unless status.success?
 
       stdout.to_s.empty? ? {} : JSON.parse(stdout)
     end

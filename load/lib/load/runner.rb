@@ -6,7 +6,7 @@ require "time"
 
 module Load
   class Runner
-    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_timeout_seconds: 15, readiness_path: "/up", startup_grace_seconds: 15, app_root: nil, stop_flag: nil)
+    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_timeout_seconds: 15, readiness_path: "/up", startup_grace_seconds: 15, app_root: nil, adapter_bin: nil, stop_flag: nil)
       @workload = workload
       @adapter_client = adapter_client
       @run_record = run_record
@@ -17,6 +17,7 @@ module Load
       @readiness_path = readiness_path
       @startup_grace_seconds = startup_grace_seconds
       @app_root = app_root
+      @adapter_bin = adapter_bin
       @stop_flag = stop_flag || InternalStopFlag.new
       @state_mutex = Mutex.new
       @state = {
@@ -40,7 +41,7 @@ module Load
       start_response = @adapter_client.start(app_root: @app_root)
       write_state(adapter: {
         describe: adapter_describe,
-        bin: nil,
+        bin: @adapter_bin || @adapter_client.adapter_bin,
         app_root: @app_root,
         pid: start_response.fetch("pid"),
         base_url: start_response.fetch("base_url"),
@@ -50,11 +51,19 @@ module Load
       start_workers(start_response.fetch("base_url"))
 
       finish_run
+    rescue AdapterClient::AdapterError => error
+      write_state(outcome: @state.fetch(:outcome).merge(aborted: true, error_code: "adapter_error"))
+      1
     rescue ReadinessTimeout
       write_state(outcome: @state.fetch(:outcome).merge(aborted: true, error_code: "readiness_timeout"))
       1
     ensure
-      @adapter_client.stop(pid: @state.dig(:adapter, :pid)) if @state.dig(:adapter, :pid)
+      begin
+        @adapter_client.stop(pid: @state.dig(:adapter, :pid)) if @state.dig(:adapter, :pid)
+      rescue AdapterClient::AdapterError
+        write_state(outcome: @state.fetch(:outcome).merge(aborted: true, error_code: "adapter_error"))
+        return 1
+      end
     end
 
     private

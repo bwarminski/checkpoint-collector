@@ -55,6 +55,7 @@ module Load
           readiness_path:,
           startup_grace_seconds:,
           app_root:,
+          adapter_bin:,
         )
       end
     end
