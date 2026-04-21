@@ -171,7 +171,9 @@ Expected: `Load` constants are missing.
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/selector_test.rb`
 Expected: `Load::Selector` is undefined.
 
-- [ ] **Step 3: Implement the minimal value objects, base classes, and pure utilities**
+- [ ] **Step 3: Implement value objects; port RateLimiter and Selector verbatim from existing fixture code**
+
+**Value objects (new):**
 
 ```ruby
 # load/lib/load/scale.rb
@@ -189,32 +191,11 @@ module Load
     end
   end
 end
-
-# load/lib/load/rate_limiter.rb
-module Load
-  class RateLimiter
-    def initialize(rate_limit:, clock:, sleeper:)
-      @rate_limit = rate_limit
-      @clock = clock
-      @sleeper = sleeper
-      @mutex = Mutex.new
-      @next_allowed_at = nil
-    end
-
-    def wait_turn
-      return if @rate_limit == :unlimited
-
-      @mutex.synchronize do
-        now = @clock.call
-        @next_allowed_at ||= now
-        sleep_for = @next_allowed_at - now
-        @sleeper.call(sleep_for) if sleep_for.positive?
-        @next_allowed_at = [@next_allowed_at, now].max + (1.0 / @rate_limit)
-      end
-    end
-  end
-end
 ```
+
+**RateLimiter:** Do NOT reimplement. Copy the body of `Fixtures::MissingIndex::Drive::RateLimiter` from `fixtures/missing-index/load/drive.rb` verbatim into `load/lib/load/rate_limiter.rb`, renaming only the module (`Fixtures::MissingIndex::Drive` → `Load`). Preserve the exact mutex, clock/sleeper kwargs, and `:unlimited` branch. Behavior changes risk desynchronizing parity verification in Task 9 — port-then-verify is safer than port-and-improve. Port the existing rate-limiter tests alongside.
+
+**Selector:** implement fresh (no existing code to port) — weighted random selection via the worker's seeded `Random`. Simplest correct implementation: cumulative-weight table built once in `initialize`, `Array#bsearch_index` against `rng.rand * total_weight` per call.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -244,7 +225,9 @@ git commit -m "feat: add load runner foundations"
 - Create: `load/test/run_record_test.rb`
 - Create: `load/test/worker_test.rb`
 
-- [ ] **Step 1: Write the failing metrics and worker tests**
+- [ ] **Step 1: Write the failing metrics, reporter, and worker tests**
+
+Per-worker buffer model (§8.6 of spec): every worker owns its own `Load::Metrics::Buffer`. The reporter iterates the worker list and swaps each buffer atomically; it never holds a single shared buffer.
 
 ```ruby
 # load/test/metrics_test.rb
@@ -262,6 +245,34 @@ def test_snapshot_computes_percentiles_and_errors
   assert_in_delta 30.0, stats.fetch(:p95_ms), 0.1
 end
 
+# load/test/reporter_test.rb
+def test_reporter_merges_per_worker_buffers_at_each_interval
+  workers = [FakeWorker.new, FakeWorker.new]
+  workers[0].buffer.record_ok(action: :a, latency_ns: 5_000_000, status: 200)
+  workers[1].buffer.record_ok(action: :a, latency_ns: 15_000_000, status: 200)
+  sink = []
+  clock = FakeClock.new([0.0, 5.0])
+  reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock:, sleeper: ->(*) {})
+
+  reporter.snapshot_once  # simulate one tick
+
+  line = sink.last
+  assert_equal 2, line.fetch(:actions).fetch(:a).fetch(:count)
+end
+
+def test_reporter_emits_final_tail_snapshot_on_stop
+  workers = [FakeWorker.new]
+  sink = []
+  reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new, sleeper: ->(*) {})
+
+  reporter.start
+  # Record after the last periodic snapshot to simulate tail data.
+  workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+  reporter.stop  # must flush one more snapshot-merge-compute-append
+
+  assert_equal 1, sink.sum { |line| line.fetch(:actions).fetch(:a, {}).fetch(:count, 0) }
+end
+
 # load/test/worker_test.rb
 def test_worker_records_errors_without_raising
   selector = stub(next: Load::ActionEntry.new(FailingAction, 1))
@@ -271,6 +282,35 @@ def test_worker_records_errors_without_raising
   worker.run
 
   assert_equal 1, buffer.swap!.fetch(:failing_action).fetch(:errors_by_class).fetch("RuntimeError")
+end
+
+def test_worker_records_error_when_selector_raises_before_started_ns
+  # Regression: if `selector.next` raises, the old worker body left `started_ns`
+  # unassigned and the rescue clause raised NameError. Guard against that.
+  raising_selector = Object.new
+  def raising_selector.next = raise RuntimeError, "boom"
+  buffer = Load::Metrics::Buffer.new
+  worker = Load::Worker.new(worker_id: 9, selector: raising_selector, buffer:, client: Object.new, ctx: {}, rng: Random.new(7), rate_limiter: stub(wait_turn: nil), stop_flag: stop_after(1))
+
+  worker.run  # must NOT raise NameError
+
+  bucket = buffer.swap!.fetch(:unknown)
+  assert_equal 1, bucket.fetch(:errors_by_class).fetch("RuntimeError")
+  assert_equal 0, bucket.fetch(:latencies_ns).first  # latency_ns recorded as 0 when no request actually started
+end
+
+def test_worker_records_error_when_action_init_raises
+  # Same regression shape: action_class.new may raise on bad kwargs.
+  bad_action_class = Class.new(Load::Action) do
+    def initialize(**) = raise ArgumentError, "bad kwargs"
+  end
+  selector = stub(next: Load::ActionEntry.new(bad_action_class, 1))
+  buffer = Load::Metrics::Buffer.new
+  worker = Load::Worker.new(worker_id: 1, selector:, buffer:, client: Object.new, ctx: {}, rng: Random.new(7), rate_limiter: stub(wait_turn: nil), stop_flag: stop_after(1))
+
+  worker.run
+
+  assert_equal 1, buffer.swap!.fetch(:unknown).fetch(:errors_by_class).fetch("ArgumentError")
 end
 ```
 
@@ -322,14 +362,26 @@ module Load
   class Worker
     def run
       until @stop_flag.call
-        @rate_limiter.wait_turn
-        entry = @selector.next
-        action = entry.action_class.new(rng: @rng, ctx: @ctx, client: @client)
+        # started_ns MUST be assigned before anything that can raise, so the rescue
+        # clause always has a valid value. Prior shape assigned it after selector.next
+        # and action_class.new — both of which can raise — producing NameError in the
+        # rescue. Guarded by regression tests in worker_test.rb.
         started_ns = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
-        response = action.call
-        @buffer.record_ok(action: action.name, latency_ns: elapsed_ns(started_ns), status: response.code.to_i)
-      rescue StandardError => error
-        @buffer.record_error(action: action&.name || :unknown, latency_ns: elapsed_ns(started_ns), error_class: error.class.name)
+        action = nil
+        begin
+          @rate_limiter.wait_turn
+          entry = @selector.next
+          action = entry.action_class.new(rng: @rng, ctx: @ctx, client: @client)
+          request_started_ns = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+          response = action.call
+          @buffer.record_ok(action: action.name, latency_ns: elapsed_ns(request_started_ns), status: response.code.to_i)
+        rescue StandardError => error
+          # If the error happened before the request actually started, report latency 0
+          # rather than the time spent selecting/constructing — that would contaminate
+          # percentile data with selector overhead.
+          latency_ns = defined?(request_started_ns) ? elapsed_ns(request_started_ns) : 0
+          @buffer.record_error(action: (action && action.respond_to?(:name) ? action.name : :unknown), latency_ns:, error_class: error.class.name)
+        end
       end
     end
   end
@@ -393,12 +445,93 @@ def test_runner_always_stops_adapter_and_writes_outcome
   assert_equal false, run_record.outcome.fetch(:aborted)
 end
 
+def test_runner_sets_aborted_true_on_sigint_and_still_stops_adapter
+  run_record = FakeRunRecord.new
+  adapter = FakeAdapterClient.new
+  stop_flag = StopFlag.new
+  runner = Load::Runner.new(workload: FakeWorkload.new, adapter_client: adapter, run_record:, clock: fake_clock, sleeper: ->(*) {}, stop_flag:)
+
+  Thread.new { sleep(0.01); stop_flag.trigger(:sigint) }
+  runner.run
+
+  assert_equal true, run_record.outcome.fetch(:aborted)
+  assert_equal 1, adapter.stop_calls  # ensure block must run even on signal-driven abort
+end
+
+def test_runner_readiness_probe_exits_one_on_timeout
+  run_record = FakeRunRecord.new
+  adapter = FakeAdapterClient.new(start_response: {"ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999"})
+  http = FakeHttp.new(always_refuse: true)  # connection refused on every probe
+  runner = Load::Runner.new(workload: FakeWorkload.new, adapter_client: adapter, run_record:, clock: fake_clock, sleeper: ->(*) {}, http:, readiness_timeout_seconds: 0.1)
+
+  exit_code = runner.run
+
+  assert_equal 1, exit_code
+  assert_equal "readiness_timeout", run_record.outcome.fetch(:error_code)
+  assert_equal 1, adapter.stop_calls
+end
+
+def test_runner_pins_window_start_ts_at_first_successful_request
+  # Spec §8.1 step 12: start_ts is pinned after first ok response, not at grace start.
+  run_record = FakeRunRecord.new
+  runner = build_runner_with_delayed_first_success(delay_ms: 250, run_record:)
+
+  runner.run
+
+  grace_end = run_record.readiness.fetch(:completed_at)
+  first_ok = run_record.window.fetch(:start_ts)
+  assert first_ok >= grace_end, "start_ts must be >= readiness completion"
+end
+
 # load/test/cli_test.rb
+def test_run_command_exits_zero_on_successful_run
+  status = run_bin_load("run", "--workload", fixture_workload_path, "--adapter", "fake-adapter", "--app-root", "/tmp/demo", runner: FakeRunner.new(exit_code: 0))
+  assert_equal 0, status
+end
+
+def test_run_command_exits_one_on_adapter_error
+  status = run_bin_load("run", "--workload", fixture_workload_path, "--adapter", "fake-adapter", "--app-root", "/tmp/demo", runner: FakeRunner.new(exit_code: 1))
+  assert_equal 1, status
+end
+
+def test_run_command_exits_two_when_workload_file_missing
+  status = run_bin_load("run", "--workload", "/nonexistent.rb", "--adapter", "fake-adapter", "--app-root", "/tmp/demo")
+  assert_equal 2, status
+end
+
+def test_run_command_exits_two_when_workload_file_defines_no_subclass
+  path = Tempfile.create(["bad_workload", ".rb"]) { |f| f.write("# no Load::Workload subclass\n") ; f.path }
+  status = run_bin_load("run", "--workload", path, "--adapter", "fake-adapter", "--app-root", "/tmp/demo")
+  assert_equal 2, status
+end
+
 def test_run_command_exits_three_when_no_successful_requests
   status = run_bin_load("run", "--workload", fixture_workload_path, "--adapter", "fake-adapter", "--app-root", "/tmp/demo", runner: FakeRunner.new(exit_code: 3))
   assert_equal 3, status
 end
 ```
+
+**CLI DI seam (for unit testing without real subprocess spawns):**
+
+```ruby
+# Load::CLI's constructor accepts a `runner:` kwarg whose default is the real
+# runner factory. Tests pass a FakeRunner; production code passes nothing.
+module Load
+  class CLI
+    def initialize(argv:, stdout:, stderr:, runner: Load::Runner.method(:new))
+      @argv, @stdout, @stderr, @runner_factory = argv, stdout, stderr, runner
+    end
+
+    def run
+      # ... parse argv, load workload, build adapter_client, then:
+      runner = @runner_factory.call(workload:, adapter_client:, run_record:, ...)
+      runner.run
+    end
+  end
+end
+```
+
+`bin/load` passes only `argv:`, `stdout:`, `stderr:`; tests supply a `runner:` double and bypass the real `Load::Runner` entirely. This is the unit-test seam for the CLI — it means `cli_test.rb` never spawns a real Rails server.
 
 - [ ] **Step 2: Run the tests to confirm they fail**
 
@@ -433,12 +566,16 @@ require_relative "../load/lib/load"
 
 command = ARGV.shift
 if command == "run"
+  # Production path: CLI constructs a real Load::Runner via the default factory.
+  # Tests pass a `runner:` kwarg to short-circuit subprocess spawning.
   exit Load::CLI.new(argv: ARGV, stdout: $stdout, stderr: $stderr).run
 end
 
-warn "usage: bin/load run --workload PATH --adapter PATH --app-root PATH"
+warn "usage: bin/load run --workload PATH --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15]"
 exit 2
 ```
+
+The `Load::Runner` implementation MUST include the deterministic readiness probe (spec §8.2): after `adapter.start` returns, poll `GET <base_url><readiness_path>` with exponential backoff (200ms, 400ms, 800ms, 1600ms, capped) until first 2xx or until `--startup-grace-seconds`. On timeout: set `run_record.outcome.error_code = "readiness_timeout"`, call `adapter.stop`, return exit code 1. When `--readiness-path none`, fall back to `sleep(startup_grace_seconds)`. The runner pins `window.start_ts` only after the first worker records an ok response — never before.
 
 - [ ] **Step 4: Run the focused runner tests and the new CLI test**
 
@@ -486,6 +623,19 @@ git commit -m "feat: add load runner orchestration"
 - [ ] **Step 1: Write failing unit tests for each command**
 
 ```ruby
+# adapters/rails/test/prepare_test.rb
+def test_prepare_fails_fast_when_bundle_check_fails
+  # Spec §5.2: prepare does NOT auto-install. It calls `bundle check` and fails fast.
+  runner = FakeCommandRunner.new(results: { ["bundle", "check"] => FakeResult.new(status: 1, stdout: "", stderr: "deps missing") })
+  command = RailsAdapter::Commands::Prepare.new(app_root: "/tmp/demo", command_runner: runner)
+
+  result = command.call
+
+  refute result.fetch("ok")
+  assert_equal "bundle_missing", result.dig("error", "code")
+  refute_includes runner.argv_history, ["bundle", "install"]  # must NOT have tried install
+end
+
 # adapters/rails/test/load_dataset_test.rb
 def test_load_dataset_runs_rails_runner_with_scale_env
   runner = FakeCommandRunner.new
@@ -509,6 +659,92 @@ def test_reset_state_uses_template_clone_after_first_build
   assert_equal 1, cache.build_calls
   assert_equal 1, cache.clone_calls
 end
+
+def test_reset_state_resets_pg_stat_statements_counters
+  # Spec §5.2: reset-state must run pg_stat_statements_reset() so per-run counters
+  # start at zero. Parity with today's fixtures/missing-index/setup/reset.rb which
+  # does `worker.exec("SELECT pg_stat_statements_reset()")`.
+  runner = FakeCommandRunner.new
+  command = RailsAdapter::Commands::ResetState.new(app_root: "/tmp/demo", seed: 42, env_pairs: {}, command_runner: runner, template_cache: FakeTemplateCache.new, clock: fake_clock)
+
+  command.call
+
+  rails_runner_calls = runner.argv_history.select { |argv| argv.first(2) == ["bin/rails", "runner"] }
+  assert rails_runner_calls.any? { |argv| argv.last.include?("pg_stat_statements_reset") }, "expected a bin/rails runner call that invokes pg_stat_statements_reset()"
+end
+
+# adapters/rails/test/start_test.rb
+def test_start_returns_port_exhausted_when_all_ports_busy
+  # Spec §6.3: ports 3000..3020 tried in order; if all busy, return error.
+  port_finder = FakePortFinder.new(all_busy: true)
+  command = RailsAdapter::Commands::Start.new(app_root: "/tmp/demo", port_finder:, spawner: FakeSpawner.new)
+
+  result = command.call
+
+  refute result.fetch("ok")
+  assert_equal "port_exhausted", result.dig("error", "code")
+end
+
+def test_start_does_not_call_process_detach
+  # Spec §6.3: Process.detach installs a reaper thread that races stop's waitpid.
+  # The adapter must NOT detach. On Linux the child is reparented to init when
+  # the adapter exits after emitting JSON — this is sufficient.
+  spawner = FakeSpawner.new
+  command = RailsAdapter::Commands::Start.new(app_root: "/tmp/demo", port_finder: FakePortFinder.new(port: 3000), spawner:)
+
+  command.call
+
+  assert_equal 0, spawner.detach_calls
+end
+
+# adapters/rails/test/stop_test.rb
+def test_stop_returns_ok_true_on_unknown_pid
+  # Spec §6.4: ESRCH (no such process) is idempotent success.
+  killer = FakeProcessKiller.new(kill_raises: { "TERM" => Errno::ESRCH })
+  command = RailsAdapter::Commands::Stop.new(pid: 99999, process_killer: killer, clock: fake_clock, sleeper: ->(*) {})
+
+  result = command.call
+
+  assert result.fetch("ok")
+end
+
+def test_stop_escalates_to_sigkill_after_ten_second_term_budget
+  # Spec §6.4: SIGTERM, poll via kill(0, pid) for 10s, then SIGKILL.
+  # NEVER waitpid — start and stop run in different adapter processes, so waitpid
+  # would raise ECHILD. Existence polling via kill(0, pid) is the contract.
+  clock = FakeClock.new([0.0, 2.0, 4.0, 6.0, 8.0, 10.5])  # exceed 10s budget
+  killer = FakeProcessKiller.new(alive: true)  # kill(0, pid) keeps succeeding
+  command = RailsAdapter::Commands::Stop.new(pid: 12345, process_killer: killer, clock:, sleeper: ->(*) {})
+
+  command.call
+
+  assert_includes killer.signals_sent, "TERM"
+  assert_includes killer.signals_sent, "KILL"
+end
+
+def test_stop_never_calls_waitpid
+  # Regression guard: waitpid on a non-child pid raises Errno::ECHILD.
+  killer = FakeProcessKiller.new(dies_after_term: true)
+  command = RailsAdapter::Commands::Stop.new(pid: 12345, process_killer: killer, clock: fake_clock, sleeper: ->(*) {})
+
+  command.call
+
+  assert_equal 0, killer.waitpid_calls
+end
+
+# adapters/rails/test/describe_test.rb (error-shape test belongs on any command, describe is simplest)
+def test_error_response_shape_matches_contract
+  # Spec §5.1: errors are {ok:false, command:<name>, error:{code, message, details}}.
+  command = RailsAdapter::Commands::Describe.new(force_failure: StandardError.new("synthetic"))
+
+  result = command.call
+
+  refute result.fetch("ok")
+  assert_equal "describe", result.fetch("command")
+  assert_kind_of String, result.dig("error", "code")
+  assert_kind_of String, result.dig("error", "message")
+  assert_kind_of Hash, result.dig("error", "details")
+end
 ```
 
 - [ ] **Step 2: Run the adapter unit tests to verify they fail**
@@ -520,6 +756,14 @@ Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby adapters/rails/test/rese
 Expected: `RailsAdapter::Commands::ResetState` is undefined.
 
 - [ ] **Step 3: Implement the adapter command classes and the JSON CLI**
+
+Implementation notes per command, keyed to spec sections:
+
+- **Prepare (§5.2):** `bundle check` only. On non-zero exit, return `{ok:false, command:"prepare", error:{code:"bundle_missing", message:..., details:{stderr:...}}}`. Never call `bundle install`. Also verify DB cluster reachable.
+- **ResetState (§5.2):** after seed completes, run `bin/rails runner 'ActiveRecord::Base.connection.execute("SELECT pg_stat_statements_reset()")'` (or equivalent one-liner). Must run AFTER the template clone/seed, so counters capture only the run itself.
+- **Start (§6.3):** spawn Rails server with explicit port from `PortFinder` (3000..3020). If all busy, return `{ok:false, error:{code:"port_exhausted"}}`. **Do NOT** call `Process.detach`. Return immediately with pid + base_url.
+- **Stop (§6.4):** `SIGTERM`, then poll `Process.kill(0, pid)` every 200ms up to 10s. If still alive, `SIGKILL`, poll another 2s. On `Errno::ESRCH` at any step, return ok. **Never** call `Process.waitpid`.
+- **TemplateCache:** connects to Postgres via `BENCH_ADAPTER_PG_ADMIN_URL` (falls back to `DATABASE_URL`). Runs `CREATE DATABASE <name>_tmpl TEMPLATE <name>` on first build. On subsequent calls: `pg_terminate_backend` other sessions on `<name>`, `DROP DATABASE <name>`, `CREATE DATABASE <name> TEMPLATE <name>_tmpl`. Invalidates on migration-version hash + scale-fields hash mismatch. Document this adapter-private PG admin capability in `adapters/rails/README.md` — it's the one intentional exception to "adapter talks to PG only through Rails."
 
 ```ruby
 # adapters/rails/lib/rails_adapter/commands/load_dataset.rb
@@ -590,9 +834,11 @@ git commit -m "feat: add rails benchmark adapter"
 
 - [ ] **Step 1: Write the failing integration test for the adapter lifecycle**
 
+Spec §14.2: this integration test is **opt-in** via `RUN_RAILS_INTEGRATION=1`, not opt-out. The default CI path skips it because not every dev machine has a Rails stack; nightly / pre-release runs set the flag.
+
 ```ruby
 def test_prepare_migrate_load_start_and_stop_against_fixture_app
-  skip if ENV["SKIP_RAILS_INTEGRATION"] == "1"
+  skip "set RUN_RAILS_INTEGRATION=1 to run" unless ENV["RUN_RAILS_INTEGRATION"] == "1"
 
   app_root = File.expand_path("fixtures/demo_app", __dir__)
   adapter = bench_adapter_bin
@@ -600,6 +846,20 @@ def test_prepare_migrate_load_start_and_stop_against_fixture_app
   assert_command_ok adapter, "prepare", "--app-root", app_root
   assert_command_ok adapter, "migrate", "--app-root", app_root
   assert_command_ok adapter, "load-dataset", "--app-root", app_root, "--workload", "demo", "--seed", "7", "--env", "ROWS_PER_TABLE=10", "--env", "OPEN_FRACTION=0.2"
+  start = assert_command_ok adapter, "start", "--app-root", app_root
+  assert_equal "200", Net::HTTP.get_response(URI("#{start.fetch("base_url")}/up")).code
+  assert_command_ok adapter, "stop", "--pid", start.fetch("pid").to_s
+end
+
+def test_real_db_specialist_demo_end_to_end
+  # Spec §14.3: real end-to-end against external ~/db-specialist-demo, skip-by-default.
+  # Exercised by Task 9's parity verification. This test is the unit-addressable form.
+  skip "set RUN_DB_SPECIALIST_DEMO_INTEGRATION=1 and DB_SPECIALIST_DEMO_PATH" unless ENV["RUN_DB_SPECIALIST_DEMO_INTEGRATION"] == "1" && ENV["DB_SPECIALIST_DEMO_PATH"]
+
+  app_root = ENV.fetch("DB_SPECIALIST_DEMO_PATH")
+  adapter = bench_adapter_bin
+  assert_command_ok adapter, "prepare", "--app-root", app_root
+  assert_command_ok adapter, "reset-state", "--app-root", app_root, "--seed", "42", "--env", "ROWS_PER_TABLE=1000", "--env", "OPEN_FRACTION=0.002"
   start = assert_command_ok adapter, "start", "--app-root", app_root
   assert_equal "200", Net::HTTP.get_response(URI("#{start.fetch("base_url")}/up")).code
   assert_command_ok adapter, "stop", "--pid", start.fetch("pid").to_s
@@ -683,16 +943,57 @@ def test_workload_matches_missing_index_defaults
   assert_equal "missing-index-todos", workload.name
   assert_equal 10_000_000, workload.scale.rows_per_table
   assert_equal 0.002, workload.scale.open_fraction
-  assert_equal 4, workload.load_plan.workers
+  assert_equal 16, workload.load_plan.workers  # parity with fixtures/missing-index/manifest.yml
   assert_equal :unlimited, workload.load_plan.rate_limit
 end
 
 # workloads/missing_index_todos/test/oracle_test.rb
+def test_oracle_tree_walk_finds_seq_scan_under_wrapper_nodes
+  # Spec §11: oracle walks the plan tree and asserts *some* node on relation
+  # `todos` has Node Type == "Seq Scan". Must not rely on root shape — Rails
+  # may wrap the scan in Limit/Gather/Sort depending on query construction.
+  plan_with_gather_wrapping_seq_scan = {
+    "Node Type" => "Gather",
+    "Plans" => [
+      { "Node Type" => "Seq Scan", "Relation Name" => "todos" },
+    ],
+  }
+  oracle = Load::Workloads::MissingIndexTodos::Oracle.new(pg: fake_pg_with_plan_node(plan_with_gather_wrapping_seq_scan), clickhouse_query: ->(*) { { "total_exec_count" => "600" } }, sleeper: ->(*) {})
+
+  oracle.run([fixture_run_dir])  # must NOT exit 1
+end
+
 def test_oracle_fails_when_plan_relation_node_is_not_seq_scan
-  oracle = Load::Workloads::MissingIndexTodos::Oracle.new(pg: fake_pg_with_plan("Index Scan"), clickhouse_query: ->(*) { { "calls" => "600", "mean_ms" => "3.9" } }, sleeper: ->(*) {})
+  oracle = Load::Workloads::MissingIndexTodos::Oracle.new(pg: fake_pg_with_plan("Index Scan"), clickhouse_query: ->(*) { { "total_exec_count" => "600" } }, sleeper: ->(*) {})
 
   error = assert_raises(SystemExit) { oracle.run([fixture_run_dir]) }
   assert_equal 1, error.status
+end
+
+def test_oracle_uses_queryid_fingerprint_not_sql_text_match
+  # Spec §11: identify statements by pg_stat_statements.queryid, not SQL LIKE.
+  # Pass two queryids (parameter-variant queries with same normalized text);
+  # oracle sums total_exec_count across them.
+  ch_responses = [
+    { "queryid" => "111", "total_exec_count" => "250" },
+    { "queryid" => "222", "total_exec_count" => "300" },
+  ]
+  oracle = Load::Workloads::MissingIndexTodos::Oracle.new(pg: fake_pg_with_queryids(["111", "222"]), clickhouse_query: ->(*) { ch_responses }, sleeper: ->(*) {})
+
+  oracle.run([fixture_run_dir])  # sum = 550 >= 500, must PASS
+end
+
+def test_oracle_fails_with_clear_message_on_clickhouse_timeout
+  # Spec §11: timeout path prints "FAIL: clickhouse (saw N calls before timeout)" and exits 1.
+  stuck_response = { "total_exec_count" => "42" }  # never reaches 500
+  ch_calls = 0
+  ch_stub = ->(*) { ch_calls += 1; stuck_response }
+  clock = FakeClock.new(Array.new(50) { |i| i * 1.0 })
+  oracle = Load::Workloads::MissingIndexTodos::Oracle.new(pg: fake_pg_with_plan("Seq Scan"), clickhouse_query: ch_stub, clock:, sleeper: ->(*) {}, clickhouse_timeout_seconds: 30)
+
+  error = assert_raises(SystemExit) { oracle.run([fixture_run_dir]) }
+  assert_equal 1, error.status
+  assert ch_calls > 1, "oracle must poll ClickHouse more than once before timing out"
 end
 ```
 
@@ -722,12 +1023,21 @@ module Load
       end
 
       def load_plan
-        Load::LoadPlan.new(workers: 4, duration_seconds: 60, rate_limit: :unlimited, seed: nil)
+        # 16 workers: parity with today's fixtures/missing-index/manifest.yml.
+        # The old 4-worker default silently regressed concurrency vs the harness
+        # being replaced; parity check in Task 8 depends on this matching.
+        Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil)
       end
     end
   end
 end
 ```
+
+**Oracle implementation notes (spec §11):**
+
+1. Tree-walk the EXPLAIN plan recursively. Assert *some* node in the tree has `Node Type == "Seq Scan"` AND `Relation Name == "todos"`. Do NOT match on root shape (Rails sometimes wraps the scan in `Limit`/`Gather`/`Sort`). Reject on `Index Scan` / `Index Only Scan` / `Bitmap Index Scan` on `todos`.
+2. Identify target statement(s) by `pg_stat_statements.queryid`, NOT by `SQL LIKE '%todos%status%'`. At setup time, run the canonical `EXPLAIN` and capture its `queryid`. Multiple queryids with matching normalized text: sum `total_exec_count` across them.
+3. Poll ClickHouse for `sum(total_exec_count) >= 500` across the matched queryid set for the run window. Default timeout: 30s past `window.end_ts`. On timeout: `FAIL: clickhouse (saw N calls before timeout)`, exit 1.
 
 - [ ] **Step 4: Run the workload/oracle tests**
 
@@ -801,68 +1111,27 @@ git add README.md Makefile load/test/load_smoke_target_test.rb JOURNAL.md
 git commit -m "docs: add load runner smoke path"
 ```
 
-### Task 8: Remove the Fixture Harness and Toy Harness
+### Task 8: End-to-End Verification and Parity Check
 
-**Files:**
-- Delete: `bin/fixture`
-- Delete: `collector/lib/fixtures/command.rb`
-- Delete: `collector/lib/fixtures/manifest.rb`
-- Delete: `collector/test/fixtures/fixture_command_test.rb`
-- Delete: `collector/test/fixtures/fixture_manifest_test.rb`
-- Delete: `collector/test/fixtures/fixture_smoke_target_test.rb`
-- Delete: `collector/test/fixtures/missing_index_assert_test.rb`
-- Delete: `collector/test/fixtures/missing_index_drive_test.rb`
-- Delete: `collector/test/fixtures/missing_index_reset_test.rb`
-- Delete: `fixtures/missing-index/README.md`
-- Delete: `fixtures/missing-index/load/drive.rb`
-- Delete: `fixtures/missing-index/manifest.yml`
-- Delete: `fixtures/missing-index/setup/01_schema.sql`
-- Delete: `fixtures/missing-index/setup/02_seed.sql`
-- Delete: `fixtures/missing-index/setup/reset.rb`
-- Delete: `fixtures/missing-index/validate/assert.rb`
-- Delete: `load/harness.rb`
-- Delete: `load/test/harness_test.rb`
-- Delete: `load/README.md`
-- Delete: `fixture-harness-walkthrough.md`
-
-- [ ] **Step 1: Delete the old harness files only after the replacement path is green**
-
-```bash
-rm bin/fixture
-rm -r collector/lib/fixtures collector/test/fixtures fixtures/missing-index
-rm load/harness.rb load/test/harness_test.rb load/README.md fixture-harness-walkthrough.md
-```
-
-- [ ] **Step 2: Run the replacement test suites to prove nothing still depends on the deleted code**
-
-Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/rate_limiter_test.rb`
-Expected: PASS
-
-Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/metrics_test.rb`
-Expected: PASS
-
-Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb`
-Expected: PASS
-
-Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby adapters/rails/test/integration_test.rb`
-Expected: PASS or `skip` when `SKIP_RAILS_INTEGRATION=1`.
-
-Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby workloads/missing_index_todos/test/oracle_test.rb`
-Expected: PASS
-
-- [ ] **Step 3: Commit the deletions**
-
-```bash
-git add bin/fixture collector/lib/fixtures collector/test/fixtures fixtures/missing-index load/harness.rb load/test/harness_test.rb load/README.md fixture-harness-walkthrough.md JOURNAL.md
-git commit -m "refactor: replace fixture harness with load runner"
-```
-
-### Task 9: End-to-End Verification and Parity Check
+**Verify before you delete.** Task 9 removes the old harness; this task proves the new runner reaches parity against the real external app at pinned SHAs BEFORE anything is deleted. If parity fails here, the old harness is still intact and a fix is easy; if the old harness were already gone, debugging regressions would be much harder.
 
 **Files:**
 - Modify: `JOURNAL.md`
 
-- [ ] **Step 1: Bring up the collector stack from a clean state**
+- [ ] **Step 1: Pin db-specialist-demo SHAs and record them**
+
+Before running parity, pin the exact commits the runner will be verified against. The external repo is a moving target; parity against "whatever `master` happens to point to today" is not reproducible.
+
+```bash
+DEMO_MASTER_SHA=$(git -C /home/bjw/db-specialist-demo rev-parse master)
+DEMO_ORACLE_SHA=$(git -C /home/bjw/db-specialist-demo rev-parse oracle/add-index)
+echo "db-specialist-demo master: $DEMO_MASTER_SHA"
+echo "db-specialist-demo oracle/add-index: $DEMO_ORACLE_SHA"
+```
+
+Record both SHAs into `JOURNAL.md` under today's date. Reference them in the run.json-adjacent verification notes so a future reader can reproduce the exact parity run.
+
+- [ ] **Step 2: Bring up the collector stack from a clean state**
 
 Run: `docker compose down -v`
 Expected: existing Postgres, ClickHouse, and collector containers stop and volumes are removed.
@@ -870,7 +1139,7 @@ Expected: existing Postgres, ClickHouse, and collector containers stop and volum
 Run: `docker compose up -d --build postgres clickhouse collector`
 Expected: all three services report healthy or running.
 
-- [ ] **Step 2: Run the full Ruby test surface**
+- [ ] **Step 3: Run the full Ruby test surface**
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/rate_limiter_test.rb`
 Expected: PASS
@@ -932,18 +1201,22 @@ Expected: PASS
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby workloads/missing_index_todos/test/oracle_test.rb`
 Expected: PASS
 
-- [ ] **Step 3: Verify parity against the current `db-specialist-demo` default branch**
+- [ ] **Step 4: Verify parity against the pinned `db-specialist-demo` master SHA (runs #1 and #2)**
 
-Run: `bin/load run --workload workloads/missing_index_todos/workload.rb --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo`
-Expected: exit `0`, create `runs/<timestamp>-missing-index-todos/`, and report at least one successful request.
+Run: `git -C /home/bjw/db-specialist-demo checkout $DEMO_MASTER_SHA`
+Expected: detached HEAD at the pinned master SHA.
 
-Run: `ruby workloads/missing_index_todos/oracle.rb "$(ls -dt runs/*-missing-index-todos | head -n1)"`
-Expected: prints `PASS: explain` and `PASS: clickhouse`, then exits `0`.
+Run (TWICE, consecutively — Codex recommendation, catches first-run/second-run divergence):
+```
+bin/load run --workload workloads/missing_index_todos/workload.rb --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo
+ruby workloads/missing_index_todos/oracle.rb "$(ls -dt runs/*-missing-index-todos | head -n1)"
+```
+Expected both runs: load runner exits `0`, oracle prints `PASS: explain` and `PASS: clickhouse`, exits `0`. Two consecutive passes (not one) are required to lock parity — second run exercises the template-clone code path, first run exercises the template-build path.
 
-- [ ] **Step 4: Verify the oracle flips on `oracle/add-index`**
+- [ ] **Step 5: Verify the oracle flips on the pinned `oracle/add-index` SHA**
 
-Run: `git -C /home/bjw/db-specialist-demo checkout oracle/add-index`
-Expected: worktree switches to the oracle tag without local changes.
+Run: `git -C /home/bjw/db-specialist-demo checkout $DEMO_ORACLE_SHA`
+Expected: detached HEAD at the pinned oracle/add-index SHA.
 
 Run: `bin/load run --workload workloads/missing_index_todos/workload.rb --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo`
 Expected: exit `0`, new run record written.
@@ -951,14 +1224,85 @@ Expected: exit `0`, new run record written.
 Run: `ruby workloads/missing_index_todos/oracle.rb "$(ls -dt runs/*-missing-index-todos | head -n1)"`
 Expected: prints `FAIL: explain (expected Seq Scan, got Index Scan)` and exits `1`.
 
-Run: `git -C /home/bjw/db-specialist-demo checkout master`
-Expected: demo app returns to the default branch for future work.
+Run: `git -C /home/bjw/db-specialist-demo checkout $DEMO_MASTER_SHA`
+Expected: demo app returns to the pinned master SHA.
 
-- [ ] **Step 5: Record the exact verification output and commit**
+- [ ] **Step 6: Record the exact verification output and commit**
+
+Record both SHAs, the two PASS runs, and the FAIL run in `JOURNAL.md`.
 
 ```bash
 git add JOURNAL.md
-git commit -m "test: verify load runner parity"
+git commit -m "test: verify load runner parity at pinned db-specialist-demo SHAs"
+```
+
+### Task 9: Remove the Fixture Harness and Toy Harness
+
+**Only after Task 8 parity has passed twice consecutively.** If any part of Task 8 failed, do not proceed — debug against the old harness first. Deletion is a one-way operation and should be the last step of this plan.
+
+**Files:**
+- Delete: `bin/fixture`
+- Delete: `collector/lib/fixtures/command.rb`
+- Delete: `collector/lib/fixtures/manifest.rb`
+- Delete: `collector/test/fixtures/fixture_command_test.rb`
+- Delete: `collector/test/fixtures/fixture_manifest_test.rb`
+- Delete: `collector/test/fixtures/fixture_smoke_target_test.rb`
+- Delete: `collector/test/fixtures/missing_index_assert_test.rb`
+- Delete: `collector/test/fixtures/missing_index_drive_test.rb`
+- Delete: `collector/test/fixtures/missing_index_reset_test.rb`
+- Delete: `fixtures/missing-index/README.md`
+- Delete: `fixtures/missing-index/load/drive.rb`
+- Delete: `fixtures/missing-index/manifest.yml`
+- Delete: `fixtures/missing-index/setup/01_schema.sql`
+- Delete: `fixtures/missing-index/setup/02_seed.sql`
+- Delete: `fixtures/missing-index/setup/reset.rb`
+- Delete: `fixtures/missing-index/validate/assert.rb`
+- Delete: `load/harness.rb`
+- Delete: `load/test/harness_test.rb`
+- Delete: `load/README.md`
+- Delete: `fixture-harness-walkthrough.md`
+
+- [ ] **Step 1: Confirm Task 8 passed twice consecutively**
+
+Inspect `JOURNAL.md` for the two back-to-back PASS entries from Task 8 Step 4. If missing, STOP and re-run Task 8.
+
+- [ ] **Step 2: Delete the old harness files**
+
+```bash
+rm bin/fixture
+rm -r collector/lib/fixtures collector/test/fixtures fixtures/missing-index
+rm load/harness.rb load/test/harness_test.rb load/README.md fixture-harness-walkthrough.md
+```
+
+Note: `fixtures/missing-index/load/drive.rb` is the source that Task 1 ported `RateLimiter` from. By this point the copy under `load/lib/load/rate_limiter.rb` is already tested in isolation, so the delete is safe.
+
+- [ ] **Step 3: Run the replacement test suites to prove nothing still depends on the deleted code**
+
+Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/rate_limiter_test.rb`
+Expected: PASS
+
+Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/metrics_test.rb`
+Expected: PASS
+
+Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb`
+Expected: PASS
+
+Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby adapters/rails/test/integration_test.rb`
+Expected: PASS or `skip` when `RUN_RAILS_INTEGRATION` is unset.
+
+Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby workloads/missing_index_todos/test/oracle_test.rb`
+Expected: PASS
+
+- [ ] **Step 4: Re-run Task 8's parity sequence once more to confirm no regression from deletion**
+
+Run the same `bin/load run` + `oracle.rb` sequence as Task 8 Step 4 once.
+Expected: same PASS result as before deletion.
+
+- [ ] **Step 5: Commit the deletions**
+
+```bash
+git add bin/fixture collector/lib/fixtures collector/test/fixtures fixtures/missing-index load/harness.rb load/test/harness_test.rb load/README.md fixture-harness-walkthrough.md JOURNAL.md
+git commit -m "refactor: replace fixture harness with load runner"
 ```
 
 ## Self-Review
@@ -968,11 +1312,12 @@ git commit -m "test: verify load runner parity"
   - Rails adapter contract and template caching: Tasks 4-5
   - `missing-index-todos` workload and tactical oracle: Task 6
   - `bin/load`, docs, smoke target: Tasks 3 and 7
-  - required deletions: Task 8
-  - parity verification against current demo app and `oracle/add-index`: Task 9
+  - parity verification (before deletion): Task 8
+  - required deletions (only after parity): Task 9
   - external `db-specialist-demo` seed dependency: Cross-Repo Dependency section and Task 5
+- Ordering invariant: parity (Task 8) runs BEFORE deletion (Task 9). If Task 8 fails, the old harness is still present and the branch is recoverable.
 - Placeholder scan:
-  - No `TODO`, `TBD`, or “similar to” placeholders remain.
+  - No `TODO`, `TBD`, or "similar to" placeholders remain.
 - Type consistency:
   - `Scale` fields stay `rows_per_table`, `open_fraction`, `seed`.
   - `LoadPlan` fields stay `workers`, `duration_seconds`, `rate_limit`, `seed`.
