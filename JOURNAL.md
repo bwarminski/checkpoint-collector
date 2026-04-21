@@ -3,6 +3,7 @@
 - Task 1 foundation files under `load/lib/load/` now load the namespace and the base classes/value objects needed by later runner slices.
 - `Load::RateLimiter` in the new runner uses `rate_limit: :unlimited` and keeps the shared mutex plus injected `clock`/`sleeper` contract from the fixture limiter.
 - `Load::Selector` is a cumulative-weight picker over the injected seeded `Random`; the repeatability test only needs the selector to return `ActionEntry` objects.
+- `Load::Scale` now defaults `open_fraction` to `nil` so workloads can omit it and still match the documented contract.
 - Task 2 uses a root override in `Fixtures::Manifest.load` so tests can write temp fixture trees without touching repo fixtures.
 - `Fixtures::Command` accepts `manifest_loader:` so command parsing can be tested without requiring real fixture implementations.
 - `bin/fixture` is the top-level entrypoint and should stay thin; fixture behavior belongs under `collector/lib/fixtures/` and `fixtures/`.
