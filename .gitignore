@@ -5,3 +5,4 @@ tmp/
 .worktrees/
 .idea/
 __pycache__/
+runs/

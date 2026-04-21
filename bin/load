@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+# ABOUTME: Runs the load runner CLI for benchmark workloads.
+# ABOUTME: Dispatches the run subcommand through the Load namespace.
+require_relative "../load/lib/load"
+
+command = ARGV.shift
+if command == "run"
+  exit Load::CLI.new(argv: ARGV, stdout: $stdout, stderr: $stderr).run
+end
+
+warn "usage: bin/load run --workload PATH --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15]"
+exit 2
