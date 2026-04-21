@@ -30,3 +30,4 @@
 - Task 2 reporter fix: `Load::Reporter` now starts a background interval loop, sleeps through the injected interval contract, and still flushes tail data on `stop` even if `start` was never called.
 - Task 2 metrics shape now includes `p50_ms`, `p95_ms`, `p99_ms`, and `max_ms`, and reporter snapshot lines use `ts` plus `interval_ms` to match the later JSONL contract.
 - Task 2 reporter loop now sleeps before the first periodic snapshot; the only early flush remains `stop`, and `interval_ms` is emitted as an integer.
+- Task 2 reporter shutdown now kills the waiting thread before join, so `stop` returns promptly instead of waiting for the interval sleeper to finish.

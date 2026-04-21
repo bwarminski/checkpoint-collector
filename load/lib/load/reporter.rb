@@ -35,6 +35,7 @@ module Load
 
     def stop
       @running = false
+      @thread.kill if @thread&.alive? && @thread != Thread.current
       @thread.join if @thread && @thread != Thread.current
       snapshot_once
       self

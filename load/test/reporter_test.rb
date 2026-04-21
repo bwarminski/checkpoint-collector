@@ -1,5 +1,6 @@
 # ABOUTME: Verifies the reporter merges worker buffers into interval snapshots.
 # ABOUTME: Covers the final tail flush behavior when the reporter stops.
+require "timeout"
 require_relative "test_helper"
 
 class ReporterTest < Minitest::Test
@@ -80,6 +81,35 @@ class ReporterTest < Minitest::Test
     reporter.stop
 
     assert_equal 1, sink.sum { |line| line.fetch(:actions).fetch(:a, {}).fetch(:count, 0) }
+  end
+
+  def test_reporter_stop_interrupts_waiting_sleeper_promptly
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    sink = []
+    started = Queue.new
+    blocker = Queue.new
+    reporter = Load::Reporter.new(
+      workers:,
+      interval_seconds: 5,
+      sink:,
+      clock: FakeClock.new([0.0]),
+      sleeper: ->(*) do
+        started << true
+        blocker.pop
+      end,
+    )
+
+    reporter.start
+    started.pop
+
+    elapsed = Timeout.timeout(0.5) do
+      start_ns = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+      reporter.stop
+      (Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond) - start_ns) / 1_000_000_000.0
+    end
+
+    assert_operator elapsed, :<, 0.2
+    assert_equal 1, sink.length
   end
 
   private
