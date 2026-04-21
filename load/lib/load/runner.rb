@@ -81,8 +81,10 @@ module Load
         raise ReadinessTimeout if current_time >= deadline
 
         response = client.get(@readiness_path)
+        raise ReadinessTimeout if current_time >= deadline
+
         if response.code.to_i >= 200 && response.code.to_i < 300
-          write_state(readiness: { completed_at: current_time, path: @readiness_path })
+          write_state(window: { readiness: { completed_at: current_time, path: @readiness_path } })
           return
         end
 
@@ -102,7 +104,7 @@ module Load
 
     def sleep_startup_grace
       @sleeper.call(@startup_grace_seconds)
-      write_state(readiness: { completed_at: current_time, path: "none" })
+      write_state(window: { readiness: { completed_at: current_time, path: "none" } })
     end
 
     def start_workers(base_url)
@@ -146,6 +148,7 @@ module Load
     end
 
     def finish_run
+      write_state(window: { end_ts: current_time })
       if @window_started
         write_state(outcome: @state.fetch(:outcome).merge(aborted: stop_aborted?))
         return 0

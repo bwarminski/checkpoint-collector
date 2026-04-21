@@ -33,3 +33,5 @@
 - Task 2 reporter shutdown now kills the waiting thread before join, so `stop` returns promptly instead of waiting for the interval sleeper to finish.
 - Task 2 reporter hardening replaced the hard kill with cooperative `Shutdown` handling that only interrupts the sleeper phase; in-flight snapshots finish before exit, and worker error labeling now falls back to `:unknown` if `action.name` itself raises.
 - Task 3 uses a thin `Load::CLI` seam with injected runner callables, a JSON-speaking `Load::AdapterClient` wrapper, and a runner that pins `window.start_ts` from the first successful worker response while still always stopping the adapter.
+- Task 3 readiness state now lives under `window.readiness`, and `window.end_ts` is written before the final outcome so the run record carries the full window envelope.
+- The zero-seed runner test is stable when the seeded action triggers the shared stop flag after recording the first RNG value.

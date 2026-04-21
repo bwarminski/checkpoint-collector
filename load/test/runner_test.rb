@@ -1,5 +1,5 @@
 # ABOUTME: Verifies the load runner orchestrates adapter lifecycle and outcome state.
-# ABOUTME: Covers readiness timeout handling, abort handling, and window start pinning.
+# ABOUTME: Covers readiness timeout handling, abort handling, and window pinning.
 require "tmpdir"
 require_relative "test_helper"
 
@@ -117,6 +117,30 @@ class RunnerTest < Minitest::Test
     assert_equal 1, http.request_count
   end
 
+  def test_runner_rejects_late_successful_readiness_probe
+    run_record = FakeRunRecord.new
+    adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
+    clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
+    http = LateSuccessHttp.new(clock:, advance_by: 0.02)
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: -> { clock.now },
+      sleeper: ->(seconds) { clock.advance_by(seconds) },
+      http:,
+      readiness_timeout_seconds: 999,
+      startup_grace_seconds: 0.01,
+    )
+
+    exit_code = runner.run
+
+    assert_equal 1, exit_code
+    assert_equal "readiness_timeout", run_record.outcome.fetch(:error_code)
+    assert_equal 1, http.request_count
+    assert_nil run_record.window.dig(:readiness)
+  end
+
   def test_runner_clamps_readiness_sleep_to_remaining_budget
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
@@ -170,15 +194,28 @@ class RunnerTest < Minitest::Test
 
     runner.run
 
-    grace_end = run_record.readiness.fetch(:completed_at)
+    grace_end = run_record.window.fetch(:readiness).fetch(:completed_at)
     first_ok = run_record.window.fetch(:start_ts)
     assert first_ok >= grace_end, "start_ts must be >= readiness completion"
+  end
+
+  def test_runner_writes_window_end_ts_before_final_outcome
+    run_record = FakeRunRecord.new
+    runner = build_runner_with_delayed_first_success(delay_ms: 250, run_record:)
+
+    runner.run
+
+    final = run_record.writes.last
+    assert final.fetch(:window).key?(:end_ts)
+    assert_equal false, final.fetch(:outcome).fetch(:aborted)
   end
 
   def test_runner_preserves_explicit_zero_seed
     SeedRecordingAction.reset!
     run_record = FakeRunRecord.new
     clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
+    stop_flag = StopFlag.new
+    SeedRecordingAction.stop_flag = stop_flag
     runner = Load::Runner.new(
       workload: ZeroSeedWorkload.new,
       adapter_client: FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }),
@@ -189,6 +226,7 @@ class RunnerTest < Minitest::Test
       readiness_path: "none",
       startup_grace_seconds: 0.0,
       adapter_bin: "adapters/rails/bin/bench-adapter",
+      stop_flag:,
     )
 
     runner.run
@@ -217,20 +255,20 @@ class RunnerTest < Minitest::Test
   end
 
   class FakeRunRecord
-    attr_reader :outcome, :readiness, :window, :adapter
+    attr_reader :outcome, :window, :adapter, :writes
 
     def initialize
       @payload = {}
       @outcome = {}
-      @readiness = {}
       @window = {}
       @adapter = {}
+      @writes = []
     end
 
     def write_run(payload)
       @payload = payload
+      @writes << payload
       @outcome = payload.fetch(:outcome, @outcome)
-      @readiness = payload.fetch(:readiness, @readiness)
       @window = payload.fetch(:window, @window)
       @adapter = payload.fetch(:adapter, @adapter)
     end
@@ -314,6 +352,28 @@ class RunnerTest < Minitest::Test
 
     def request(*)
       Response.new("503")
+    end
+  end
+
+  class LateSuccessHttp
+    Response = Struct.new(:code)
+
+    attr_reader :request_count
+
+    def initialize(clock:, advance_by:)
+      @clock = clock
+      @advance_by = advance_by
+      @request_count = 0
+    end
+
+    def start(*)
+      @request_count += 1
+      yield self
+    end
+
+    def request(*)
+      @clock.advance_by(@advance_by)
+      Response.new("200")
     end
   end
 
@@ -428,9 +488,11 @@ class RunnerTest < Minitest::Test
 
     class << self
       attr_reader :recordings
+      attr_accessor :stop_flag
 
       def reset!
         @recordings = []
+        @stop_flag = nil
       end
     end
 
@@ -440,6 +502,7 @@ class RunnerTest < Minitest::Test
 
     def call
       self.class.recordings << rng.rand if self.class.recordings.empty?
+      self.class.stop_flag.trigger(:seed_recorded) if self.class.stop_flag
       Response.new("200")
     end
   end
