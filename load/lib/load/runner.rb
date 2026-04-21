@@ -34,18 +34,20 @@ module Load
     end
 
     def run
-      @adapter_client.prepare(app_root: @app_root)
-      @adapter_client.reset_state(app_root: @app_root, scale: @workload.scale)
-
       adapter_describe = @adapter_client.describe
-      start_response = @adapter_client.start(app_root: @app_root)
+      validate_adapter_response!(adapter_describe, %w[name framework runtime], "describe")
       write_state(adapter: {
         describe: adapter_describe,
         bin: @adapter_bin || @adapter_client.adapter_bin,
         app_root: @app_root,
-        pid: start_response.fetch("pid"),
-        base_url: start_response.fetch("base_url"),
       })
+
+      @adapter_client.prepare(app_root: @app_root)
+      @adapter_client.reset_state(app_root: @app_root, scale: @workload.scale)
+
+      start_response = @adapter_client.start(app_root: @app_root)
+      validate_adapter_response!(start_response, %w[pid base_url], "start")
+      write_state(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
 
       probe_readiness(start_response.fetch("base_url"))
       start_workers(start_response.fetch("base_url"))
@@ -86,12 +88,14 @@ module Load
 
         raise ReadinessTimeout if current_time >= deadline
 
-        @sleeper.call(backoff)
+        sleep_for = [backoff, deadline - current_time].min
+        @sleeper.call(sleep_for)
         backoff = [backoff * 2, 1.6].min
       rescue StandardError
         raise ReadinessTimeout if current_time >= deadline
 
-        @sleeper.call(backoff)
+        sleep_for = [backoff, deadline - current_time].min
+        @sleeper.call(sleep_for)
         backoff = [backoff * 2, 1.6].min
       end
     end
@@ -106,7 +110,7 @@ module Load
       client = Load::Client.new(base_url: base_url)
       rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @clock, sleeper: @sleeper)
       entries = @workload.actions
-      seed = plan.seed || @workload.scale.seed
+      seed = plan.seed.nil? ? @workload.scale.seed : plan.seed
 
       workers = Array.new(plan.workers) do |index|
         buffer = tracking_buffer
@@ -201,6 +205,14 @@ module Load
         snapshot = @state
       end
       @run_record.write_run(snapshot)
+    end
+
+    def validate_adapter_response!(response, required_keys, response_name)
+      raise AdapterClient::AdapterError, "invalid adapter #{response_name} response" unless response.is_a?(Hash)
+
+      required_keys.each { |key| response.fetch(key) }
+    rescue KeyError
+      raise AdapterClient::AdapterError, "invalid adapter #{response_name} response"
     end
 
     def deep_merge(left, right)

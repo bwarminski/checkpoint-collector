@@ -46,6 +46,8 @@ module Load
       raise AdapterError, stderr unless status.success?
 
       stdout.to_s.empty? ? {} : JSON.parse(stdout)
+    rescue JSON::ParserError => error
+      raise AdapterError, error.message
     end
   end
 end

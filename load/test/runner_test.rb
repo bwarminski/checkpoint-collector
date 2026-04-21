@@ -28,6 +28,32 @@ class RunnerTest < Minitest::Test
     assert_equal 1, adapter.stop_calls
   end
 
+  def test_runner_records_adapter_metadata_before_prepare_fails
+    run_record = FakeRunRecord.new
+    adapter = FakeAdapterClient.new(
+      describe_response: { "name" => "rails-postgres-adapter", "framework" => "rails", "runtime" => "ruby-3.3" },
+      prepare_error: Load::AdapterClient::AdapterError.new("boom"),
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+    )
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+    )
+
+    exit_code = runner.run
+
+    assert_equal 1, exit_code
+    assert_equal "adapter_error", run_record.outcome.fetch(:error_code)
+    assert_equal "rails-postgres-adapter", run_record.adapter.fetch(:describe).fetch("name")
+    assert_equal "adapters/rails/bin/bench-adapter", run_record.adapter.fetch(:bin)
+    assert_nil run_record.adapter.fetch(:app_root)
+  end
+
   def test_runner_returns_one_when_adapter_describe_fails
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(describe_error: Load::AdapterClient::AdapterError.new("boom"))
@@ -46,6 +72,25 @@ class RunnerTest < Minitest::Test
     assert_equal 1, exit_code
     assert_equal "adapter_error", run_record.outcome.fetch(:error_code)
     assert_equal 0, adapter.stop_calls
+  end
+
+  def test_runner_returns_one_when_start_response_is_missing_required_fields
+    run_record = FakeRunRecord.new
+    adapter = FakeAdapterClient.new(start_response: { "ok" => true })
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+    )
+
+    exit_code = runner.run
+
+    assert_equal 1, exit_code
+    assert_equal "adapter_error", run_record.outcome.fetch(:error_code)
   end
 
   def test_runner_readiness_probe_exits_one_on_timeout
@@ -72,20 +117,21 @@ class RunnerTest < Minitest::Test
     assert_equal 1, http.request_count
   end
 
-  def test_runner_readiness_probe_does_not_retry_after_deadline
+  def test_runner_clamps_readiness_sleep_to_remaining_budget
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
     clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
     http = ProbeHttp.new
+    sleep_durations = []
     runner = Load::Runner.new(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
       clock: -> { clock.now },
-      sleeper: ->(seconds) { clock.advance_by(seconds) },
+      sleeper: ->(seconds) { sleep_durations << seconds; clock.advance_by(seconds) },
       http:,
       readiness_timeout_seconds: 999,
-      startup_grace_seconds: 0.01,
+      startup_grace_seconds: 0.05,
     )
 
     exit_code = runner.run
@@ -93,6 +139,7 @@ class RunnerTest < Minitest::Test
     assert_equal 1, exit_code
     assert_equal "readiness_timeout", run_record.outcome.fetch(:error_code)
     assert_equal 1, http.request_count
+    assert_equal [0.05], sleep_durations
   end
 
   def test_runner_records_adapter_describe_metadata_before_readiness
@@ -126,6 +173,27 @@ class RunnerTest < Minitest::Test
     grace_end = run_record.readiness.fetch(:completed_at)
     first_ok = run_record.window.fetch(:start_ts)
     assert first_ok >= grace_end, "start_ts must be >= readiness completion"
+  end
+
+  def test_runner_preserves_explicit_zero_seed
+    SeedRecordingAction.reset!
+    run_record = FakeRunRecord.new
+    clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
+    runner = Load::Runner.new(
+      workload: ZeroSeedWorkload.new,
+      adapter_client: FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }),
+      run_record:,
+      clock: -> { clock.now },
+      sleeper: ->(seconds) { clock.advance_by(seconds) },
+      http: FakeHttp.new,
+      readiness_path: "none",
+      startup_grace_seconds: 0.0,
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+    )
+
+    runner.run
+
+    assert_equal [Random.new(0).rand], SeedRecordingAction.recordings
   end
 
   private
@@ -171,10 +239,11 @@ class RunnerTest < Minitest::Test
   class FakeAdapterClient
     attr_reader :stop_calls, :describe_calls, :adapter_bin
 
-    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, adapter_bin: nil)
+    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, prepare_error: nil, adapter_bin: nil)
       @start_response = start_response
       @describe_response = describe_response
       @describe_error = describe_error
+      @prepare_error = prepare_error
       @adapter_bin = adapter_bin
       @stop_calls = 0
       @describe_calls = 0
@@ -188,6 +257,8 @@ class RunnerTest < Minitest::Test
     end
 
     def prepare(app_root:)
+      raise @prepare_error if @prepare_error
+
       true
     end
 
@@ -347,6 +418,47 @@ class RunnerTest < Minitest::Test
     def call
       sleep(0.25)
       DelayedResponse.new("200")
+    end
+  end
+
+  SeedRecordingAction = Class.new(Load::Action) do
+    Response = Struct.new(:code)
+
+    @recordings = []
+
+    class << self
+      attr_reader :recordings
+
+      def reset!
+        @recordings = []
+      end
+    end
+
+    def name
+      :seed_recording_action
+    end
+
+    def call
+      self.class.recordings << rng.rand if self.class.recordings.empty?
+      Response.new("200")
+    end
+  end
+
+  class ZeroSeedWorkload < Load::Workload
+    def name
+      "zero-seed-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+    end
+
+    def actions
+      [Load::ActionEntry.new(SeedRecordingAction, 1)]
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 1, duration_seconds: 0.1, rate_limit: :unlimited, seed: 0)
     end
   end
 end

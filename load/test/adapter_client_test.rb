@@ -15,6 +15,15 @@ class AdapterClientTest < Minitest::Test
     assert_equal ["reset-state", "--app-root", "/tmp/app", "--seed", "42", "--env", "ROWS_PER_TABLE=10000000", "--env", "OPEN_FRACTION=0.002"], capture.argv
   end
 
+  def test_describe_raises_adapter_error_on_malformed_json
+    capture = FakeCapture3.new(stdout: "not json")
+    client = Load::AdapterClient.new(adapter_bin: "adapters/rails/bin/bench-adapter", capture3: capture)
+
+    error = assert_raises(Load::AdapterClient::AdapterError) { client.describe }
+
+    assert_includes error.message, "unexpected token"
+  end
+
   class FakeCapture3
     attr_reader :argv
 
