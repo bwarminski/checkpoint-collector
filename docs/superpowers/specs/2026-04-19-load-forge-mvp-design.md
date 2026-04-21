@@ -159,7 +159,7 @@ Every command:
 | `load-dataset` | `--app-root --workload <name> --seed <n> --env KEY=VALUE [--env ...]` | `loaded_rows`, `duration_ms` | Runs `bin/rails runner 'load Rails.root.join("db/seeds.rb").to_s'` with `SEED` and all `--env` key/values propagated. `--workload` is informational. |
 | `reset-state` | `--app-root --seed <n> --env KEY=VALUE [--env ...]` | — | Full reset: `bin/rails db:drop db:create db:migrate` then the same seed invocation as `load-dataset`, then `SELECT pg_stat_statements_reset()` so per-run counters start at zero (executed via `bin/rails runner`, not direct PG). Failure path must leave no half-dropped DB. |
 | `start` | `--app-root` | `pid`, `base_url` | Spawns `bin/rails server` on a port the adapter picks. Returns immediately with the pid and resolved base URL. Does NOT `Process.detach`; the runner owns the lifecycle and will call `stop`. |
-| `stop` | `--pid <n>` | — | Terminates the process by pid using a single coherent lifecycle (see §6.4): `SIGTERM`, poll with `Process.kill(0, pid)` + `waitpid(pid, WNOHANG)` up to 10s, escalate to `SIGKILL`, final blocking `waitpid(pid)`. Idempotent: unknown pid returns `ok: true`. |
+| `stop` | `--pid <n>` | — | Terminates the process by pid (see §6.4 for full lifecycle): `SIGTERM`, poll `Process.kill(0, pid)` every 200ms up to 10s, escalate to `SIGKILL`, poll `kill(0, pid)` for another 2s. Never calls `Process.waitpid` — start and stop are separate adapter invocations, so the target is not a child of the stopping process. Idempotent: unknown pid (`Errno::ESRCH`) returns `ok: true`. |
 
 That's the whole contract. No state-dir, no capabilities, no versioning, no health command, no base-url command, no port flag, no reset mode, no api version.
 
