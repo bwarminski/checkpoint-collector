@@ -76,6 +76,8 @@ module Load
       backoff = 0.2
 
       loop do
+        raise ReadinessTimeout if current_time >= deadline
+
         response = client.get(@readiness_path)
         if response.code.to_i >= 200 && response.code.to_i < 300
           write_state(readiness: { completed_at: current_time, path: @readiness_path })

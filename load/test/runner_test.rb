@@ -69,7 +69,30 @@ class RunnerTest < Minitest::Test
     assert_equal 1, exit_code
     assert_equal "readiness_timeout", run_record.outcome.fetch(:error_code)
     assert_equal 1, adapter.stop_calls
-    assert_equal 2, http.request_count
+    assert_equal 1, http.request_count
+  end
+
+  def test_runner_readiness_probe_does_not_retry_after_deadline
+    run_record = FakeRunRecord.new
+    adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
+    clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
+    http = ProbeHttp.new
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: -> { clock.now },
+      sleeper: ->(seconds) { clock.advance_by(seconds) },
+      http:,
+      readiness_timeout_seconds: 999,
+      startup_grace_seconds: 0.01,
+    )
+
+    exit_code = runner.run
+
+    assert_equal 1, exit_code
+    assert_equal "readiness_timeout", run_record.outcome.fetch(:error_code)
+    assert_equal 1, http.request_count
   end
 
   def test_runner_records_adapter_describe_metadata_before_readiness
