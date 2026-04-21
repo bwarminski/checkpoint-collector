@@ -8,11 +8,17 @@ class ReporterTest < Minitest::Test
 
   class FakeClock
     def initialize(times = [0.0])
-      @times = times.each
+      @times = times.dup
+      @mutex = Mutex.new
     end
 
     def call
-      @times.next
+      @mutex.synchronize do
+        value = @times.shift
+        return value unless value.nil?
+
+        @times.last || 0.0
+      end
     end
   end
 
@@ -110,6 +116,53 @@ class ReporterTest < Minitest::Test
 
     assert_operator elapsed, :<, 0.2
     assert_equal 1, sink.length
+  end
+
+  def test_reporter_stop_waits_for_inflight_snapshot_before_flushing_tail
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    sink = []
+    sleep_started = Queue.new
+    release_sleep = Queue.new
+    snapshot_started = Queue.new
+    release_snapshot = Queue.new
+    sleep_calls = 0
+    reporter = Load::Reporter.new(
+      workers:,
+      interval_seconds: 5,
+      sink:,
+      clock: FakeClock.new([0.0, 5.0]),
+      sleeper: ->(*) do
+        sleep_calls += 1
+        if sleep_calls == 1
+          sleep_started << true
+          release_sleep.pop
+        else
+          raise StopIteration
+        end
+      end,
+    )
+
+    first_snapshot = true
+    reporter.define_singleton_method(:snapshot_once) do
+      if first_snapshot
+        first_snapshot = false
+        snapshot_started << true
+        release_snapshot.pop
+      end
+      super()
+    end
+
+    reporter.start
+    sleep_started.pop
+    release_sleep << true
+    snapshot_started.pop
+    stop_thread = Thread.new { reporter.stop }
+    assert_equal 0, sink.length
+    release_snapshot << true
+    stop_thread.join
+
+    assert_equal 1, sink.first.fetch(:actions).fetch(:a).fetch(:count)
   end
 
   private

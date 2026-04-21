@@ -37,7 +37,11 @@ module Load
     private
 
     def action_name(action)
-      action && action.respond_to?(:name) ? action.name : :unknown
+      return :unknown unless action && action.respond_to?(:name)
+
+      action.name
+    rescue StandardError
+      :unknown
     end
 
     def elapsed_ns(started_ns)

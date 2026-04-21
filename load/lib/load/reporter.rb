@@ -2,6 +2,8 @@
 # ABOUTME: Provides an explicit snapshot_once hook and a final flush on stop.
 module Load
   class Reporter
+    class Shutdown < StandardError; end
+
     def initialize(workers:, interval_seconds:, sink:, clock:, sleeper:)
       @workers = workers
       @interval_seconds = interval_seconds
@@ -11,6 +13,8 @@ module Load
       @thread = nil
       @running = false
       @mutex = Mutex.new
+      @state_mutex = Mutex.new
+      @sleeping = false
     end
 
     def start
@@ -18,15 +22,26 @@ module Load
 
       @running = true
       @thread = Thread.new do
-        loop do
-          break unless @running
-          begin
-            @sleeper.call(@interval_seconds)
-          rescue StopIteration
-            break
+        begin
+          loop do
+            break unless @running
+            begin
+              Thread.handle_interrupt(Shutdown => :immediate) do
+                mark_sleeping(true)
+                @sleeper.call(@interval_seconds)
+              end
+            rescue StopIteration, Shutdown
+              break
+            ensure
+              mark_sleeping(false)
+            end
+            break unless @running
+            Thread.handle_interrupt(Shutdown => :never) do
+              snapshot_once
+            end
           end
-          break unless @running
-          snapshot_once
+        rescue Exception => error
+          raise unless error == Shutdown || error.is_a?(Shutdown)
         end
       end
 
@@ -35,8 +50,10 @@ module Load
 
     def stop
       @running = false
-      @thread.kill if @thread&.alive? && @thread != Thread.current
-      @thread.join if @thread && @thread != Thread.current
+      if @thread && @thread != Thread.current
+        @thread.raise(Shutdown.new) if sleeping? && @thread.alive?
+        @thread.join
+      end
       snapshot_once
       self
     end
@@ -65,6 +82,18 @@ module Load
     end
 
     private
+
+    def mark_sleeping(value)
+      @state_mutex.synchronize do
+        @sleeping = value
+      end
+    end
+
+    def sleeping?
+      @state_mutex.synchronize do
+        @sleeping
+      end
+    end
 
     def fresh_bucket
       {

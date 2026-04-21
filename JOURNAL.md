@@ -31,3 +31,4 @@
 - Task 2 metrics shape now includes `p50_ms`, `p95_ms`, `p99_ms`, and `max_ms`, and reporter snapshot lines use `ts` plus `interval_ms` to match the later JSONL contract.
 - Task 2 reporter loop now sleeps before the first periodic snapshot; the only early flush remains `stop`, and `interval_ms` is emitted as an integer.
 - Task 2 reporter shutdown now kills the waiting thread before join, so `stop` returns promptly instead of waiting for the interval sleeper to finish.
+- Task 2 reporter hardening replaced the hard kill with cooperative `Shutdown` handling that only interrupts the sleeper phase; in-flight snapshots finish before exit, and worker error labeling now falls back to `:unknown` if `action.name` itself raises.

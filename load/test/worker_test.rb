@@ -72,4 +72,28 @@ class WorkerTest < Minitest::Test
 
     assert_equal 1, buffer.swap!.fetch(:unknown).fetch(:errors_by_class).fetch("ArgumentError")
   end
+
+  def test_worker_falls_back_to_unknown_when_action_name_raises
+    bad_name_action = Class.new(Load::Action) do
+      def name
+        raise RuntimeError, "bad name"
+      end
+
+      def call
+        raise RuntimeError, "boom"
+      end
+    end
+
+    selector = Object.new
+    selector.define_singleton_method(:next) do
+      Load::ActionEntry.new(bad_name_action, 1)
+    end
+
+    buffer = Load::Metrics::Buffer.new
+    worker = Load::Worker.new(worker_id: 3, selector:, buffer:, client: Object.new, ctx: {}, rng: Random.new(7), rate_limiter: Object.new.tap { |limiter| limiter.define_singleton_method(:wait_turn) {} }, stop_flag: stop_after(1))
+
+    worker.run
+
+    assert_equal 1, buffer.swap!.fetch(:unknown).fetch(:errors_by_class).fetch("RuntimeError")
+  end
 end
