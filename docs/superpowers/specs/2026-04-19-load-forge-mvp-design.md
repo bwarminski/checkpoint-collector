@@ -70,7 +70,7 @@ Database observability is NOT part of the runner or the adapter. The existing ch
                                           +------------------------------+
 ```
 
-The runner never talks to Postgres. The adapter talks to Postgres only through Rails. Observability is the collector's job.
+The runner never talks to Postgres. The adapter talks to the app-under-test's Postgres only through Rails for ordinary data paths (migrate, seed). One intentional exception: when template caching is enabled (§6.5), the adapter connects to Postgres as a privileged role to run `CREATE DATABASE ... TEMPLATE ...` / `DROP DATABASE`. That is the only time the adapter reaches Postgres outside the Rails subprocess, and it's explicitly an adapter-private capability, not part of the adapter contract. Observability is the collector's job.
 
 ## 4. Repo Layout
 
@@ -154,12 +154,12 @@ Every command:
 | Command | Flags | Success fields | Behavior |
 |---|---|---|---|
 | `describe` | — | `name`, `framework`, `runtime` | Static metadata. No side effects. |
-| `prepare` | `--app-root` | — | Idempotent. For Rails: `bundle check \|\| bundle install`, ensure DB cluster reachable. |
+| `prepare` | `--app-root` | — | Idempotent. For Rails: `bundle check` only (no install). If `bundle check` fails, return error `bundle_missing` — the developer runs `bundle install` once in the app-under-test. Also verifies DB cluster reachable. |
 | `migrate` | `--app-root` | `schema_version` | `bin/rails db:create db:migrate`. |
 | `load-dataset` | `--app-root --workload <name> --seed <n> --env KEY=VALUE [--env ...]` | `loaded_rows`, `duration_ms` | Runs `bin/rails runner 'load Rails.root.join("db/seeds.rb").to_s'` with `SEED` and all `--env` key/values propagated. `--workload` is informational. |
-| `reset-state` | `--app-root --seed <n> --env KEY=VALUE [--env ...]` | — | Full reset: `bin/rails db:drop db:create db:migrate` then the same seed invocation as `load-dataset`. Failure path must leave no half-dropped DB. |
-| `start` | `--app-root` | `pid`, `base_url` | Forks `bin/rails server` detached on a port the adapter picks. Returns immediately with the pid and resolved base URL. |
-| `stop` | `--pid <n>` | — | Terminates the process by pid. `SIGTERM`, wait 10s, escalate to `SIGKILL`. Idempotent: unknown pid returns `ok: true`. |
+| `reset-state` | `--app-root --seed <n> --env KEY=VALUE [--env ...]` | — | Full reset: `bin/rails db:drop db:create db:migrate` then the same seed invocation as `load-dataset`, then `SELECT pg_stat_statements_reset()` so per-run counters start at zero (executed via `bin/rails runner`, not direct PG). Failure path must leave no half-dropped DB. |
+| `start` | `--app-root` | `pid`, `base_url` | Spawns `bin/rails server` on a port the adapter picks. Returns immediately with the pid and resolved base URL. Does NOT `Process.detach`; the runner owns the lifecycle and will call `stop`. |
+| `stop` | `--pid <n>` | — | Terminates the process by pid using a single coherent lifecycle (see §6.4): `SIGTERM`, poll with `Process.kill(0, pid)` + `waitpid(pid, WNOHANG)` up to 10s, escalate to `SIGKILL`, final blocking `waitpid(pid)`. Idempotent: unknown pid returns `ok: true`. |
 
 That's the whole contract. No state-dir, no capabilities, no versioning, no health command, no base-url command, no port flag, no reset mode, no api version.
 
@@ -201,25 +201,34 @@ SEED=42 ROWS_PER_TABLE=10000000 OPEN_FRACTION=0.002 bin/rails runner 'load "db/s
 
 ### 6.3 `start` semantics
 
-1. Pick a port. Simplest: try Rails default 3000; if bound, try 3001, 3002, ... up to 3020. Give up after. (Simple retry beats `bind(0)` ceremony.)
+1. Pick a port. Simplest: try Rails default 3000; if bound, try 3001, 3002, ... up to 3020. If all busy, return `{ok: false, error: {code: "port_exhausted", ...}}`. (Simple retry beats `bind(0)` ceremony.)
 2. `spawn("bin/rails", "server", "-p", port, "-b", "127.0.0.1", chdir: app_root, ..., [:out, :err] => [logfile, "w"])`.
-3. `Process.detach(pid)` so the child survives adapter exit.
-4. Return `{ok, pid, base_url: "http://127.0.0.1:<port>"}` immediately. Does not wait for readiness.
+3. **Do NOT** call `Process.detach(pid)`. The adapter process exits after printing JSON; on Linux the Rails child is reparented to init and keeps running. Detach would install a reaper thread that races the later `stop` call's `waitpid` (producing `Errno::ECHILD`). The runner owns the lifecycle: it will call `stop --pid <n>`, which does its own non-blocking existence check via `Process.kill(0, pid)` and finishes with a blocking `waitpid(pid)` only if the process is still a child of the stopping adapter invocation (it won't be, since start and stop are separate adapter invocations — see §6.4).
+4. Return `{ok, pid, base_url: "http://127.0.0.1:<port>"}` immediately. Does not wait for readiness; readiness is the runner's job (§8.2).
 
 ### 6.4 `stop` semantics
 
-1. `Process.kill("TERM", pid)`. If `Errno::ESRCH`, return `ok: true`.
-2. Poll `Process.waitpid(pid, Process::WNOHANG)` every 200ms up to 10s.
-3. Escalate to `SIGKILL` if still alive. Final `waitpid`.
+A single coherent lifecycle. Because `stop` runs in a different adapter process than `start`, the target pid is not a child of this process, so `waitpid` on it would raise `Errno::ECHILD`. The adapter therefore uses existence-checking (`kill(0, pid)`) rather than reaping:
+
+1. `Process.kill("TERM", pid)`. If `Errno::ESRCH` (unknown pid), return `ok: true` immediately.
+2. Poll every 200ms up to 10s:
+   - `Process.kill(0, pid)` — if it raises `Errno::ESRCH`, the process exited; return `ok: true`.
+3. Still alive after 10s: `Process.kill("KILL", pid)`, poll `kill(0, pid)` the same way for another 2s, return `ok: true` once gone.
+4. If `kill(0, pid)` still succeeds after SIGKILL + 2s, return `{ok: false, error: {code: "stop_failed", ...}}`. In practice this does not happen on Linux for a Rails server.
+
+Never call `Process.detach` in `start` or `Process.waitpid` in `stop`. Those primitives assume parent/child, which this contract does not guarantee.
 
 ### 6.5 Postgres template caching (adapter-private)
 
-The Rails adapter MAY cache a template database (`<dbname>_tmpl`) populated by the first full reset, and clone from it on subsequent resets. Not part of the contract. If implemented:
+The Rails adapter caches a template database (`<dbname>_tmpl`) populated by the first full reset, and clones from it on subsequent resets. Not part of the contract — a purely adapter-internal capability. Strongly recommended for day one: without it, every reset takes minutes instead of seconds.
 
-- First reset: `db:drop db:create db:migrate`, run seed, `CREATE DATABASE <dbname>_tmpl TEMPLATE <dbname>`.
-- Subsequent resets: `DROP DATABASE <dbname>`; `CREATE DATABASE <dbname> TEMPLATE <dbname>_tmpl`.
+**Contract divergence, called out explicitly:** template operations (`CREATE DATABASE ... TEMPLATE ...`, `DROP DATABASE`) cannot be run through `bin/rails` against the current connection, and cannot target the database currently being cloned. The adapter therefore connects directly to Postgres (to the `postgres` maintenance database) as a privileged role. This is the one case where the adapter reaches Postgres outside a Rails subprocess (see §3). The connection URL comes from a dedicated env var (`BENCH_ADAPTER_PG_ADMIN_URL`) distinct from the app's `DATABASE_URL` to keep concerns separated, with a fallback to `DATABASE_URL` for local dev.
 
-Implementor's call whether to ship this day one. Without it, every reset takes minutes instead of seconds. Strongly recommended.
+Behavior:
+
+- First reset: `db:drop db:create db:migrate`, run seed, then (via admin connection) `CREATE DATABASE <dbname>_tmpl TEMPLATE <dbname>`.
+- Subsequent resets: via admin connection, terminate other sessions on `<dbname>` (`pg_terminate_backend`), `DROP DATABASE <dbname>`, `CREATE DATABASE <dbname> TEMPLATE <dbname>_tmpl`. Then run `pg_stat_statements_reset()` via `bin/rails runner`.
+- Invalidation: template is considered stale when the Rails migration version or the workload scale fields differ from what was used to build it; on mismatch, drop and rebuild the template.
 
 ## 7. Workload Contract (Ruby)
 
@@ -301,7 +310,7 @@ module Load
 
       def load_plan
         Load::LoadPlan.new(
-          workers: 4,
+          workers: 16,           # parity with today's fixtures/missing-index/manifest.yml
           duration_seconds: 60,
           rate_limit: :unlimited,
         )
@@ -360,22 +369,31 @@ The `--workload` file must `require` its action files and define exactly one cla
  6. adapter.start --app-root <...>
  7. base_url = response.base_url; pid = response.pid
  8. Create run record directory: runs/<UTC_ISO>-<workload-name>/
- 9. Write run.json skeleton (workload snapshot, adapter describe, start_ts, pid, base_url)
-10. Sleep --startup-grace-seconds (default 3s).
+ 9. Write run.json skeleton (workload snapshot, adapter describe, pid, base_url). `window.start_ts` is intentionally omitted here — the measurement window has not started yet.
+10. Readiness probe: poll `GET <base_url>/up` with exponential backoff (200ms, 400ms, 800ms, 1600ms, capped) up to --startup-grace-seconds (default 15). First 2xx response ends the probe. On timeout: adapter.stop + exit 1 with `readiness_timeout`. If the app has no `/up` (see §10.4), the workload sets `--readiness-path` or disables the probe (`--readiness-path none`, falling back to a fixed sleep).
 11. Spawn N worker threads; spawn 1 metrics-reporter thread.
-12. Run for load_plan.duration_seconds. Workers loop: select → instantiate action → call → record to in-memory metrics buffer.
-13. Reporter thread: every --metrics-interval-seconds, snapshot all workers' buffers, compute per-action aggregates, append to metrics.jsonl.
-14. Duration expires → signal workers to stop → drain → final metrics snapshot.
-15. Write end_ts + outcome summary to run.json.
-16. adapter.stop --pid <pid>  (always, inside an ensure block).
-17. Print summary: duration, request count, error rate, run record path.
+12. First successful worker request pins `window.start_ts` (monotonic + wall clock) and writes it into run.json. If no request succeeds before duration expires, the runner exits 3 with `outcome.start_ts: null`.
+13. Run for load_plan.duration_seconds. Workers loop: select → instantiate action → call → record to in-memory metrics buffer.
+14. Reporter thread: every --metrics-interval-seconds, snapshot all workers' buffers, compute per-action aggregates, append to metrics.jsonl.
+15. Duration expires → signal workers to stop → drain → final metrics snapshot.
+16. Write window.end_ts + outcome summary to run.json.
+17. adapter.stop --pid <pid>  (always, inside an ensure block).
+18. Print summary: duration, request count, error rate, run record path.
 ```
 
 Signals: `SIGINT`/`SIGTERM` handled → set stop flag → `ensure` cleanup runs.
 
 ### 8.2 Readiness
 
-No health check. The runner waits `--startup-grace-seconds` (default 3) between `start` returning and workers beginning traffic. Early requests that hit a not-yet-ready app appear in metrics as errors. Workloads driving against slow-booting apps set a larger grace via flag. Rails 7+ on a moderate app boots in 2–4s; default covers the common case.
+The runner does a deterministic HTTP readiness probe between `start` returning and workers beginning traffic. Default path: `/up` (Rails 7.1+ default). Flags:
+
+- `--readiness-path <path>` — override (default `/up`).
+- `--readiness-path none` — disable the probe entirely; fall back to fixed sleep `--startup-grace-seconds`.
+- `--startup-grace-seconds <n>` — total time budget for the probe, or sleep duration when probe is disabled. Default 15.
+
+Probe behavior: `GET <base_url><path>`, exponential backoff (200ms, 400ms, 800ms, 1600ms, capped at 1600ms), first 2xx ends the probe. Timeout → adapter.stop + exit 1 with `readiness_timeout`.
+
+This replaces the earlier "fixed 3s grace, record early errors as metrics" plan. Boot time varies too much (cold WSL, cold Ruby, cold Rails) to make a fixed sleep deterministic — and "early requests are errors in metrics" pollutes the very data the oracle inspects. A probe either succeeds (window is clean) or exits with a clear reason (no ambiguous run record).
 
 ### 8.3 Selector
 
@@ -449,7 +467,7 @@ No `requests.jsonl`, no `state-dir/`, no `plans/`, no `signals.json`.
     "name": "missing-index-todos",
     "file": "workloads/missing_index_todos/workload.rb",
     "scale": {"rows_per_table": 10000000, "open_fraction": 0.002, "seed": 42},
-    "load_plan": {"workers": 4, "duration_seconds": 60, "rate_limit": "unlimited", "seed": null},
+    "load_plan": {"workers": 16, "duration_seconds": 60, "rate_limit": "unlimited", "seed": null},
     "actions": [{"class": "Load::Workloads::MissingIndexTodos::Actions::ListOpenTodos", "weight": 100}]
   },
   "adapter": {
@@ -460,9 +478,10 @@ No `requests.jsonl`, no `state-dir/`, no `plans/`, no `signals.json`.
     "pid": 48291
   },
   "window": {
-    "start_ts": "2026-04-19T14:32:00.123Z",
-    "end_ts":   "2026-04-19T14:33:00.456Z",
-    "startup_grace_seconds": 3,
+    "start_ts": "2026-04-19T14:32:03.417Z",
+    "end_ts":   "2026-04-19T14:33:03.422Z",
+    "readiness": {"path": "/up", "probe_duration_ms": 2893, "probe_attempts": 5},
+    "startup_grace_seconds": 15,
     "metrics_interval_seconds": 5
   },
   "outcome": {
@@ -474,7 +493,7 @@ No `requests.jsonl`, no `state-dir/`, no `plans/`, no `signals.json`.
 }
 ```
 
-Written incrementally: skeleton at step 9 of §8.1; `window.end_ts` and `outcome` filled at step 15.
+Written incrementally: skeleton (no `window.start_ts`) at step 9 of §8.1; `window.readiness` at step 10; `window.start_ts` at step 12 (first successful request); `window.end_ts` and `outcome` at step 16.
 
 ### 9.2 `adapter-commands.jsonl`
 
@@ -518,7 +537,7 @@ Confirm db-specialist-demo's existing Rails migrations produce a `todos` table m
 
 ### 10.4 Health endpoint
 
-Not used by the runner (no health command in the contract). Rails 7.1+'s default `/up` is fine to leave in place; if the app doesn't have it, skip it.
+Used by the runner's readiness probe (§8.2). Rails 7.1+ ships `/up` by default and returns 200 once the app has booted. If the app-under-test is pre-7.1 or has disabled `/up`, either (a) re-enable it (one-line `Rails.application.routes.draw` addition), or (b) point the workload at a different idempotent GET endpoint via `--readiness-path`, or (c) set `--readiness-path none` to fall back to a fixed grace sleep. The probe is deterministic where the old fixed-sleep plan was not.
 
 ### 10.5 No other changes
 
@@ -536,12 +555,15 @@ Usage: ruby workloads/missing_index_todos/oracle.rb <run-record-dir> \
 
 Accepts `--database-url` and `--clickhouse-url` flags with env-var fallbacks. Does not parse `database.yml`.
 
-Behavior (ported from today's `fixtures/missing-index/validate/assert.rb`):
+Behavior (ported from today's `fixtures/missing-index/validate/assert.rb`, with robustness fixes):
 
-1. Read `run.json` for the window.
-2. Connect to PG; run `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'`. Walk plan tree, verify root relation node is `Seq Scan` on `todos`.
-3. Poll ClickHouse for the window until `max(total_exec_count) >= 500` for the fingerprint, or timeout.
-4. Print `PASS: explain ...` / `PASS: clickhouse ...`, exit 0. On mismatch: print `FAIL:` with observed vs expected, exit 1.
+1. Read `run.json` for the window (`start_ts`, `end_ts`, workload fingerprint).
+2. Connect to PG; run `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'`. Walk the JSON plan tree recursively and assert that *some* scan node on relation `todos` has `Node Type == "Seq Scan"`. Do NOT rely on the root node's shape: the Rails action may wrap the scan under a `Limit`, `Gather`, or `Sort` node depending on Rails query construction. Rejection cases to flag: any `Index Scan` / `Index Only Scan` / `Bitmap Index Scan` on `todos` (these indicate the missing index has been added).
+3. Identify the target statement by ClickHouse `queryid` fingerprint (the `pg_stat_statements.queryid` column), NOT by `SQL LIKE '%todos%status%'` text matching. The runner records the expected queryid into `run.json` at seed time by running the canonical EXPLAIN in step 2 and reading back `pg_stat_statements.queryid` for that statement's normalized form. If multiple queryids match the same normalized text (parameter-variant queries), the oracle sums `total_exec_count` across them for the window.
+4. Poll ClickHouse for the window until `sum(total_exec_count) >= 500` for the queryid set, or timeout (default 30s past `window.end_ts`). Timeout → print `FAIL: clickhouse (saw N calls before timeout)`, exit 1.
+5. Print `PASS: explain ...` / `PASS: clickhouse ...`, exit 0. On mismatch: print `FAIL:` with observed vs expected, exit 1.
+
+**Why this matters:** text-matching `SQL LIKE` is fragile across Rails versions (AR sometimes emits `"todos"."status"` quoted differently) and across normalization changes in pg_stat_statements. queryid is the stable identifier. Tree-walking instead of root-matching survives minor plan-shape changes like `Gather`/`Limit` wrappers that the current `assert.rb` trips over when Postgres parallel workers kick in.
 
 Not wired into the runner. Runner exits cleanly regardless. When workloads stabilize or LLM tooling takes over, delete the script.
 
@@ -549,7 +571,8 @@ Not wired into the runner. Runner exits cleanly regardless. When workloads stabi
 
 ```
 bin/load run --workload <path> --adapter <path> --app-root <path> \
-  [--runs-dir runs/] [--startup-grace-seconds 3] \
+  [--runs-dir runs/] [--startup-grace-seconds 15] \
+  [--readiness-path /up | --readiness-path none] \
   [--metrics-interval-seconds 5] [--debug-log <path|->]
 bin/load --version
 bin/load --help
@@ -557,7 +580,7 @@ bin/load --help
 
 Exit codes:
 - `0`: run completed, at least one successful request
-- `1`: adapter error (startup/shutdown/lifecycle)
+- `1`: adapter error (startup/readiness/shutdown/lifecycle) — includes `readiness_timeout`
 - `2`: workload load error (file missing / no Workload subclass defined)
 - `3`: no successful requests during the window (degenerate run)
 
@@ -592,11 +615,15 @@ Against `oracle/add-index` branch of db-specialist-demo, must print `FAIL: expla
 ### 14.2 Rails adapter (`/adapters/rails/test/`)
 
 - Per-command unit tests with stubbed `Open3` (validate subprocess args, env, chdir).
-- One integration test running against a real `bin/rails` in a scratch Rails app fixture: `prepare → migrate → load-dataset → start → <HTTP GET /up works> → stop`. Opt-out via `SKIP_RAILS_INTEGRATION=1`.
+- One integration test running against a real `bin/rails` in a scratch Rails app fixture: `prepare → migrate → load-dataset → start → <HTTP GET /up works> → stop`. **Opt-in** via `RUN_RAILS_INTEGRATION=1`. Default CI run skips it (no Ruby + Rails stack guaranteed on all dev machines); nightly / pre-release runs set the flag.
 
-### 14.3 End-to-end
+### 14.3 End-to-end against db-specialist-demo
 
-Manual. `make load-smoke` target that assumes `docker compose up -d` and `~/db-specialist-demo` are ready, runs the §13 parity sequence.
+A skip-by-default integration test gated on `RUN_DB_SPECIALIST_DEMO_INTEGRATION=1` plus `DB_SPECIALIST_DEMO_PATH=<path>`. Runs the §13 parity sequence against the real external app at a pinned commit SHA (recorded in plan Task 7, not in this spec — spec is reference-implementation-agnostic). Without the env gate the test no-ops with a clear skip message. This replaces any in-spec "toy integration test" — the runner is exercised against the real target app or it isn't exercised end-to-end.
+
+### 14.4 Manual smoke
+
+`make load-smoke` target that assumes `docker compose up -d` and `~/db-specialist-demo` are ready, runs the §13 parity sequence.
 
 ## 15. Implementor Decisions (Document What You Chose)
 
@@ -604,7 +631,7 @@ Manual. `make load-smoke` target that assumes `docker compose up -d` and `~/db-s
 2. HTTP client (`Net::HTTP`, `Net::HTTP::Persistent`, `httprb`).
 3. Exact shape of `ctx` hash passed into actions (start minimal: `{base_url, worker_id}`).
 4. JSON library (stdlib is fine).
-5. Whether the Rails adapter implements template caching day one (§6.5). Without it, resets are minutes not seconds.
+5. Template caching (§6.5) ships day one. Implementor's decision: exact shape of template invalidation (migration-version hash, scale-fields hash, both). Also: `BENCH_ADAPTER_PG_ADMIN_URL` resolution — env var primary, `DATABASE_URL` fallback, explicit error if neither set.
 6. Percentile algorithm (exact sort is fine for MVP interval sizes; note if switching to HDR later).
 7. Buffer-swap synchronization (mutex + swap, or lock-free ring). Mutex + swap is fine.
 
@@ -624,7 +651,7 @@ Manual. `make load-smoke` target that assumes `docker compose up -d` and `~/db-s
 
 ## 17. Risks
 
-1. **Rails boot time vs grace period.** 3s default may be too short on a cold app. Mitigation: workloads on heavy apps override via `--startup-grace-seconds`. Errors from early requests are visible in metrics.
+1. **Rails boot time vs readiness probe budget.** Default 15s probe budget (§8.2) covers a cold Rails 7 boot with margin. Slower apps override via `--startup-grace-seconds`. On timeout the runner exits 1 with `readiness_timeout` rather than producing a noisy run record with early-error pollution.
 2. **Seed performance.** Minutes-per-reset without template caching. Strongly recommend template caching (§6.5) on day one.
 3. **`benchmark` Rails env assumption.** If db-specialist-demo doesn't have one, implementor adds it. Coordinate.
 4. **Existing fixture harness is committed on this branch.** Section 4 deletions are real. Don't leave the old code alongside the new.
