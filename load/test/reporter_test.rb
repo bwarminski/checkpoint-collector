@@ -28,6 +28,25 @@ class ReporterTest < Minitest::Test
     assert_equal 2, line.fetch(:actions).fetch(:a).fetch(:count)
   end
 
+  def test_reporter_runs_periodic_snapshots_automatically
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    sink = []
+    sleeps = []
+    sleeper = ->(seconds) do
+      sleeps << seconds
+      raise StopIteration
+    end
+    reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new([0.0]), sleeper:)
+
+    reporter.start
+    wait_until { sink.any? }
+
+    assert_equal [5], sleeps
+    assert_equal 1, sink.length
+    assert_equal 1, sink.last.fetch(:actions).fetch(:a).fetch(:count)
+  end
+
   def test_reporter_emits_final_tail_snapshot_on_stop
     workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
     sink = []
@@ -38,5 +57,28 @@ class ReporterTest < Minitest::Test
     reporter.stop
 
     assert_equal 1, sink.sum { |line| line.fetch(:actions).fetch(:a, {}).fetch(:count, 0) }
+  end
+
+  def test_reporter_flushes_tail_data_even_if_never_started
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    sink = []
+    reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new, sleeper: ->(*) {})
+
+    reporter.stop
+
+    assert_equal 1, sink.sum { |line| line.fetch(:actions).fetch(:a, {}).fetch(:count, 0) }
+  end
+
+  private
+
+  def wait_until(timeout_seconds: 1.0)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
+
+    until yield
+      raise "timed out waiting for reporter" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      Thread.pass
+    end
   end
 end

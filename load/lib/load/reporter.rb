@@ -8,37 +8,58 @@ module Load
       @sink = sink
       @clock = clock
       @sleeper = sleeper
-      @started = false
+      @thread = nil
+      @running = false
+      @mutex = Mutex.new
     end
 
     def start
-      @started = true
+      return self if @thread&.alive?
+
+      @running = true
+      @thread = Thread.new do
+        loop do
+          break unless @running
+          snapshot_once
+          break unless @running
+          begin
+            @sleeper.call(@interval_seconds)
+          rescue StopIteration
+            break
+          end
+        end
+      end
+
       self
     end
 
     def stop
-      snapshot_once if @started
-      @started = false
+      @running = false
+      @thread.join if @thread && @thread != Thread.current
+      snapshot_once
+      self
     end
 
     def snapshot_once
-      merged = {}
+      @mutex.synchronize do
+        merged = {}
 
-      @workers.each do |worker|
-        worker.buffer.swap!.each do |action, bucket|
-          merged[action] ||= fresh_bucket
-          merged[action][:latencies_ns].concat(bucket.fetch(:latencies_ns, []))
-          merged[action][:status_counts].merge!(bucket.fetch(:status_counts, {})) { |_key, left, right| left + right }
-          merged[action][:errors_by_class].merge!(bucket.fetch(:errors_by_class, {})) { |_key, left, right| left + right }
+        @workers.each do |worker|
+          worker.buffer.swap!.each do |action, bucket|
+            merged[action] ||= fresh_bucket
+            merged[action][:latencies_ns].concat(bucket.fetch(:latencies_ns, []))
+            merged[action][:status_counts].merge!(bucket.fetch(:status_counts, {})) { |_key, left, right| left + right }
+            merged[action][:errors_by_class].merge!(bucket.fetch(:errors_by_class, {})) { |_key, left, right| left + right }
+          end
         end
-      end
 
-      line = {
-        timestamp: @clock.call,
-        actions: Load::Metrics::Snapshot.build(merged),
-      }
-      @sink << line
-      line
+        line = {
+          timestamp: @clock.call,
+          actions: Load::Metrics::Snapshot.build(merged),
+        }
+        @sink << line
+        line
+      end
     end
 
     private
