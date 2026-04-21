@@ -54,7 +54,10 @@ module Load
           stats[action] = {
             count: latencies_ns.length,
             error_count: bucket.fetch(:errors_by_class, {}).values.sum,
+            p50_ms: percentile_ms(latencies_ns, 0.50),
             p95_ms: percentile_ms(latencies_ns, 0.95),
+            p99_ms: upper_percentile_ms(latencies_ns, 0.99),
+            max_ms: max_ms(latencies_ns),
             status_counts: bucket.fetch(:status_counts, {}).dup,
             errors_by_class: bucket.fetch(:errors_by_class, {}).dup,
           }
@@ -69,6 +72,22 @@ module Load
         sorted.fetch(index).fdiv(1_000_000)
       end
       private_class_method :percentile_ms
+
+      def self.upper_percentile_ms(latencies_ns, percentile)
+        return 0.0 if latencies_ns.empty?
+
+        sorted = latencies_ns.sort
+        index = (percentile * (sorted.length - 1)).ceil
+        sorted.fetch(index).fdiv(1_000_000)
+      end
+      private_class_method :upper_percentile_ms
+
+      def self.max_ms(latencies_ns)
+        return 0.0 if latencies_ns.empty?
+
+        latencies_ns.max.fdiv(1_000_000)
+      end
+      private_class_method :max_ms
     end
   end
 end

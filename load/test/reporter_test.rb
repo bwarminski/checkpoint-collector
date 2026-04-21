@@ -25,6 +25,8 @@ class ReporterTest < Minitest::Test
     reporter.snapshot_once
 
     line = sink.last
+    assert_in_delta 5000.0, line.fetch(:interval_ms), 0.1
+    assert line.key?(:ts)
     assert_equal 2, line.fetch(:actions).fetch(:a).fetch(:count)
   end
 

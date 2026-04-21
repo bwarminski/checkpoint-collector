@@ -14,6 +14,9 @@ class MetricsTest < Minitest::Test
     stats = Load::Metrics::Snapshot.build(snapshot).fetch(:list_open_todos)
     assert_equal 3, stats.fetch(:count)
     assert_equal 1, stats.fetch(:error_count)
+    assert_in_delta 30.0, stats.fetch(:p50_ms), 0.1
     assert_in_delta 30.0, stats.fetch(:p95_ms), 0.1
+    assert_in_delta 50.0, stats.fetch(:p99_ms), 0.1
+    assert_in_delta 50.0, stats.fetch(:max_ms), 0.1
   end
 end

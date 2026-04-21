@@ -54,7 +54,8 @@ module Load
         end
 
         line = {
-          timestamp: @clock.call,
+          ts: @clock.call,
+          interval_ms: @interval_seconds * 1000.0,
           actions: Load::Metrics::Snapshot.build(merged),
         }
         @sink << line
