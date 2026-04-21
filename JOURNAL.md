@@ -29,3 +29,4 @@
 - Task 2 implementation uses a minimal file-backed `Load::RunRecord` with `run.json`, `metrics.jsonl`, and `adapter-commands.jsonl`; the load tests currently exercise only the write/append contract, not the later runner orchestration.
 - Task 2 reporter fix: `Load::Reporter` now starts a background interval loop, sleeps through the injected interval contract, and still flushes tail data on `stop` even if `start` was never called.
 - Task 2 metrics shape now includes `p50_ms`, `p95_ms`, `p99_ms`, and `max_ms`, and reporter snapshot lines use `ts` plus `interval_ms` to match the later JSONL contract.
+- Task 2 reporter loop now sleeps before the first periodic snapshot; the only early flush remains `stop`, and `interval_ms` is emitted as an integer.

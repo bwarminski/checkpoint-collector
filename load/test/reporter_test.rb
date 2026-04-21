@@ -25,7 +25,7 @@ class ReporterTest < Minitest::Test
     reporter.snapshot_once
 
     line = sink.last
-    assert_in_delta 5000.0, line.fetch(:interval_ms), 0.1
+    assert_equal 5000, line.fetch(:interval_ms)
     assert line.key?(:ts)
     assert_equal 2, line.fetch(:actions).fetch(:a).fetch(:count)
   end
@@ -34,17 +34,27 @@ class ReporterTest < Minitest::Test
     workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
     workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
     sink = []
-    sleeps = []
+    sleep_calls = []
+    ready = Queue.new
+    release = Queue.new
     sleeper = ->(seconds) do
-      sleeps << seconds
-      raise StopIteration
+      sleep_calls << seconds
+      if sleep_calls.length == 1
+        ready << true
+        release.pop
+      else
+        raise StopIteration
+      end
     end
     reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new([0.0]), sleeper:)
 
     reporter.start
+    wait_until { !ready.empty? }
+    assert_equal [], sink
+    release << true
     wait_until { sink.any? }
 
-    assert_equal [5], sleeps
+    assert_equal 5, sleep_calls.first
     assert_equal 1, sink.length
     assert_equal 1, sink.last.fetch(:actions).fetch(:a).fetch(:count)
   end

@@ -20,13 +20,13 @@ module Load
       @thread = Thread.new do
         loop do
           break unless @running
-          snapshot_once
-          break unless @running
           begin
             @sleeper.call(@interval_seconds)
           rescue StopIteration
             break
           end
+          break unless @running
+          snapshot_once
         end
       end
 
@@ -55,7 +55,7 @@ module Load
 
         line = {
           ts: @clock.call,
-          interval_ms: @interval_seconds * 1000.0,
+          interval_ms: (@interval_seconds * 1000).to_i,
           actions: Load::Metrics::Snapshot.build(merged),
         }
         @sink << line
