@@ -52,6 +52,26 @@ class RunnerTest < Minitest::Test
     assert_equal 2, http.request_count
   end
 
+  def test_runner_records_adapter_describe_metadata_before_readiness
+    run_record = FakeRunRecord.new
+    adapter = FakeAdapterClient.new(describe_response: { "name" => "rails-postgres-adapter", "framework" => "rails", "runtime" => "ruby-3.3" })
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+    )
+
+    runner.run
+
+    assert_equal 1, adapter.describe_calls
+    assert_equal "rails-postgres-adapter", run_record.adapter.fetch(:describe).fetch("name")
+    assert_equal "rails", run_record.adapter.fetch(:describe).fetch("framework")
+    assert_equal "ruby-3.3", run_record.adapter.fetch(:describe).fetch("runtime")
+  end
+
   def test_runner_pins_window_start_ts_at_first_successful_request
     run_record = FakeRunRecord.new
     runner = build_runner_with_delayed_first_success(delay_ms: 250, run_record:)
@@ -84,13 +104,14 @@ class RunnerTest < Minitest::Test
   end
 
   class FakeRunRecord
-    attr_reader :outcome, :readiness, :window
+    attr_reader :outcome, :readiness, :window, :adapter
 
     def initialize
       @payload = {}
       @outcome = {}
       @readiness = {}
       @window = {}
+      @adapter = {}
     end
 
     def write_run(payload)
@@ -98,15 +119,23 @@ class RunnerTest < Minitest::Test
       @outcome = payload.fetch(:outcome, @outcome)
       @readiness = payload.fetch(:readiness, @readiness)
       @window = payload.fetch(:window, @window)
+      @adapter = payload.fetch(:adapter, @adapter)
     end
   end
 
   class FakeAdapterClient
-    attr_reader :stop_calls
+    attr_reader :stop_calls, :describe_calls
 
-    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
+    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" })
       @start_response = start_response
+      @describe_response = describe_response
       @stop_calls = 0
+      @describe_calls = 0
+    end
+
+    def describe
+      @describe_calls += 1
+      @describe_response
     end
 
     def prepare(app_root:)

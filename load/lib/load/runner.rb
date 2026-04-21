@@ -36,8 +36,10 @@ module Load
       @adapter_client.prepare(app_root: @app_root)
       @adapter_client.reset_state(app_root: @app_root, scale: @workload.scale)
 
+      adapter_describe = @adapter_client.describe
       start_response = @adapter_client.start(app_root: @app_root)
       write_state(adapter: {
+        describe: adapter_describe,
         bin: nil,
         app_root: @app_root,
         pid: start_response.fetch("pid"),
