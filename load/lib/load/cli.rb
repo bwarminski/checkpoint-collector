@@ -20,7 +20,7 @@ module Load
 
       options = parse_options
       workload = load_workload(options.fetch(:workload))
-      @runner.call(
+      runner = @runner.call(
         workload: workload,
         adapter_bin: options.fetch(:adapter_bin),
         app_root: options.fetch(:app_root),
@@ -30,6 +30,7 @@ module Load
         stdout: @stdout,
         stderr: @stderr,
       )
+      runner.run
     rescue OptionParser::ParseError, ArgumentError => error
       @stderr.puts(error.message)
       usage_error
@@ -54,7 +55,7 @@ module Load
           readiness_path:,
           startup_grace_seconds:,
           app_root:,
-        ).run
+        )
       end
     end
 

@@ -61,7 +61,7 @@ module Load
       return sleep_startup_grace if @readiness_path == "none"
 
       client = Load::Client.new(base_url: base_url, http: @http)
-      deadline = current_time + @readiness_timeout_seconds
+      deadline = current_time + @startup_grace_seconds
       backoff = 0.2
 
       loop do

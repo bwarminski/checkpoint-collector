@@ -31,15 +31,17 @@ class RunnerTest < Minitest::Test
   def test_runner_readiness_probe_exits_one_on_timeout
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
-    http = FakeHttp.new(always_refuse: true)
+    clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
+    http = ProbeHttp.new
     runner = Load::Runner.new(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
+      clock: -> { clock.now },
+      sleeper: ->(seconds) { clock.advance_by(seconds) },
       http:,
-      readiness_timeout_seconds: 0.1,
+      readiness_timeout_seconds: 999,
+      startup_grace_seconds: 0.01,
     )
 
     exit_code = runner.run
@@ -47,6 +49,7 @@ class RunnerTest < Minitest::Test
     assert_equal 1, exit_code
     assert_equal "readiness_timeout", run_record.outcome.fetch(:error_code)
     assert_equal 1, adapter.stop_calls
+    assert_equal 2, http.request_count
   end
 
   def test_runner_pins_window_start_ts_at_first_successful_request
@@ -142,6 +145,29 @@ class RunnerTest < Minitest::Test
     end
   end
 
+  class ProbeHttp
+    Response = Struct.new(:code)
+
+    attr_reader :request_count
+
+    def initialize
+      @request_count = 0
+    end
+
+    def start(*)
+      @request_count += 1
+      if @request_count > 2
+        raise RuntimeError, "unexpected third probe request"
+      end
+
+      yield self
+    end
+
+    def request(*)
+      Response.new("503")
+    end
+  end
+
   class StopFlag
     attr_reader :reason
 
@@ -160,6 +186,20 @@ class RunnerTest < Minitest::Test
       @mutex.synchronize do
         !@reason.nil?
       end
+    end
+  end
+
+  class AdvancingClock
+    def initialize(current_time)
+      @current_time = current_time
+    end
+
+    def now
+      @current_time
+    end
+
+    def advance_by(seconds)
+      @current_time += seconds
     end
   end
 
