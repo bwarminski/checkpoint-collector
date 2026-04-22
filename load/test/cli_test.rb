@@ -27,7 +27,28 @@ class CliTest < Minitest::Test
     assert_equal "fixture-workload", factory.calls.first.fetch(:workload).name
     assert_equal "fake-adapter", factory.calls.first.fetch(:adapter_bin)
     assert_equal "/tmp/demo", factory.calls.first.fetch(:app_root)
+    assert_equal 5.0, factory.calls.first.fetch(:metrics_interval_seconds)
     assert_equal 1, factory.runners.first.run_calls
+  end
+
+  def test_run_command_passes_metrics_interval_override
+    factory = FakeRunnerFactory.new(exit_code: 0)
+
+    status = run_bin_load(
+      "run",
+      "--workload",
+      fixture_workload_path,
+      "--adapter",
+      "fake-adapter",
+      "--app-root",
+      "/tmp/demo",
+      "--metrics-interval-seconds",
+      "2.5",
+      runner: factory,
+    )
+
+    assert_equal 0, status
+    assert_equal 2.5, factory.calls.first.fetch(:metrics_interval_seconds)
   end
 
   def test_bin_load_help_prints_usage_and_exits_zero

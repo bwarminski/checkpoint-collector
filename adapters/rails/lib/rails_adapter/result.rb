@@ -22,8 +22,8 @@ module RailsAdapter
 
     def wrap(command)
       yield
-    rescue StandardError => error
-      error(command, classify(error), error.message, {})
+    rescue StandardError => exception
+      Result.error(command, classify(exception), exception.message, {})
     end
 
     def classify(error)

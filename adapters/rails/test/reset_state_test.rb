@@ -60,6 +60,28 @@ class ResetStateTest < Minitest::Test
     assert rails_runner_calls.any? { |argv| argv.last.include?("pg_stat_statements_reset") }, "expected a bin/rails runner call that invokes pg_stat_statements_reset()"
   end
 
+  def test_reset_state_returns_query_ids_for_missing_index_workload
+    query_ids_json = %({"query_ids":["111","222"]})
+    runner = FakeCommandRunner.new(
+      results: {
+        ["bin/rails", "runner", RailsAdapter::Commands::ResetState::QUERY_IDS_SCRIPT.fetch("missing-index-todos")] => FakeResult.new(status: 0, stdout: query_ids_json, stderr: ""),
+      },
+    )
+    command = RailsAdapter::Commands::ResetState.new(
+      app_root: "/tmp/demo",
+      workload: "missing-index-todos",
+      seed: 42,
+      env_pairs: {},
+      command_runner: runner,
+      template_cache: FakeTemplateCache.new(template_exists: true),
+      clock: fake_clock(0.0, 1.0),
+    )
+
+    result = command.call
+
+    assert_equal ["111", "222"], result.fetch("query_ids")
+  end
+
   private
 
   def with_env(overrides)

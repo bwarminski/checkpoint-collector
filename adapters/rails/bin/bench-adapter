@@ -30,7 +30,7 @@ begin
   when "prepare" then RailsAdapter::Commands::Prepare.new(**options.slice(:app_root))
   when "migrate" then RailsAdapter::Commands::Migrate.new(**options.slice(:app_root))
   when "load-dataset" then RailsAdapter::Commands::LoadDataset.new(**options.slice(:app_root, :workload, :seed, :env_pairs))
-  when "reset-state" then RailsAdapter::Commands::ResetState.new(**options.slice(:app_root, :seed, :env_pairs))
+  when "reset-state" then RailsAdapter::Commands::ResetState.new(**options.slice(:app_root, :workload, :seed, :env_pairs))
   when "start" then RailsAdapter::Commands::Start.new(**options.slice(:app_root))
   when "stop" then RailsAdapter::Commands::Stop.new(**options.slice(:pid))
   else

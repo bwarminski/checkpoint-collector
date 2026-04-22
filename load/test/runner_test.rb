@@ -1,5 +1,6 @@
 # ABOUTME: Verifies the load runner orchestrates adapter lifecycle and outcome state.
 # ABOUTME: Covers readiness timeout handling, abort handling, and window pinning.
+require "timeout"
 require "tmpdir"
 require_relative "test_helper"
 
@@ -7,10 +8,24 @@ class RunnerTest < Minitest::Test
   def test_runner_always_stops_adapter_and_writes_outcome
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new
-    runner = Load::Runner.new(workload: FakeWorkload.new, adapter_client: adapter, run_record:, clock: fake_clock, sleeper: ->(*) {}, http: FakeHttp.new)
+    stop_flag = StopFlag.new
+    SeedRecordingAction.reset!
+    SeedRecordingAction.stop_flag = stop_flag
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: "none",
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+    )
 
-    runner.run
+    exit_code = runner.run
 
+    assert_equal 0, exit_code
     assert_equal 1, adapter.stop_calls
     assert_equal false, run_record.outcome.fetch(:aborted)
   end
@@ -138,7 +153,7 @@ class RunnerTest < Minitest::Test
     assert_equal 1, exit_code
     assert_equal "readiness_timeout", run_record.outcome.fetch(:error_code)
     assert_equal 1, http.request_count
-    assert_nil run_record.window.dig(:readiness)
+    assert_nil run_record.window.dig(:readiness, :completed_at)
   end
 
   def test_runner_clamps_readiness_sleep_to_remaining_budget
@@ -236,23 +251,119 @@ class RunnerTest < Minitest::Test
 
   def test_runner_uses_injected_http_client_for_worker_requests
     run_record = FakeRunRecord.new
-    http = CountingHttp.new
+    stop_flag = StopFlag.new
+    http = CountingHttp.new(on_request: -> { stop_flag.trigger(:request_seen) })
     runner = Load::Runner.new(
       workload: HttpClientWorkload.new,
       adapter_client: FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }),
       run_record:,
       clock: fake_clock,
-      sleeper: ->(*) {},
+      sleeper: ->(*) { Thread.pass },
       http:,
       readiness_path: "none",
       startup_grace_seconds: 0.0,
       adapter_bin: "adapters/rails/bin/bench-adapter",
+      stop_flag:,
     )
 
     exit_code = runner.run
 
     assert_equal 0, exit_code
     assert_operator http.request_count, :>, 0
+  end
+
+  def test_runner_writes_metrics_lines_for_happy_path_run
+    run_record = FakeRunRecord.new
+    stop_flag = StopFlag.new
+    SeedRecordingAction.reset!
+    SeedRecordingAction.stop_flag = stop_flag
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: "none",
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+    )
+
+    exit_code = runner.run
+
+    assert_equal 0, exit_code
+    assert_operator run_record.metrics_lines.length, :>, 0
+  end
+
+  def test_runner_completes_when_http_request_hangs_after_stop
+    run_record = FakeRunRecord.new
+    adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
+    stop_flag = StopFlag.new
+    runner = Load::Runner.new(
+      workload: HungRequestWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: HungHttp.new(on_request: -> { stop_flag.trigger(:sigterm) }),
+      readiness_path: "none",
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+    )
+
+    exit_code = Timeout.timeout(2.0) { runner.run }
+
+    assert_equal 3, exit_code
+    assert_equal 1, adapter.stop_calls
+  end
+
+  def test_runner_writes_spec_run_json_fields_on_happy_path
+    run_record = FakeRunRecord.new
+    stop_flag = StopFlag.new
+    SeedRecordingAction.reset!
+    SeedRecordingAction.stop_flag = stop_flag
+    adapter = FakeAdapterClient.new(
+      describe_response: { "name" => "rails-postgres-adapter", "framework" => "rails", "runtime" => "ruby-3.2.3" },
+      start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" },
+      reset_state_response: { "query_ids" => ["111", "222"] },
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+    )
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: "none",
+      startup_grace_seconds: 0.0,
+      metrics_interval_seconds: 2.5,
+      app_root: "/tmp/demo",
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+      stop_flag:,
+    )
+
+    exit_code = runner.run
+
+    assert_equal 0, exit_code
+    payload = run_record.writes.last
+    assert_equal File.basename(run_record.run_dir), payload.fetch(:run_id)
+    assert_equal "metrics-workload", payload.fetch(:workload).fetch(:name)
+    assert_includes payload.fetch(:workload).keys, :file
+    assert_equal 1, payload.fetch(:workload).fetch(:actions).length
+    assert_equal "/tmp/demo", payload.fetch(:adapter).fetch(:app_root)
+    assert_equal "http://127.0.0.1:3999", payload.fetch(:adapter).fetch(:base_url)
+    assert_equal 123, payload.fetch(:adapter).fetch(:pid)
+    assert_equal "none", payload.fetch(:window).fetch(:readiness).fetch(:path)
+    assert_includes payload.fetch(:window).fetch(:readiness).keys, :probe_duration_ms
+    assert_includes payload.fetch(:window).fetch(:readiness).keys, :probe_attempts
+    assert_equal 0.0, payload.fetch(:window).fetch(:startup_grace_seconds)
+    assert_equal 2.5, payload.fetch(:window).fetch(:metrics_interval_seconds)
+    assert_equal 1, payload.fetch(:outcome).fetch(:requests_total)
+    assert_equal 1, payload.fetch(:outcome).fetch(:requests_ok)
+    assert_equal 0, payload.fetch(:outcome).fetch(:requests_error)
+    assert_equal ["111", "222"], payload.fetch(:query_ids)
+    assert_equal ["metrics-workload"], adapter.reset_state_workloads
   end
 
   private
@@ -276,14 +387,16 @@ class RunnerTest < Minitest::Test
   end
 
   class FakeRunRecord
-    attr_reader :outcome, :window, :adapter, :writes
+    attr_reader :outcome, :window, :adapter, :writes, :metrics_lines, :run_dir
 
     def initialize
+      @run_dir = "runs/20260422T000000Z-fake-workload"
       @payload = {}
       @outcome = {}
       @window = {}
       @adapter = {}
       @writes = []
+      @metrics_lines = []
     end
 
     def write_run(payload)
@@ -293,19 +406,25 @@ class RunnerTest < Minitest::Test
       @window = payload.fetch(:window, @window)
       @adapter = payload.fetch(:adapter, @adapter)
     end
+
+    def append_metrics(payload)
+      @metrics_lines << payload
+    end
   end
 
   class FakeAdapterClient
-    attr_reader :stop_calls, :describe_calls, :adapter_bin
+    attr_reader :stop_calls, :describe_calls, :adapter_bin, :reset_state_workloads
 
-    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, prepare_error: nil, adapter_bin: nil)
+    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, prepare_error: nil, reset_state_response: {}, adapter_bin: nil)
       @start_response = start_response
       @describe_response = describe_response
       @describe_error = describe_error
       @prepare_error = prepare_error
+      @reset_state_response = reset_state_response
       @adapter_bin = adapter_bin
       @stop_calls = 0
       @describe_calls = 0
+      @reset_state_workloads = []
     end
 
     def describe
@@ -321,8 +440,9 @@ class RunnerTest < Minitest::Test
       true
     end
 
-    def reset_state(app_root:, scale:)
-      true
+    def reset_state(app_root:, workload:, scale:)
+      @reset_state_workloads << workload
+      @reset_state_response
     end
 
     def start(app_root:)
@@ -356,14 +476,28 @@ class RunnerTest < Minitest::Test
   class CountingHttp < FakeHttp
     attr_reader :request_count
 
-    def initialize
+    def initialize(on_request: nil)
       super(always_refuse: false)
       @request_count = 0
+      @on_request = on_request
     end
 
     def request(*)
       @request_count += 1
+      @on_request&.call
       super
+    end
+  end
+
+  class HungHttp < FakeHttp
+    def initialize(on_request:)
+      super(always_refuse: false)
+      @on_request = on_request
+    end
+
+    def request(*)
+      @on_request.call
+      sleep 10
     end
   end
 
@@ -557,6 +691,42 @@ class RunnerTest < Minitest::Test
 
     def load_plan
       Load::LoadPlan.new(workers: 1, duration_seconds: 0.1, rate_limit: :unlimited, seed: 0)
+    end
+  end
+
+  class MetricsWorkload < Load::Workload
+    def name
+      "metrics-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+    end
+
+    def actions
+      [Load::ActionEntry.new(SeedRecordingAction, 1)]
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 1, duration_seconds: 0.1, rate_limit: :unlimited, seed: 42)
+    end
+  end
+
+  class HungRequestWorkload < Load::Workload
+    def name
+      "hung-request-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+    end
+
+    def actions
+      [Load::ActionEntry.new(HttpClientAction, 1)]
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 1, duration_seconds: 0.01, rate_limit: :unlimited, seed: 42)
     end
   end
 

@@ -5,6 +5,8 @@ require "uri"
 
 module Load
   class Client
+    HTTP_TIMEOUT_SECONDS = 5
+
     def initialize(base_url:, http: Net::HTTP)
       @base_url = URI(base_url)
       @http = http
@@ -18,6 +20,7 @@ module Load
       uri = uri_for(path)
 
       @http.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
+        configure_timeouts(http)
         request_class = Net::HTTP.const_get(method.to_s.capitalize)
         http.request(request_class.new(uri))
       end
@@ -27,6 +30,12 @@ module Load
 
     def uri_for(path)
       URI.join(@base_url.to_s.end_with?("/") ? @base_url.to_s : "#{@base_url}/", path.sub(/\A\//, ""))
+    end
+
+    def configure_timeouts(http)
+      http.open_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:open_timeout=)
+      http.read_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:read_timeout=)
+      http.write_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:write_timeout=)
     end
   end
 end

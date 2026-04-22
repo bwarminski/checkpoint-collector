@@ -2,7 +2,7 @@
 # ABOUTME: Runs the load runner CLI for benchmark workloads.
 # ABOUTME: Dispatches the run subcommand through the Load namespace.
 VERSION_PATH = File.expand_path("../VERSION", __dir__)
-USAGE = "Usage: bin/load run --workload PATH --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15]".freeze
+USAGE = "Usage: bin/load run --workload PATH --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5]".freeze
 
 if ARGV.include?("--help") || ARGV.include?("-h")
   puts USAGE
