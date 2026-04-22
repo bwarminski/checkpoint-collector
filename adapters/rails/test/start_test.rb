@@ -21,4 +21,14 @@ class StartTest < Minitest::Test
 
     assert_equal 0, spawner.detach_calls
   end
+
+  def test_start_spawns_server_in_its_own_process_group
+    spawner = FakeSpawner.new
+    command = RailsAdapter::Commands::Start.new(app_root: "/tmp/demo", port_finder: FakePortFinder.new(port: 3000), spawner:)
+
+    command.call
+
+    assert_equal "/dev/null", spawner.spawn_calls.first.fetch(:in)
+    assert_equal true, spawner.spawn_calls.first.fetch(:pgroup)
+  end
 end

@@ -1,0 +1,18 @@
+# ABOUTME: Configures SQLite databases for the fixture adapter integration app.
+# ABOUTME: Provides a dedicated benchmark environment for adapter commands.
+default: &default
+  adapter: sqlite3
+  pool: 5
+  timeout: 5000
+
+benchmark:
+  <<: *default
+  database: db/benchmark.sqlite3
+
+development:
+  <<: *default
+  database: db/development.sqlite3
+
+test:
+  <<: *default
+  database: db/test.sqlite3

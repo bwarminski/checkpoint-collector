@@ -18,6 +18,7 @@ class LoadDatasetTest < Minitest::Test
 
     assert_equal "load-dataset", result.fetch("command")
     assert_includes runner.env.fetch("SEED"), "42"
+    assert_equal "1", runner.env.fetch("SECRET_KEY_BASE_DUMMY")
     assert_includes runner.argv, %(load Rails.root.join("db/seeds.rb").to_s)
   end
 end

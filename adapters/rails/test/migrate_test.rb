@@ -3,10 +3,10 @@
 require_relative "test_helper"
 
 class MigrateTest < Minitest::Test
-  def test_migrate_runs_db_create_and_db_migrate
+  def test_migrate_runs_db_create_and_db_schema_load
     runner = FakeCommandRunner.new(
       results: {
-        ["bin/rails", "db:create", "db:migrate"] => FakeResult.new(status: 0, stdout: "", stderr: ""),
+        ["bin/rails", "db:create", "db:schema:load"] => FakeResult.new(status: 0, stdout: "", stderr: ""),
         ["bin/rails", "runner", "puts ActiveRecord::Base.connection.migration_context.current_version"] => FakeResult.new(status: 0, stdout: "20260421000000\n", stderr: ""),
       },
     )

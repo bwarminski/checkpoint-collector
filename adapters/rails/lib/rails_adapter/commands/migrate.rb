@@ -9,8 +9,8 @@ module RailsAdapter
       end
 
       def call
-        run = @command_runner.capture3("bin/rails", "db:create", "db:migrate", env: rails_env, chdir: @app_root, command_name: "migrate")
-        return RailsAdapter::Result.error("migrate", "migrate_failed", "db:create db:migrate failed", { "stderr" => run.stderr }) unless run.success?
+        run = @command_runner.capture3("bin/rails", "db:create", "db:schema:load", env: rails_env, chdir: @app_root, command_name: "migrate")
+        return RailsAdapter::Result.error("migrate", "migrate_failed", "db:create db:schema:load failed", { "stderr" => run.stderr }) unless run.success?
 
         version = @command_runner.capture3(
           "bin/rails",
@@ -28,11 +28,7 @@ module RailsAdapter
       private
 
       def rails_env
-        {
-          "BUNDLE_GEMFILE" => File.join(@app_root, "Gemfile"),
-          "RAILS_ENV" => "benchmark",
-          "RAILS_LOG_LEVEL" => "warn",
-        }
+        RailsAdapter::Environment.benchmark(@app_root)
       end
     end
   end

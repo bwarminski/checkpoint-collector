@@ -20,6 +20,7 @@ module RailsAdapter
           @template_cache.build_template(database_name: database_name, app_root: @app_root, env_pairs: @env_pairs)
         end
 
+        ensure_pg_stat_statements
         reset_pg_stat_statements
         RailsAdapter::Result.ok("reset-state")
       rescue StandardError => error
@@ -29,8 +30,8 @@ module RailsAdapter
       private
 
       def build_template
-        migrate = @command_runner.capture3("bin/rails", "db:drop", "db:create", "db:migrate", env: rails_env, chdir: @app_root, command_name: "reset-state")
-        raise "db:drop db:create db:migrate failed" unless migrate.success?
+        migrate = @command_runner.capture3("bin/rails", "db:drop", "db:create", "db:schema:load", env: rails_env, chdir: @app_root, command_name: "reset-state")
+        raise "db:drop db:create db:schema:load failed" unless migrate.success?
 
         seed = @command_runner.capture3(
           "bin/rails",
@@ -55,16 +56,24 @@ module RailsAdapter
         raise "pg_stat_statements_reset failed" unless result.success?
       end
 
+      def ensure_pg_stat_statements
+        result = @command_runner.capture3(
+          "bin/rails",
+          "runner",
+          %(ActiveRecord::Base.connection.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")),
+          env: rails_env,
+          chdir: @app_root,
+          command_name: "reset-state",
+        )
+        raise "pg_stat_statements extension failed" unless result.success?
+      end
+
       def database_name
         ENV.fetch("BENCHMARK_DB_NAME", "checkpoint_demo")
       end
 
       def rails_env
-        {
-          "BUNDLE_GEMFILE" => File.join(@app_root, "Gemfile"),
-          "RAILS_ENV" => "benchmark",
-          "RAILS_LOG_LEVEL" => "warn",
-        }
+        RailsAdapter::Environment.benchmark(@app_root)
       end
     end
   end

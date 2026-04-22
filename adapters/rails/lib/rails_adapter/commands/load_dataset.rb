@@ -38,11 +38,7 @@ module RailsAdapter
       end
 
       def rails_env
-        {
-          "BUNDLE_GEMFILE" => File.join(@app_root, "Gemfile"),
-          "RAILS_ENV" => "benchmark",
-          "RAILS_LOG_LEVEL" => "warn",
-        }
+        RailsAdapter::Environment.benchmark(@app_root)
       end
     end
   end

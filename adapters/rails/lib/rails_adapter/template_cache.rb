@@ -1,12 +1,11 @@
 # ABOUTME: Manages the adapter-private Postgres template database for fast resets.
 # ABOUTME: Uses an admin connection to create, clone, and drop the cached template.
 require "digest"
-require "pg"
 require "uri"
 
 module RailsAdapter
   class TemplateCache
-    def initialize(pg: PG, admin_url: ENV["BENCH_ADAPTER_PG_ADMIN_URL"] || ENV["DATABASE_URL"])
+    def initialize(pg: nil, admin_url: ENV["BENCH_ADAPTER_PG_ADMIN_URL"] || ENV["DATABASE_URL"])
       @pg = pg
       @admin_url = admin_url
     end
@@ -42,10 +41,17 @@ module RailsAdapter
 
       uri = URI.parse(@admin_url)
       uri.path = "/postgres"
-      connection = @pg.connect(uri.to_s)
+      connection = pg_driver.connect(uri.to_s)
       yield connection
     ensure
       connection&.close
+    end
+
+    def pg_driver
+      return @pg if @pg
+
+      require "pg"
+      PG
     end
 
     def template_name(database_name)

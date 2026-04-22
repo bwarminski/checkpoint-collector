@@ -9,7 +9,7 @@ module RailsAdapter
       end
 
       def call
-        result = @command_runner.capture3("bundle", "check", env: {}, chdir: @app_root, command_name: "prepare")
+        result = @command_runner.capture3("bundle", "check", env: bundle_env, chdir: @app_root, command_name: "prepare")
         return RailsAdapter::Result.error("prepare", "bundle_missing", "bundle check failed", { "stderr" => result.stderr }) unless result.success?
 
         ping = @command_runner.capture3(
@@ -28,11 +28,11 @@ module RailsAdapter
       private
 
       def rails_env
-        {
-          "BUNDLE_GEMFILE" => File.join(@app_root, "Gemfile"),
-          "RAILS_ENV" => "benchmark",
-          "RAILS_LOG_LEVEL" => "warn",
-        }
+        RailsAdapter::Environment.benchmark(@app_root)
+      end
+
+      def bundle_env
+        { "BUNDLE_GEMFILE" => File.join(@app_root, "Gemfile") }
       end
     end
   end

@@ -79,8 +79,8 @@ class FakeSpawner
     @detach_calls = 0
   end
 
-  def spawn(*argv, chdir:, env:, out:)
-    @spawn_calls << { argv:, chdir:, env:, out: }
+  def spawn(*argv, chdir:, env:, in: nil, out:, pgroup: nil)
+    @spawn_calls << { argv:, chdir:, env:, in:, out:, pgroup: }
     @pid
   end
 

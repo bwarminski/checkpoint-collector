@@ -2,6 +2,8 @@
 # ABOUTME: Provides a single require target for the adapter CLI and tests.
 require_relative "rails_adapter/result"
 require_relative "rails_adapter/command_runner"
+require_relative "rails_adapter/environment"
+require_relative "rails_adapter/process_spawner"
 require_relative "rails_adapter/port_finder"
 require_relative "rails_adapter/template_cache"
 require_relative "rails_adapter/commands/describe"

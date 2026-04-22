@@ -3,7 +3,7 @@
 module RailsAdapter
   module Commands
     class Start
-      def initialize(app_root:, port_finder: RailsAdapter::PortFinder.new, spawner: Process)
+      def initialize(app_root:, port_finder: RailsAdapter::PortFinder.new, spawner: RailsAdapter::ProcessSpawner.new)
         @app_root = app_root
         @port_finder = port_finder
         @spawner = spawner
@@ -22,7 +22,9 @@ module RailsAdapter
           "127.0.0.1",
           chdir: @app_root,
           env: rails_env,
+          in: "/dev/null",
           out: "/tmp/bench-adapter-#{Process.pid}-start.log",
+          pgroup: true,
         )
 
         RailsAdapter::Result.ok("start", "pid" => pid, "base_url" => "http://127.0.0.1:#{port}")
@@ -33,11 +35,7 @@ module RailsAdapter
       private
 
       def rails_env
-        {
-          "BUNDLE_GEMFILE" => File.join(@app_root, "Gemfile"),
-          "RAILS_ENV" => "benchmark",
-          "RAILS_LOG_LEVEL" => "warn",
-        }
+        RailsAdapter::Environment.benchmark(@app_root)
       end
     end
   end

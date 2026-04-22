@@ -17,4 +17,16 @@ class PrepareTest < Minitest::Test
     assert_equal "bundle_missing", result.dig("error", "code")
     refute_includes runner.argv_history, ["bundle", "install"]
   end
+
+  def test_prepare_checks_bundle_against_app_gemfile
+    runner = FakeCommandRunner.new
+    command = RailsAdapter::Commands::Prepare.new(app_root: "/tmp/demo", command_runner: runner)
+
+    command.call
+
+    assert_equal(
+      { "BUNDLE_GEMFILE" => "/tmp/demo/Gemfile" },
+      runner.env_history.first,
+    )
+  end
 end
