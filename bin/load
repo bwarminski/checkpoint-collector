@@ -17,7 +17,18 @@ end
 require_relative "../load/lib/load"
 
 if ARGV.first == "run"
-  exit Load::CLI.new(argv: ARGV, stdout: $stdout, stderr: $stderr).run
+  stop_flag = Load::Runner::InternalStopFlag.new
+  previous_handlers = {
+    "INT" => Signal.trap("INT") { stop_flag.trigger(:sigint) },
+    "TERM" => Signal.trap("TERM") { stop_flag.trigger(:sigterm) },
+  }
+  begin
+    exit Load::CLI.new(argv: ARGV, stop_flag:, stdout: $stdout, stderr: $stderr).run
+  ensure
+    previous_handlers.each do |signal, handler|
+      Signal.trap(signal, handler)
+    end
+  end
 end
 
 warn USAGE
