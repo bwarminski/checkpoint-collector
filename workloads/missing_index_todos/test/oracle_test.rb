@@ -56,6 +56,49 @@ class MissingIndexTodosOracleTest < Minitest::Test
     assert_equal "http://clickhouse:8123", clickhouse_calls.first.fetch(:clickhouse_url)
   end
 
+  def test_oracle_falls_back_to_pg_stat_statements_queryids_when_run_record_lacks_them
+    run_dir = write_run_record
+    explain_rows = [
+      {
+        "QUERY PLAN" => JSON.generate(
+          [
+            {
+              "Plan" => {
+                "Node Type" => "Seq Scan",
+                "Relation Name" => "todos",
+              },
+            },
+          ]
+        ),
+      },
+    ]
+    pg = FakePg.new(
+      explain_rows,
+      {
+        [%(SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1), [%(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1)]] => [{ "queryid" => "111" }],
+        [%(SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1), [%(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open')]] => [{ "queryid" => "222" }],
+      },
+    )
+    observed_queryids = nil
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg:,
+      clickhouse_query: lambda do |window:, queryids:, clickhouse_url:|
+        observed_queryids = queryids
+        { "total_exec_count" => "600", "mean_exec_time_ms" => "42.3" }
+      end,
+      sleeper: ->(*) {},
+    )
+
+    result = oracle.call(
+      run_dir:,
+      database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+      clickhouse_url: "http://clickhouse:8123",
+    )
+
+    assert_equal 600, result.fetch(:clickhouse).fetch("total_exec_count")
+    assert_equal ["111", "222"], observed_queryids
+  end
+
   def test_oracle_fails_when_plan_relation_node_is_index_scan
     run_dir = write_run_record(query_ids: ["111"])
     explain_rows = [
@@ -189,43 +232,47 @@ class MissingIndexTodosOracleTest < Minitest::Test
 
   private
 
-  def write_run_record(query_ids:)
+  def write_run_record(query_ids: nil)
     dir = Dir.mktmpdir
     FileUtils.mkdir_p(dir)
+    payload = {
+      window: {
+        start_ts: "2026-04-21T00:00:00Z",
+        end_ts: "2026-04-21T00:05:00Z",
+      },
+      workload: {},
+    }
+    payload[:workload][:oracle] = { query_ids: query_ids } if query_ids
     File.write(
       File.join(dir, "run.json"),
-      JSON.pretty_generate(
-        window: {
-          start_ts: "2026-04-21T00:00:00Z",
-          end_ts: "2026-04-21T00:05:00Z",
-        },
-        workload: {
-          oracle: {
-            query_ids: query_ids,
-          },
-        },
-      ) + "\n"
+      JSON.pretty_generate(payload) + "\n"
     )
     dir
   end
 
   class FakePg
-    def initialize(rows)
+    def initialize(rows, exec_params_rows = {})
       @rows = rows
+      @exec_params_rows = exec_params_rows
     end
 
     def connect(*)
-      FakeConnection.new(@rows)
+      FakeConnection.new(@rows, @exec_params_rows)
     end
   end
 
   class FakeConnection
-    def initialize(rows)
+    def initialize(rows, exec_params_rows)
       @rows = rows
+      @exec_params_rows = exec_params_rows
     end
 
     def exec(*)
       @rows
+    end
+
+    def exec_params(sql, params)
+      @exec_params_rows.fetch([sql, params], [])
     end
 
     def close; end

@@ -14,6 +14,10 @@ module Load
         CLICKHOUSE_CALL_THRESHOLD = 500
         INDEX_SCAN_NODE_TYPES = ["Index Scan", "Index Only Scan", "Bitmap Index Scan"].freeze
         EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'"
+        QUERY_TEXT_CANDIDATES = [
+          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1),
+          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open'),
+        ].freeze
 
         class Failure < StandardError
         end
@@ -41,7 +45,7 @@ module Load
 
         def call(run_dir:, database_url:, clickhouse_url:, timeout_seconds: 30)
           run_record = load_run_record(run_dir)
-          queryids = extract_queryids(run_record)
+          queryids = extract_queryids(run_record, database_url)
           plan = explain_todos_scan(database_url)
           clickhouse = wait_for_clickhouse!(
             window: run_record.fetch("window"),
@@ -87,7 +91,7 @@ module Load
           raise Failure, "FAIL: missing run record at #{path}"
         end
 
-        def extract_queryids(run_record)
+        def extract_queryids(run_record, database_url)
           candidates = [
             run_record["query_ids"],
             run_record["queryids"],
@@ -100,7 +104,10 @@ module Load
           ].compact
 
           queryids = Array(candidates.first).map(&:to_s).reject(&:empty?).uniq
-          raise Failure, "FAIL: run record is missing query_ids" if queryids.empty?
+          return queryids unless queryids.empty?
+
+          queryids = lookup_queryids(database_url)
+          raise Failure, "FAIL: run record is missing query_ids and pg_stat_statements had no matching queryids" if queryids.empty?
 
           queryids
         end
@@ -120,6 +127,20 @@ module Load
           return seq_scan if seq_scan
 
           raise Failure, "FAIL: explain (expected Seq Scan, got #{todos_nodes.first.fetch("Node Type")})"
+        ensure
+          connection&.close
+        end
+
+        def lookup_queryids(database_url)
+          connection = @pg.connect(database_url)
+          queryids = QUERY_TEXT_CANDIDATES.flat_map do |query_text|
+            connection.exec_params(
+              "SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1",
+              [query_text],
+            ).map { |row| row.fetch("queryid") }
+          end
+
+          queryids.uniq
         ensure
           connection&.close
         end
