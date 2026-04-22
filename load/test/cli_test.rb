@@ -45,6 +45,22 @@ class CliTest < Minitest::Test
     assert_equal "", stderr
   end
 
+  def test_bin_load_run_dispatches_into_cli
+    _stdout, stderr, status = capture_bin_load(
+      "run",
+      "--workload",
+      fixture_workload_path,
+      "--adapter",
+      "/nonexistent-adapter",
+      "--app-root",
+      "/tmp/demo",
+    )
+
+    refute status.success?
+    refute_includes stderr, "Usage: bin/load"
+    assert_includes stderr, "/nonexistent-adapter"
+  end
+
   def test_run_command_exits_zero_on_successful_run
     factory = FakeRunnerFactory.new(exit_code: 0)
     status = run_bin_load(

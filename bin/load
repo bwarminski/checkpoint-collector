@@ -16,8 +16,7 @@ end
 
 require_relative "../load/lib/load"
 
-command = ARGV.shift
-if command == "run"
+if ARGV.first == "run"
   exit Load::CLI.new(argv: ARGV, stdout: $stdout, stderr: $stderr).run
 end
 
