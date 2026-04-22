@@ -33,4 +33,35 @@ class RunRecordTest < Minitest::Test
       assert_equal true, JSON.parse(adapter_lines.first).fetch("ok")
     end
   end
+
+  def test_write_run_never_exposes_partial_json_to_concurrent_readers
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: dir)
+      errors = Queue.new
+      stop = false
+      reader = Thread.new do
+        until stop
+          begin
+            contents = File.read(File.join(dir, "run.json"))
+            JSON.parse(contents) unless contents.empty?
+          rescue Errno::ENOENT
+          rescue JSON::ParserError => error
+            errors << error
+            break
+          end
+        end
+      end
+
+      payload = { "data" => "x" * 5_000_000 }
+      50.times do |index|
+        payload["index"] = index
+        run_record.write_run(payload)
+      end
+
+      stop = true
+      reader.join
+
+      assert errors.empty?, "expected concurrent readers to see only complete JSON"
+    end
+  end
 end

@@ -25,7 +25,9 @@ module Load
     end
 
     def write_run(payload)
-      File.write(run_path, JSON.pretty_generate(payload) + "\n")
+      temp_path = "#{run_path}.tmp"
+      File.write(temp_path, JSON.pretty_generate(payload) + "\n")
+      File.rename(temp_path, run_path)
     end
 
     def append_metrics(payload)

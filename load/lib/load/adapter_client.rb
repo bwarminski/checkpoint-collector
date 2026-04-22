@@ -51,11 +51,11 @@ module Load
       ended_at = @clock.call
       stdout_json = stdout.to_s.empty? ? {} : JSON.parse(stdout)
       append_adapter_command(
+        ts: started_at,
         command: argv.first,
-        argv: full_argv,
-        started_at:,
-        ended_at:,
-        exit_status: status.exitstatus,
+        args: full_argv,
+        exit_code: status.exitstatus,
+        duration_ms: ((ended_at - started_at) * 1000).round,
         stdout_json:,
         stderr: stderr.to_s,
       )
@@ -64,11 +64,11 @@ module Load
       stdout_json
     rescue JSON::ParserError => error
       append_adapter_command(
+        ts: started_at,
         command: argv.first,
-        argv: ["--json", *argv],
-        started_at:,
-        ended_at:,
-        exit_status: status&.exitstatus,
+        args: ["--json", *argv],
+        exit_code: status&.exitstatus,
+        duration_ms: started_at && ended_at ? ((ended_at - started_at) * 1000).round : nil,
         stdout_json: nil,
         stderr: stderr.to_s,
       )

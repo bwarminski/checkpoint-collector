@@ -228,15 +228,14 @@ class RunnerTest < Minitest::Test
   def test_runner_preserves_explicit_zero_seed
     SeedRecordingAction.reset!
     run_record = FakeRunRecord.new
-    clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
     stop_flag = StopFlag.new
     SeedRecordingAction.stop_flag = stop_flag
     runner = Load::Runner.new(
       workload: ZeroSeedWorkload.new,
       adapter_client: FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }),
       run_record:,
-      clock: -> { clock.now },
-      sleeper: ->(seconds) { Thread.pass; clock.advance_by(seconds) },
+      clock: -> { Time.now.utc },
+      sleeper: ->(seconds) { sleep([seconds, 0.001].min) if seconds.positive? },
       http: FakeHttp.new,
       readiness_path: "none",
       startup_grace_seconds: 0.0,
@@ -244,8 +243,9 @@ class RunnerTest < Minitest::Test
       stop_flag:,
     )
 
-    runner.run
+    exit_code = Timeout.timeout(1.0) { runner.run }
 
+    assert_equal 0, exit_code
     assert_equal [Random.new(0).rand], SeedRecordingAction.recordings
   end
 
