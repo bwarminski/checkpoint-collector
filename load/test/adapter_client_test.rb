@@ -32,7 +32,7 @@ class AdapterClientTest < Minitest::Test
     line = run_record.lines.first
     assert_equal "describe", line.fetch(:command)
     assert_equal Time.utc(2026, 4, 22, 2, 30, 0), line.fetch(:ts)
-    assert_equal ["--json", "describe"], line.fetch(:args)
+    assert_equal [], line.fetch(:args)
     assert_equal 0, line.fetch(:exit_code)
     assert_equal 1000, line.fetch(:duration_ms)
     assert_equal true, line.fetch(:stdout_json).fetch("ok")
@@ -56,7 +56,7 @@ class AdapterClientTest < Minitest::Test
     line = run_record.lines.first
     assert_equal "stop", line.fetch(:command)
     assert_equal Time.utc(2026, 4, 22, 2, 31, 0), line.fetch(:ts)
-    assert_equal ["--json", "stop", "--pid", "123"], line.fetch(:args)
+    assert_equal ["--pid", "123"], line.fetch(:args)
     assert_equal 1, line.fetch(:exit_code)
     assert_equal 1000, line.fetch(:duration_ms)
     assert_equal "boom", line.fetch(:stderr)

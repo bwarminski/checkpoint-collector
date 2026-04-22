@@ -53,7 +53,7 @@ module Load
       append_adapter_command(
         ts: started_at,
         command: argv.first,
-        args: full_argv,
+        args: argv.drop(1),
         exit_code: status.exitstatus,
         duration_ms: ((ended_at - started_at) * 1000).round,
         stdout_json:,
@@ -66,7 +66,7 @@ module Load
       append_adapter_command(
         ts: started_at,
         command: argv.first,
-        args: ["--json", *argv],
+        args: argv.drop(1),
         exit_code: status&.exitstatus,
         duration_ms: started_at && ended_at ? ((ended_at - started_at) * 1000).round : nil,
         stdout_json: nil,
