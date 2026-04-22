@@ -1,17 +1,27 @@
 # Checkpoint Collector
 
-This repo owns the collector pipeline, ClickHouse DDLs, local Postgres image,
-and the load harness used to generate database traffic.
+This repo owns the collector pipeline, ClickHouse DDLs, the local Postgres and
+ClickHouse stack, and the load runner used to generate benchmark traffic
+against external apps.
 
 ## Local Run
 
 ```bash
 docker compose up -d --build
-ruby load/harness.rb
+make load-smoke
 ```
 
-## Fixture Harness
+## Load Runner
 
-Use `bin/fixture missing-index all` to reproduce the missing-index pathology
-against an externally started `db-specialist-demo` app. Oracle tag details and
-the add-index verification flow live in `fixtures/missing-index/README.md`.
+The top-level entrypoint is `bin/load run`, which combines a workload, an
+adapter, and an app root:
+
+```bash
+bin/load run --workload workloads/missing_index_todos/workload.rb \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+`make load-smoke` runs that command against `~/db-specialist-demo`. It assumes
+`docker compose up -d` is already running in this repo and the demo app is
+available for the adapter to prepare, seed, start, and stop during the run.

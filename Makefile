@@ -1,4 +1,4 @@
-.PHONY: fixture-smoke
+.PHONY: load-smoke
 
-fixture-smoke:
-	bin/fixture missing-index all
+load-smoke:
+	bin/load run --workload workloads/missing_index_todos/workload.rb --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo
