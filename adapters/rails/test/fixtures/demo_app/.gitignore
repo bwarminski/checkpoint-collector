@@ -1,0 +1,5 @@
+# ABOUTME: Keeps local bundle installs and generated SQLite files out of git.
+# ABOUTME: Limits the fixture app to source files needed for adapter integration tests.
+.bundle-home/
+vendor/
+db/*.sqlite3
