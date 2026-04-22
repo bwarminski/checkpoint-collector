@@ -42,7 +42,7 @@ module Load
     private
 
     def invoke(*argv)
-      stdout, stderr, status = @capture3.call(@adapter_bin, *argv)
+      stdout, stderr, status = @capture3.call(@adapter_bin, "--json", *argv)
       raise AdapterError, stderr unless status.success?
 
       stdout.to_s.empty? ? {} : JSON.parse(stdout)

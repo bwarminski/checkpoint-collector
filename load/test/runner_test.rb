@@ -221,7 +221,7 @@ class RunnerTest < Minitest::Test
       adapter_client: FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }),
       run_record:,
       clock: -> { clock.now },
-      sleeper: ->(seconds) { clock.advance_by(seconds) },
+      sleeper: ->(seconds) { Thread.pass; clock.advance_by(seconds) },
       http: FakeHttp.new,
       readiness_path: "none",
       startup_grace_seconds: 0.0,

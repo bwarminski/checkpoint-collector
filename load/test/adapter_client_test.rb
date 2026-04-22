@@ -12,7 +12,7 @@ class AdapterClientTest < Minitest::Test
       scale: Load::Scale.new(rows_per_table: 10_000_000, open_fraction: 0.002, seed: 42),
     )
 
-    assert_equal ["reset-state", "--app-root", "/tmp/app", "--seed", "42", "--env", "ROWS_PER_TABLE=10000000", "--env", "OPEN_FRACTION=0.002"], capture.argv
+    assert_equal ["--json", "reset-state", "--app-root", "/tmp/app", "--seed", "42", "--env", "ROWS_PER_TABLE=10000000", "--env", "OPEN_FRACTION=0.002"], capture.argv
   end
 
   def test_describe_raises_adapter_error_on_malformed_json

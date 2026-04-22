@@ -35,3 +35,4 @@
 - Task 3 uses a thin `Load::CLI` seam with injected runner callables, a JSON-speaking `Load::AdapterClient` wrapper, and a runner that pins `window.start_ts` from the first successful worker response while still always stopping the adapter.
 - Task 3 readiness state now lives under `window.readiness`, and `window.end_ts` is written before the final outcome so the run record carries the full window envelope.
 - The zero-seed runner test is stable when the seeded action triggers the shared stop flag after recording the first RNG value.
+- Task 3 adapter invocations now force `--json` so the wrapper is not relying on adapter default output mode, and the zero-seed test yields before advancing the fake clock so the worker thread can record deterministically.
