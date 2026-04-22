@@ -1,8 +1,0 @@
-#!/usr/bin/env ruby
-# ABOUTME: Runs fixture reset, traffic drive, and validation commands for pathology reproducers.
-# ABOUTME: Loads fixture metadata from the repo and dispatches to fixture-specific Ruby code.
-ENV["BUNDLE_GEMFILE"] ||= File.expand_path("../collector/Gemfile", __dir__)
-require "bundler/setup"
-require_relative "../collector/lib/fixtures/command"
-
-exit Fixtures::Command.new(argv: ARGV, stdout: $stdout, stderr: $stderr).run
