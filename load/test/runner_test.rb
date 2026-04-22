@@ -234,6 +234,27 @@ class RunnerTest < Minitest::Test
     assert_equal [Random.new(0).rand], SeedRecordingAction.recordings
   end
 
+  def test_runner_uses_injected_http_client_for_worker_requests
+    run_record = FakeRunRecord.new
+    http = CountingHttp.new
+    runner = Load::Runner.new(
+      workload: HttpClientWorkload.new,
+      adapter_client: FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }),
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http:,
+      readiness_path: "none",
+      startup_grace_seconds: 0.0,
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+    )
+
+    exit_code = runner.run
+
+    assert_equal 0, exit_code
+    assert_operator http.request_count, :>, 0
+  end
+
   private
 
   def fake_clock
@@ -329,6 +350,20 @@ class RunnerTest < Minitest::Test
 
     def request(*)
       Response.new("200")
+    end
+  end
+
+  class CountingHttp < FakeHttp
+    attr_reader :request_count
+
+    def initialize
+      super(always_refuse: false)
+      @request_count = 0
+    end
+
+    def request(*)
+      @request_count += 1
+      super
     end
   end
 
@@ -522,6 +557,34 @@ class RunnerTest < Minitest::Test
 
     def load_plan
       Load::LoadPlan.new(workers: 1, duration_seconds: 0.1, rate_limit: :unlimited, seed: 0)
+    end
+  end
+
+  HttpClientAction = Class.new(Load::Action) do
+    def name
+      :http_client_action
+    end
+
+    def call
+      client.get("/todos/status?status=open")
+    end
+  end
+
+  class HttpClientWorkload < Load::Workload
+    def name
+      "http-client-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+    end
+
+    def actions
+      [Load::ActionEntry.new(HttpClientAction, 1)]
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 1, duration_seconds: 0.01, rate_limit: :unlimited, seed: 42)
     end
   end
 end

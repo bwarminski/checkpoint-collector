@@ -1,5 +1,7 @@
 # ABOUTME: Resets the benchmark database by rebuilding or cloning a template copy.
 # ABOUTME: Reruns pg_stat_statements_reset after seeding so run counters start clean.
+require "uri"
+
 module RailsAdapter
   module Commands
     class ResetState
@@ -69,7 +71,14 @@ module RailsAdapter
       end
 
       def database_name
-        ENV.fetch("BENCHMARK_DB_NAME", "checkpoint_demo")
+        return ENV.fetch("BENCHMARK_DB_NAME") if ENV.key?("BENCHMARK_DB_NAME")
+
+        database_url = ENV["DATABASE_URL"]
+        return "checkpoint_demo" unless database_url
+
+        path = URI.parse(database_url).path
+        name = path.sub(%r{\A/}, "")
+        name.empty? ? "checkpoint_demo" : name
       end
 
       def rails_env

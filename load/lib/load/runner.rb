@@ -109,7 +109,7 @@ module Load
 
     def start_workers(base_url)
       plan = @workload.load_plan
-      client = Load::Client.new(base_url: base_url)
+      client = Load::Client.new(base_url: base_url, http: @http)
       rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @clock, sleeper: @sleeper)
       entries = @workload.actions
       seed = plan.seed.nil? ? @workload.scale.seed : plan.seed

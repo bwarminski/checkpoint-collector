@@ -3,6 +3,25 @@
 require_relative "test_helper"
 
 class ResetStateTest < Minitest::Test
+  def test_reset_state_uses_database_name_from_database_url
+    runner = FakeCommandRunner.new
+    cache = FakeTemplateCache.new
+    command = RailsAdapter::Commands::ResetState.new(
+      app_root: "/tmp/demo",
+      seed: 42,
+      env_pairs: {},
+      command_runner: runner,
+      template_cache: cache,
+      clock: fake_clock(0.0, 1.0),
+    )
+
+    with_env("DATABASE_URL" => "postgres://postgres:postgres@localhost:5432/custom_benchmark") do
+      command.call
+    end
+
+    assert_equal "custom_benchmark", cache.last_build_args.fetch(:database_name)
+  end
+
   def test_reset_state_uses_template_clone_after_first_build
     runner = FakeCommandRunner.new
     cache = FakeTemplateCache.new
@@ -39,5 +58,20 @@ class ResetStateTest < Minitest::Test
     rails_runner_calls = runner.argv_history.select { |argv| argv.first(2) == ["bin/rails", "runner"] }
     assert rails_runner_calls.any? { |argv| argv.last.include?("CREATE EXTENSION IF NOT EXISTS pg_stat_statements") }, "expected a bin/rails runner call that enables pg_stat_statements"
     assert rails_runner_calls.any? { |argv| argv.last.include?("pg_stat_statements_reset") }, "expected a bin/rails runner call that invokes pg_stat_statements_reset()"
+  end
+
+  private
+
+  def with_env(overrides)
+    previous = overrides.transform_values { nil }
+    overrides.each_key { |key| previous[key] = ENV[key] }
+    overrides.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    previous.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
   end
 end
