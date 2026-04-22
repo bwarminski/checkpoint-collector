@@ -6,18 +6,18 @@ require_relative "../actions/list_open_todos"
 
 class MissingIndexTodosWorkloadTest < Minitest::Test
   def test_workload_matches_missing_index_contract
-    workload = MissingIndexTodos::Workload.new
+    workload = Load::Workloads::MissingIndexTodos::Workload.new
 
     assert_equal "missing-index-todos", workload.name
     assert_equal Load::Scale.new(rows_per_table: 10_000_000, open_fraction: 0.002, seed: 42), workload.scale
-    assert_equal [Load::ActionEntry.new(MissingIndexTodos::Actions::ListOpenTodos, 1)], workload.actions
+    assert_equal [Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::ListOpenTodos, 100)], workload.actions
     assert_equal Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil), workload.load_plan
   end
 
   def test_list_open_todos_gets_open_status_endpoint
     response = Object.new
     client = FakeClient.new(response)
-    action = MissingIndexTodos::Actions::ListOpenTodos.new(rng: Random.new(42), ctx: {}, client:)
+    action = Load::Workloads::MissingIndexTodos::Actions::ListOpenTodos.new(rng: Random.new(42), ctx: {}, client:)
 
     assert_equal :list_open_todos, action.name
     assert_same response, action.call

@@ -2,15 +2,19 @@
 # ABOUTME: Executes the current status-filtered todos endpoint through the shared client.
 require_relative "../../../load/lib/load"
 
-module MissingIndexTodos
-  module Actions
-    class ListOpenTodos < Load::Action
-      def name
-        :list_open_todos
-      end
+module Load
+  module Workloads
+    module MissingIndexTodos
+      module Actions
+        class ListOpenTodos < Load::Action
+          def name
+            :list_open_todos
+          end
 
-      def call
-        client.get("/todos/status?status=open")
+          def call
+            client.get("/todos/status?status=open")
+          end
+        end
       end
     end
   end

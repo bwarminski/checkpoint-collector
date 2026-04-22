@@ -3,22 +3,26 @@
 require_relative "../../load/lib/load"
 require_relative "actions/list_open_todos"
 
-module MissingIndexTodos
-  class Workload < Load::Workload
-    def name
-      "missing-index-todos"
-    end
+module Load
+  module Workloads
+    module MissingIndexTodos
+      class Workload < Load::Workload
+        def name
+          "missing-index-todos"
+        end
 
-    def scale
-      Load::Scale.new(rows_per_table: 10_000_000, open_fraction: 0.002, seed: 42)
-    end
+        def scale
+          Load::Scale.new(rows_per_table: 10_000_000, open_fraction: 0.002, seed: 42)
+        end
 
-    def actions
-      [Load::ActionEntry.new(MissingIndexTodos::Actions::ListOpenTodos, 1)]
-    end
+        def actions
+          [Load::ActionEntry.new(Actions::ListOpenTodos, 100)]
+        end
 
-    def load_plan
-      Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil)
+        def load_plan
+          Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil)
+        end
+      end
     end
   end
 end
