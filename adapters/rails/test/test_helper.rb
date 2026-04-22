@@ -90,13 +90,14 @@ class FakeSpawner
 end
 
 class FakeProcessKiller
-  attr_reader :signals_sent, :waitpid_calls
+  attr_reader :signals_sent, :kill_calls, :waitpid_calls
 
   def initialize(kill_raises: {}, alive: false, dies_after_term: false)
     @kill_raises = kill_raises
     @alive = alive
     @dies_after_term = dies_after_term
     @signals_sent = []
+    @kill_calls = []
     @waitpid_calls = 0
     @terminated = false
   end
@@ -106,6 +107,7 @@ class FakeProcessKiller
     raise exception, "synthetic" if exception
 
     @signals_sent << signal
+    @kill_calls << { signal:, pid: }
     if signal == "TERM"
       @terminated = true
       @alive = false if @dies_after_term

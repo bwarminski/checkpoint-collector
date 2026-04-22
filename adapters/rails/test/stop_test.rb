@@ -31,4 +31,14 @@ class StopTest < Minitest::Test
 
     assert_equal 0, killer.waitpid_calls
   end
+
+  def test_stop_signals_the_process_group
+    killer = FakeProcessKiller.new(dies_after_term: true)
+    command = RailsAdapter::Commands::Stop.new(pid: 12_345, process_killer: killer, clock: fake_clock(0.0, 0.2), sleeper: ->(*) {})
+
+    command.call
+
+    assert_equal(-12_345, killer.kill_calls.first.fetch(:pid))
+    assert_equal(-12_345, killer.kill_calls.last.fetch(:pid))
+  end
 end

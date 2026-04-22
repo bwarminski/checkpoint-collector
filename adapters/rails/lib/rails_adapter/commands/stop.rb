@@ -11,10 +11,10 @@ module RailsAdapter
       end
 
       def call
-        @process_killer.kill("TERM", @pid)
+        @process_killer.kill("TERM", process_group_pid)
         return RailsAdapter::Result.ok("stop") unless alive_within?(10.0)
 
-        @process_killer.kill("KILL", @pid)
+        @process_killer.kill("KILL", process_group_pid)
         return RailsAdapter::Result.ok("stop") unless alive_within?(2.0)
 
         RailsAdapter::Result.error("stop", "stop_failed", "process did not exit", {})
@@ -27,13 +27,17 @@ module RailsAdapter
       def alive_within?(budget_seconds)
         deadline = @clock.call + budget_seconds
         loop do
-          @process_killer.kill(0, @pid)
+          @process_killer.kill(0, process_group_pid)
           return true if @clock.call >= deadline
 
           @sleeper.call(0.2)
         rescue Errno::ESRCH
           return false
         end
+      end
+
+      def process_group_pid
+        -@pid
       end
     end
   end
