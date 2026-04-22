@@ -5,11 +5,12 @@ require "tmpdir"
 
 module Load
   class CLI
-    USAGE = "Usage: bin/load run --workload PATH --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15]".freeze
+    USAGE = "Usage: bin/load run --workload PATH --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5]".freeze
 
-    def initialize(argv:, runner: nil, stdout: $stdout, stderr: $stderr)
+    def initialize(argv:, runner: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
       @argv = argv.dup
       @runner = runner || default_runner
+      @stop_flag = stop_flag || Load::Runner::InternalStopFlag.new
       @stdout = stdout
       @stderr = stderr
     end
@@ -27,6 +28,8 @@ module Load
         runs_dir: options.fetch(:runs_dir),
         readiness_path: options.fetch(:readiness_path),
         startup_grace_seconds: options.fetch(:startup_grace_seconds),
+        metrics_interval_seconds: options.fetch(:metrics_interval_seconds),
+        stop_flag: @stop_flag,
         stdout: @stdout,
         stderr: @stderr,
       )
@@ -42,10 +45,10 @@ module Load
     private
 
     def default_runner
-      lambda do |workload:, adapter_bin:, app_root:, runs_dir:, readiness_path:, startup_grace_seconds:, stdout:, stderr:|
+      lambda do |workload:, adapter_bin:, app_root:, runs_dir:, readiness_path:, startup_grace_seconds:, metrics_interval_seconds:, stop_flag:, stdout:, stderr:|
         run_dir = File.join(runs_dir, "#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}-#{workload.name}")
         run_record = Load::RunRecord.new(run_dir:)
-        adapter_client = Load::AdapterClient.new(adapter_bin:)
+        adapter_client = Load::AdapterClient.new(adapter_bin:, run_record:)
         Load::Runner.new(
           workload:,
           adapter_client:,
@@ -54,8 +57,10 @@ module Load
           sleeper: ->(seconds) { sleep(seconds) },
           readiness_path:,
           startup_grace_seconds:,
+          metrics_interval_seconds:,
           app_root:,
           adapter_bin:,
+          stop_flag:,
         )
       end
     end
@@ -65,6 +70,7 @@ module Load
         runs_dir: "runs",
         readiness_path: "/up",
         startup_grace_seconds: 15.0,
+        metrics_interval_seconds: 5.0,
       }
 
       parser = OptionParser.new do |parser|
@@ -74,6 +80,7 @@ module Load
         parser.on("--runs-dir DIR") { |value| options[:runs_dir] = value }
         parser.on("--readiness-path PATH") { |value| options[:readiness_path] = value == "none" ? "none" : value }
         parser.on("--startup-grace-seconds N", Float) { |value| options[:startup_grace_seconds] = value }
+        parser.on("--metrics-interval-seconds N", Float) { |value| options[:metrics_interval_seconds] = value }
       end
       parser.parse!(@argv)
 

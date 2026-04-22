@@ -7,9 +7,11 @@ module Load
   class AdapterClient
     AdapterError = Class.new(StandardError)
 
-    def initialize(adapter_bin:, capture3: nil)
+    def initialize(adapter_bin:, capture3: nil, run_record: nil, clock: -> { Time.now.utc })
       @adapter_bin = adapter_bin
       @capture3 = capture3 || ->(*argv) { Open3.capture3(*argv) }
+      @run_record = run_record
+      @clock = clock
     end
 
     attr_reader :adapter_bin
@@ -22,10 +24,11 @@ module Load
       invoke("prepare", "--app-root", app_root)
     end
 
-    def reset_state(app_root:, scale:)
+    def reset_state(app_root:, workload:, scale:)
       invoke(
         "reset-state",
         "--app-root", app_root,
+        "--workload", workload,
         "--seed", scale.seed.to_s,
         *scale.env_pairs.flat_map { |key, value| ["--env", "#{key}=#{value}"] },
       )
@@ -42,12 +45,38 @@ module Load
     private
 
     def invoke(*argv)
-      stdout, stderr, status = @capture3.call(@adapter_bin, "--json", *argv)
+      started_at = @clock.call
+      full_argv = ["--json", *argv]
+      stdout, stderr, status = @capture3.call(@adapter_bin, *full_argv)
+      ended_at = @clock.call
+      stdout_json = stdout.to_s.empty? ? {} : JSON.parse(stdout)
+      append_adapter_command(
+        command: argv.first,
+        argv: full_argv,
+        started_at:,
+        ended_at:,
+        exit_status: status.exitstatus,
+        stdout_json:,
+        stderr: stderr.to_s,
+      )
       raise AdapterError, stderr unless status.success?
 
-      stdout.to_s.empty? ? {} : JSON.parse(stdout)
+      stdout_json
     rescue JSON::ParserError => error
+      append_adapter_command(
+        command: argv.first,
+        argv: ["--json", *argv],
+        started_at:,
+        ended_at:,
+        exit_status: status&.exitstatus,
+        stdout_json: nil,
+        stderr: stderr.to_s,
+      )
       raise AdapterError, error.message
+    end
+
+    def append_adapter_command(payload)
+      @run_record&.append_adapter_command(payload)
     end
   end
 end
