@@ -79,6 +79,26 @@ class CliTest < Minitest::Test
     assert_equal 2.5, factory.calls.first.fetch(:metrics_interval_seconds)
   end
 
+  def test_run_command_normalizes_none_readiness_path_to_nil
+    factory = FakeRunnerFactory.new(exit_code: 0)
+
+    status = run_bin_load(
+      "run",
+      "--workload",
+      "fixture-workload",
+      "--adapter",
+      "fake-adapter",
+      "--app-root",
+      "/tmp/demo",
+      "--readiness-path",
+      "none",
+      runner: factory,
+    )
+
+    assert_equal 0, status
+    assert_nil factory.calls.first.fetch(:readiness_path)
+  end
+
   def test_bin_load_help_prints_usage_and_exits_zero
     stdout, stderr, status = capture_bin_load("--help")
 

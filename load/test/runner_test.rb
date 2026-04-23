@@ -18,7 +18,7 @@ class RunnerTest < Minitest::Test
       clock: fake_clock,
       sleeper: ->(*) { Thread.pass },
       http: FakeHttp.new,
-      readiness_path: "none",
+      readiness_path: nil,
       startup_grace_seconds: 0.0,
       stop_flag:,
     )
@@ -120,7 +120,6 @@ class RunnerTest < Minitest::Test
       clock: -> { clock.now },
       sleeper: ->(seconds) { clock.advance_by(seconds) },
       http:,
-      readiness_timeout_seconds: 999,
       startup_grace_seconds: 0.01,
     )
 
@@ -144,7 +143,6 @@ class RunnerTest < Minitest::Test
       clock: -> { clock.now },
       sleeper: ->(seconds) { clock.advance_by(seconds) },
       http:,
-      readiness_timeout_seconds: 999,
       startup_grace_seconds: 0.01,
     )
 
@@ -169,7 +167,6 @@ class RunnerTest < Minitest::Test
       clock: -> { clock.now },
       sleeper: ->(seconds) { sleep_durations << seconds; clock.advance_by(seconds) },
       http:,
-      readiness_timeout_seconds: 999,
       startup_grace_seconds: 0.05,
     )
 
@@ -237,7 +234,7 @@ class RunnerTest < Minitest::Test
       clock: -> { Time.now.utc },
       sleeper: ->(seconds) { sleep([seconds, 0.001].min) if seconds.positive? },
       http: FakeHttp.new,
-      readiness_path: "none",
+      readiness_path: nil,
       startup_grace_seconds: 0.0,
       adapter_bin: "adapters/rails/bin/bench-adapter",
       stop_flag:,
@@ -260,7 +257,7 @@ class RunnerTest < Minitest::Test
       clock: fake_clock,
       sleeper: ->(*) { Thread.pass },
       http:,
-      readiness_path: "none",
+      readiness_path: nil,
       startup_grace_seconds: 0.0,
       adapter_bin: "adapters/rails/bin/bench-adapter",
       stop_flag:,
@@ -284,7 +281,7 @@ class RunnerTest < Minitest::Test
       clock: fake_clock,
       sleeper: ->(*) { Thread.pass },
       http: FakeHttp.new,
-      readiness_path: "none",
+      readiness_path: nil,
       startup_grace_seconds: 0.0,
       stop_flag:,
     )
@@ -306,7 +303,7 @@ class RunnerTest < Minitest::Test
       clock: fake_clock,
       sleeper: ->(*) {},
       http: HungHttp.new(on_request: -> { stop_flag.trigger(:sigterm) }),
-      readiness_path: "none",
+      readiness_path: nil,
       startup_grace_seconds: 0.0,
       stop_flag:,
     )
@@ -315,6 +312,56 @@ class RunnerTest < Minitest::Test
 
     assert_equal 3, exit_code
     assert_equal 1, adapter.stop_calls
+  end
+
+  def test_runner_returns_one_when_stop_fails_after_successful_run
+    run_record = FakeRunRecord.new
+    stop_flag = StopFlag.new
+    SeedRecordingAction.reset!
+    SeedRecordingAction.stop_flag = stop_flag
+    adapter = FakeAdapterClient.new(stop_error: Load::AdapterClient::AdapterError.new("boom"))
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+    )
+
+    exit_code = runner.run
+
+    assert_equal 1, exit_code
+    assert_equal "adapter_error", run_record.outcome.fetch(:error_code)
+    assert_equal true, run_record.outcome.fetch(:aborted)
+  end
+
+  def test_runner_preserves_original_failure_when_stop_also_fails
+    run_record = FakeRunRecord.new
+    adapter = FakeAdapterClient.new(
+      start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" },
+      stop_error: Load::AdapterClient::AdapterError.new("boom"),
+    )
+    stop_flag = StopFlag.new
+    runner = Load::Runner.new(
+      workload: HungRequestWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: HungHttp.new(on_request: -> { stop_flag.trigger(:sigterm) }),
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+    )
+
+    exit_code = Timeout.timeout(2.0) { runner.run }
+
+    assert_equal 3, exit_code
+    assert_equal "no_successful_requests", run_record.outcome.fetch(:error_code)
   end
 
   def test_runner_writes_spec_run_json_fields_on_happy_path
@@ -335,10 +382,11 @@ class RunnerTest < Minitest::Test
       clock: fake_clock,
       sleeper: ->(*) { Thread.pass },
       http: FakeHttp.new,
-      readiness_path: "none",
+      readiness_path: nil,
       startup_grace_seconds: 0.0,
       metrics_interval_seconds: 2.5,
       app_root: "/tmp/demo",
+      workload_file: "workloads/metrics_workload.rb",
       adapter_bin: "adapters/rails/bin/bench-adapter",
       stop_flag:,
     )
@@ -349,7 +397,7 @@ class RunnerTest < Minitest::Test
     payload = run_record.writes.last
     assert_equal File.basename(run_record.run_dir), payload.fetch(:run_id)
     assert_equal "metrics-workload", payload.fetch(:workload).fetch(:name)
-    assert_includes payload.fetch(:workload).keys, :file
+    assert_equal "workloads/metrics_workload.rb", payload.fetch(:workload).fetch(:file)
     assert_equal 1, payload.fetch(:workload).fetch(:actions).length
     assert_equal "/tmp/demo", payload.fetch(:adapter).fetch(:app_root)
     assert_equal "http://127.0.0.1:3999", payload.fetch(:adapter).fetch(:base_url)
@@ -381,7 +429,6 @@ class RunnerTest < Minitest::Test
       clock: fake_clock,
       sleeper: ->(*) {},
       http: FakeHttp.new,
-      readiness_timeout_seconds: 0.1,
       startup_grace_seconds: 0.01,
     )
   end
@@ -415,13 +462,14 @@ class RunnerTest < Minitest::Test
   class FakeAdapterClient
     attr_reader :stop_calls, :describe_calls, :adapter_bin, :reset_state_workloads
 
-    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, prepare_error: nil, reset_state_response: {}, adapter_bin: nil)
+    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, prepare_error: nil, reset_state_response: {}, adapter_bin: nil, stop_error: nil)
       @start_response = start_response
       @describe_response = describe_response
       @describe_error = describe_error
       @prepare_error = prepare_error
       @reset_state_response = reset_state_response
       @adapter_bin = adapter_bin
+      @stop_error = stop_error
       @stop_calls = 0
       @describe_calls = 0
       @reset_state_workloads = []
@@ -451,6 +499,8 @@ class RunnerTest < Minitest::Test
 
     def stop(pid:)
       @stop_calls += 1
+      raise @stop_error if @stop_error
+
       true
     end
   end

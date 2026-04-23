@@ -74,6 +74,7 @@ module Load
           readiness_path:,
           startup_grace_seconds:,
           metrics_interval_seconds:,
+          workload_file: workload_path(workload.name),
           app_root:,
           adapter_bin:,
           stop_flag:,
@@ -94,7 +95,7 @@ module Load
         parser.on("--adapter PATH") { |value| options[:adapter_bin] = value }
         parser.on("--app-root PATH") { |value| options[:app_root] = value }
         parser.on("--runs-dir DIR") { |value| options[:runs_dir] = value }
-        parser.on("--readiness-path PATH") { |value| options[:readiness_path] = value == "none" ? "none" : value }
+        parser.on("--readiness-path PATH") { |value| options[:readiness_path] = value == "none" ? nil : value }
         parser.on("--startup-grace-seconds N", Float) { |value| options[:startup_grace_seconds] = value }
         parser.on("--metrics-interval-seconds N", Float) { |value| options[:metrics_interval_seconds] = value }
       end

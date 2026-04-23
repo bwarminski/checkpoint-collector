@@ -7,18 +7,47 @@ require "time"
 module Load
   class Runner
     WORKER_DRAIN_TIMEOUT_SECONDS = 1.0
+    MetricsSink = Data.define(:run_record) do
+      def <<(line)
+        run_record.append_metrics(line)
+      end
+    end
 
-    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_timeout_seconds: 15, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, app_root: nil, adapter_bin: nil, stop_flag: nil)
+    class TrackingBuffer < Load::Metrics::Buffer
+      def initialize(on_first_success:, on_request_ok:, on_request_error:)
+        super()
+        @on_first_success = on_first_success
+        @on_request_ok = on_request_ok
+        @on_request_error = on_request_error
+        @started = false
+      end
+
+      def record_ok(**kwargs)
+        super(**kwargs)
+        @on_request_ok.call
+        return if @started
+
+        @started = true
+        @on_first_success.call
+      end
+
+      def record_error(**kwargs)
+        super(**kwargs)
+        @on_request_error.call
+      end
+    end
+
+    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil)
       @workload = workload
       @adapter_client = adapter_client
       @run_record = run_record
       @clock = clock
       @sleeper = sleeper
       @http = http
-      @readiness_timeout_seconds = readiness_timeout_seconds
       @readiness_path = readiness_path
       @startup_grace_seconds = startup_grace_seconds
       @metrics_interval_seconds = metrics_interval_seconds
+      @workload_file = workload_file
       @app_root = app_root
       @adapter_bin = adapter_bin
       @stop_flag = stop_flag || InternalStopFlag.new
@@ -29,90 +58,55 @@ module Load
     end
 
     def run
-      @run_record.write_run(snapshot_state)
-      adapter_describe = @adapter_client.describe
-      validate_adapter_response!(adapter_describe, %w[name framework runtime], "describe")
-      write_state(adapter: {
-        describe: adapter_describe,
-        bin: @adapter_bin || @adapter_client.adapter_bin,
-        app_root: @app_root,
-      })
-
-      @adapter_client.prepare(app_root: @app_root)
-      reset_state = @adapter_client.reset_state(app_root: @app_root, workload: @workload.name, scale: @workload.scale)
-      write_state(query_ids: Array(reset_state["query_ids"]).map(&:to_s)) if reset_state.is_a?(Hash) && reset_state["query_ids"]
-
-      start_response = @adapter_client.start(app_root: @app_root)
-      validate_adapter_response!(start_response, %w[pid base_url], "start")
-      write_state(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
-
-      probe_readiness(start_response.fetch("base_url"))
-      start_workers(start_response.fetch("base_url"))
-
-      finish_run
-    rescue AdapterClient::AdapterError => error
-      write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
-      1
-    rescue ReadinessTimeout
-      write_state(outcome: outcome_payload(aborted: true, error_code: "readiness_timeout"))
-      1
-    ensure
+      result = nil
       begin
-        @adapter_client.stop(pid: @state.dig(:adapter, :pid)) if @state.dig(:adapter, :pid)
+        @run_record.write_run(snapshot_state)
+        adapter_describe = @adapter_client.describe
+        validate_adapter_response!(adapter_describe, %w[name framework runtime], "describe")
+        write_state(adapter: {
+          describe: adapter_describe,
+          bin: @adapter_bin || @adapter_client.adapter_bin,
+          app_root: @app_root,
+        })
+
+        @adapter_client.prepare(app_root: @app_root)
+        reset_state = @adapter_client.reset_state(app_root: @app_root, workload: @workload.name, scale: @workload.scale)
+        write_state(query_ids: Array(reset_state["query_ids"]).map(&:to_s)) if reset_state.is_a?(Hash) && reset_state["query_ids"]
+
+        start_response = @adapter_client.start(app_root: @app_root)
+        validate_adapter_response!(start_response, %w[pid base_url], "start")
+        write_state(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
+
+        probe_readiness(start_response.fetch("base_url"))
+        start_workers(start_response.fetch("base_url"))
+
+        result = finish_run
       rescue AdapterClient::AdapterError
         write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
-        return 1
+        result = 1
+      rescue Load::ReadinessGate::Timeout
+        write_state(outcome: outcome_payload(aborted: true, error_code: "readiness_timeout"))
+        result = 1
+      ensure
+        result = stop_adapter_safely(result)
       end
+
+      result
     end
 
     private
 
     def probe_readiness(base_url)
-      return sleep_startup_grace if @readiness_path == "none"
-
-      client = Load::Client.new(base_url: base_url, http: @http)
-      probe_started_at = current_time
-      deadline = current_time + @startup_grace_seconds
-      backoff = 0.2
-      attempts = 0
-
-      loop do
-        raise ReadinessTimeout if current_time >= deadline
-
-        attempts += 1
-        response = client.get(@readiness_path)
-        raise ReadinessTimeout if current_time >= deadline
-
-        if response.code.to_i >= 200 && response.code.to_i < 300
-          write_state(window: { readiness: readiness_payload(probe_started_at:, attempts:) })
-          return
-        end
-
-        raise ReadinessTimeout if current_time >= deadline
-
-        sleep_for = [backoff, deadline - current_time].min
-        @sleeper.call(sleep_for)
-        backoff = [backoff * 2, 1.6].min
-      rescue StandardError
-        raise ReadinessTimeout if current_time >= deadline
-
-        sleep_for = [backoff, deadline - current_time].min
-        @sleeper.call(sleep_for)
-        backoff = [backoff * 2, 1.6].min
-      end
-    end
-
-    def sleep_startup_grace
-      @sleeper.call(@startup_grace_seconds)
-      started_at = current_time
       write_state(
         window: {
-          readiness: readiness_payload(
-            probe_started_at: started_at,
-            attempts: 0,
-            duration_ms: (@startup_grace_seconds * 1000).round,
-            path: "none",
-          ),
+          readiness: Load::ReadinessGate.new(
+            base_url:,
+            readiness_path: @readiness_path,
+            startup_grace_seconds: @startup_grace_seconds,
+            clock: @clock,
+            sleeper: @sleeper,
+            http: @http,
+          ).call,
         },
       )
     end
@@ -125,11 +119,10 @@ module Load
       seed = plan.seed.nil? ? @workload.scale.seed : plan.seed
 
       workers = Array.new(plan.workers) do |index|
-        buffer = tracking_buffer
         Load::Worker.new(
           worker_id: index + 1,
           selector: Load::Selector.new(entries: entries, rng: Random.new(seed + index)),
-          buffer: buffer,
+          buffer: tracking_buffer,
           client: client,
           ctx: { base_url: base_url },
           rng: Random.new(seed + index),
@@ -141,7 +134,7 @@ module Load
       reporter = Load::Reporter.new(
         workers:,
         interval_seconds: @metrics_interval_seconds,
-        sink: metrics_sink,
+        sink: MetricsSink.new(@run_record),
         clock: @clock,
         sleeper: @sleeper,
       )
@@ -201,37 +194,14 @@ module Load
       return false unless @stop_flag.respond_to?(:reason)
 
       %i[sigint sigterm].include?(@stop_flag.reason)
-
     end
 
     def tracking_buffer
-      callback = method(:pin_window_start)
-      ok_callback = method(:record_request_ok)
-      error_callback = method(:record_request_error)
-
-      Class.new(Load::Metrics::Buffer) do
-        define_method(:initialize) do |callback, ok_callback, error_callback|
-          super()
-          @callback = callback
-          @ok_callback = ok_callback
-          @error_callback = error_callback
-          @started = false
-        end
-
-        define_method(:record_ok) do |**kwargs|
-          super(**kwargs)
-          @ok_callback.call
-          return if @started
-
-          @started = true
-          @callback.call
-        end
-
-        define_method(:record_error) do |**kwargs|
-          super(**kwargs)
-          @error_callback.call
-        end
-      end.new(callback, ok_callback, error_callback)
+      TrackingBuffer.new(
+        on_first_success: method(:pin_window_start),
+        on_request_ok: method(:record_request_ok),
+        on_request_error: method(:record_request_error),
+      )
     end
 
     def pin_window_start
@@ -248,15 +218,6 @@ module Load
 
     def current_time
       @clock.call
-    end
-
-    def metrics_sink
-      run_record = @run_record
-      Object.new.tap do |sink|
-        sink.define_singleton_method(:<<) do |line|
-          run_record.append_metrics(line)
-        end
-      end
     end
 
     def initial_state
@@ -293,21 +254,14 @@ module Load
     end
 
     def workload_file
+      return @workload_file if @workload_file
+
       path = @workload.class.instance_method(:name).source_location&.first
       return nil unless path
 
       expanded = File.expand_path(path)
       cwd = "#{Dir.pwd}/"
       expanded.start_with?(cwd) ? expanded.delete_prefix(cwd) : expanded
-    end
-
-    def readiness_payload(probe_started_at:, attempts:, duration_ms: nil, path: @readiness_path)
-      {
-        completed_at: current_time,
-        path:,
-        probe_duration_ms: duration_ms || ((current_time - probe_started_at) * 1000).round,
-        probe_attempts: attempts,
-      }
     end
 
     def outcome_payload(aborted:, error_code: nil)
@@ -336,6 +290,21 @@ module Load
         @request_totals[:total] += 1
         @request_totals[:error] += 1
       end
+    end
+
+    def stop_adapter_safely(result)
+      pid = @state.dig(:adapter, :pid)
+      return result unless pid
+
+      @adapter_client.stop(pid:)
+      result
+    rescue AdapterClient::AdapterError
+      if result.nil? || result.zero?
+        write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
+        return 1
+      end
+
+      result
     end
 
     def write_state(fragment)
