@@ -1322,3 +1322,128 @@ git commit -m "refactor: replace fixture harness with load runner"
   - `Scale` fields stay `rows_per_table`, `open_fraction`, `seed`.
   - `LoadPlan` fields stay `workers`, `duration_seconds`, `rate_limit`, `seed`.
   - Adapter commands stay exactly `describe`, `prepare`, `migrate`, `load-dataset`, `reset-state`, `start`, `stop`.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` (outside voice) | Independent 2nd opinion | 1 | DO NOT SHIP | 5 issues — 3 overlap with eng review, 2 new (process-group leak on stop; missing HTTP timeouts + blocking join) |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | DO NOT SHIP | 3 P0 (Reporter orphaned, adapter-commands.jsonl never written, no SIGINT/SIGTERM trap); 3 P1 (flaky `test_runner_preserves_explicit_zero_seed` under full-suite; no multi-worker rate limiter test; busy-wait at 100Hz in `wait_for_window_end`); 2 P2 (shared-hash reference in `write_state` snapshot, latent bug in `RailsAdapter::Result.wrap` — local var shadows method) |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | DevEx gaps | 0 | — | — |
+
+**VERDICT:** DO NOT SHIP — 3 spec-mandated artifacts are not produced by the production path. Fix the artifact gap, the signal trap, and the process-group kill before merging.
+
+### Eng Review — Unresolved issues
+
+**P0 (blocking):**
+1. `load/lib/load/runner.rb:110` `start_workers` never instantiates `Load::Reporter`. `metrics.jsonl` is mandated by spec §9 and never written. `Load::Reporter` is fully implemented and unit-tested (6 tests) but orphaned. Fix: construct Reporter with a sink lambda that calls `run_record.append_metrics`, `start` before threads, `stop` after `threads.each(&:join)`.
+2. `load/lib/load/adapter_client.rb:44` never calls `run_record.append_adapter_command`. `adapter-commands.jsonl` is mandated by spec §9.2 and never written. `RunRecord#append_adapter_command` is defined and unreached. Fix: inject `run_record` into `AdapterClient` (or wrap invokes in `Runner`) and emit one line per adapter call with `command`, `argv`, `started_at`, `ended_at`, `exit_status`, `stdout_json`, `stderr`.
+3. `bin/load` + `load/lib/load/cli.rb:17` have no `Signal.trap("INT")` / `Signal.trap("TERM")`. Spec §10 mandates "`SIGINT`/`SIGTERM` handled → set stop flag → `ensure` cleanup runs." Runner tests fake the sigint via `stop_flag.trigger(:sigint)` inside the sleeper — production path cannot be stopped cooperatively. Fix: in `bin/load` (or CLI entry), instantiate the runner's stop_flag, trap INT and TERM to trigger it, restore handlers after `runner.run`.
+
+**P1:**
+4. `load/test/runner_test.rb:213` `test_runner_preserves_explicit_zero_seed` fails ~2/3 of the time when the full `load/test/**` suite is run together (passes in isolation). Race: `wait_for_window_end` triggers `timeout` before worker thread completes one iteration. Confirmed via `for i in 1 2 3; do bundle exec ruby -e 'Dir["load/test/*_test.rb"].each{load _1}'; done`. Fix: replace clock-advance sleeper with a deterministic yield primitive, or poll-until-eventually with a generous wall-clock timeout.
+5. `load/lib/load/rate_limiter.rb` has 2 single-threaded tests. With 16 workers in the default workload and a finite `rate_limit`, multi-worker mutex contention is not regression-tested. Fix: add an N-thread × M-call aggregate-rate test.
+6. `load/lib/load/runner.rb:136` `wait_for_window_end` busy-waits at 100Hz via `@sleeper.call(0.01) + Thread.pass` for the full run (6000 iterations at default `duration_seconds=60`). Adds main-thread scheduler pressure under 16-worker load. Fix: sleep for `min(1.0, deadline - current_time)` or use a `ConditionVariable` signaled by `stop_flag.trigger`.
+
+**P2:**
+7. `load/lib/load/runner.rb:204` `write_state` captures `snapshot = @state` and writes outside the mutex. `deep_merge` returns new hashes at mutated levels, so current writers are safe, but nested hashes at unmutated keys are shared by reference — a future contributor who mutates nested state in place would introduce a TOCTOU. Fix: deep-clone the snapshot before releasing the lock, or add a comment documenting the contract.
+8. `adapters/rails/lib/rails_adapter/result.rb:23-31` `wrap` has a latent bug: `rescue StandardError => error` binds `error` as a local, then the rescue body calls `error(command, classify(error), error.message, {})` — Ruby resolves `error(...)` with parens ambiguously depending on context; at minimum this is fragile, and `Result.wrap` is on the hot path via `describe.rb:11`. Fix: rename the exception variable (`rescue StandardError => exception`) and explicitly qualify `Result.error(...)`.
+
+**Codex findings not covered above (P0):**
+9. `adapters/rails/lib/rails_adapter/commands/start.rb:16` spawns Rails in its own process group (`pgroup: true`), but `stop.rb:13` signals only the leader pid. Rails server child workers survive and can hold ports/DB sessions between smoke runs. Fix: signal the group (`Process.kill("TERM", -pid)`) and poll group liveness.
+10. `load/lib/load/client.rb` has no HTTP timeouts; `runner.rb:131` does a blocking `threads.each(&:join)`. One stuck request can hang the whole run and delay `adapter.stop`. Fix: set open/read/write timeouts on `Net::HTTP`; bound worker drain on stop.
+11. `load/lib/load/runner.rb` `run.json` is underfilled: no `run_id`, no `probe_duration_ms`/`probe_attempts`, no `startup_grace_seconds`, no `metrics_interval_seconds`, no `query_ids`. `workloads/missing_index_todos/oracle.rb:94` falls back to a live `pg_stat_statements` query when `query_ids` is absent, which can misattribute DB activity to the wrong run. Fix: write the full run.json skeleton at start, persist probe stats and totals, record canonical queryids during reset into `run.json`.
+
+### Eng Review — Critical gaps
+
+- 3 spec-mandated artifacts not produced by production path (`metrics.jsonl`, `adapter-commands.jsonl`, no signal trap for cooperative shutdown).
+- Implementation has Reporter and RunRecord append methods fully built, tested, and wired only to unit tests — they are orphaned from Runner.
+- `run.json` is materially underfilled relative to spec §9; oracle falls back to live pg_stat_statements, which is unsafe for post-hoc verification.
+
+### Eng Review — Commit reviewed
+
+- Branch: `wip/fixture-harness-plan`
+- HEAD: implementer-reported complete (not yet commit-hashed by reviewer; branch had uncommitted `.codex`, `.gstack/`, and `collector-correctness-walkthrough.md` at review start)
+- Scope: `load/**`, `bin/load`, `adapters/rails/**`, `workloads/missing_index_todos/**`
+
+
+## GSTACK REVIEW REPORT — Round 2 (2026-04-22)
+
+Re-review after commits `24f51ec`, `7881180`, `916945f`, `5e385ce` on top of `264f2b0`.
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Codex Review | `/codex review` (outside voice) | Independent 2nd opinion | 2 | SHIP WITH FIXES | All 6 prior P0 verified FIXED with file:line evidence. 2 new issues surfaced: adapter-commands.jsonl spec drift; run.json non-atomic writes. |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | SHIP WITH FIXES | 6/6 P0 fixed. 2 P1 still failing (zero-seed test still flaky; new sigterm test also flakes on run.json read race). 1 new P1 (spec drift on adapter-commands.jsonl). 1 P2 (non-atomic run.json writes cause test flake; potential crash-truncation). |
+
+**VERDICT:** SHIP WITH FIXES — the implementation now produces all spec-mandated artifacts, handles signals, kills the process group, and has HTTP timeouts + bounded drain. Three residual issues remain, all addressable before merge.
+
+### P0 status (all fixed)
+
+1. ✅ **Reporter wired** — `load/lib/load/runner.rb:141-152` constructs and starts Reporter, `:253-259` routes sink to `run_record.append_metrics`, stopped after `drain_workers`.
+2. ✅ **adapter-commands.jsonl written** — `load/lib/load/adapter_client.rb:47-79` wraps every invoke with timing, logs on success AND on JSON::ParserError path. `run_record` injected via `load/lib/load/cli.rb:51`.
+3. ✅ **SIGINT/SIGTERM trap** — `bin/load:20-31` installs traps and restores previous handlers in `ensure`. Verified by `load/test/cli_test.rb:170-206` spawning a real subprocess and sending SIGTERM.
+4. ✅ **Process-group kill** — `adapters/rails/lib/rails_adapter/commands/stop.rb:14,17,30` use `process_group_pid` (`-@pid`) for TERM, KILL, and the alive-poll. Regression test in `adapters/rails/test/stop_test.rb`.
+5. ✅ **HTTP timeouts + bounded drain** — `load/lib/load/client.rb:8,35-39` sets `HTTP_TIMEOUT_SECONDS = 5` on open/read/write. `load/lib/load/runner.rb:175-187` drain_workers enforces 1.0s deadline with Thread#raise(DrainTimeout) + Thread#kill fallback.
+6. ✅ **run.json complete** — `load/lib/load/runner.rb:262-293` initial_state now has `run_id`, `workload.file`, `workload.actions`, `window.readiness.probe_duration_ms`/`probe_attempts`, `window.startup_grace_seconds`, `window.metrics_interval_seconds`, `query_ids`, `outcome.requests_total`/`requests_ok`/`requests_error`. Query_ids captured in `adapters/rails/lib/rails_adapter/commands/reset_state.rb:93-108` via a workload-keyed script.
+
+### Unresolved issues
+
+**P1 (fix before merge):**
+1. **Spec drift in adapter-commands.jsonl** — spec §9.2 (`docs/superpowers/specs/2026-04-19-load-forge-mvp-design.md:498-504`) prescribes `{ts, command, args, exit_code, duration_ms, stdout_json, stderr}`. Implementation at `load/lib/load/adapter_client.rb:53-60` writes `{command, argv, started_at, ended_at, exit_status, stdout_json, stderr}`. Downstream consumers following the spec schema will break. Fix: rename `argv→args`, `exit_status→exit_code`, replace `started_at/ended_at` with `ts` (started_at) + derived `duration_ms`.
+
+2. **`test_runner_preserves_explicit_zero_seed` still flaky** — `load/test/runner_test.rb:249`. 6 of 8 full-suite runs failed. Same race as before: `wait_for_window_end` timeout fires before worker thread completes one iteration. The new bounded `drain_workers` + `DrainTimeout` raise may actually make this worse by interrupting mid-iteration. Fix: deterministic yield primitive, or block until window_started OR deadline inside the test's workload.
+
+3. **New flaky test: `test_bin_load_handles_sigterm_and_marks_run_aborted`** — `load/test/cli_test.rb:170`, failed once with `JSON::ParserError: unexpected token at ''` at line 321 (`JSON.parse(File.read(run_path))`). Root cause: `RunRecord#write_run` is not atomic — the file can be read mid-truncate. This is both a test flake and a durability concern for real runs.
+
+**P2:**
+4. **Non-atomic `run.json` writes** — `load/lib/load/run_record.rb:27-28` uses `File.write(run_path, JSON.pretty_generate(payload) + "\n")`. A crash or concurrent read mid-write can observe a truncated/empty file. Fix: write to `run.json.tmp` then `File.rename` (POSIX atomic). Closes P1#3 above as a side-effect.
+
+### Test totals
+
+- load/test: 50 tests (+8 since round 1). 1 flaky at high frequency, 1 flaky at low frequency.
+- adapters/rails/test: 21 tests (+2). 2 skipped (integration, opt-in).
+- workloads/missing_index_todos/test: 8 tests. All pass.
+
+### Eng Review — Critical gaps resolved
+
+All 3 critical gaps from round 1 are closed:
+- `metrics.jsonl` produced by production path.
+- `adapter-commands.jsonl` produced by production path.
+- SIGINT/SIGTERM cooperatively stop the runner and trigger ensure-cleanup.
+
+
+## GSTACK REVIEW REPORT — Round 3 (2026-04-22)
+
+Re-review after commit `4e08407` on top of `5e385ce`.
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Codex Review | `/codex review` (outside voice) | Independent 2nd opinion | 3 | SHIP WITH FIXES | 3 of 4 residuals fully FIXED. Residual #1 PARTIALLY FIXED — top-level key names now match spec but `args` semantics still drift. |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 3 | SHIP WITH FIXES | 3 of 4 R2 residuals fully FIXED; 1 narrow residual on `args` payload content. |
+
+**VERDICT:** SHIP WITH FIXES — one narrow-scope spec drift remains. Not a blocker but should be resolved before merge (pick one: strip `["--json", subcommand]` from args, OR update spec §9.2 to reflect implementation).
+
+### Round-2 residuals — status
+
+1. ⚠️ **PARTIALLY FIXED: adapter-commands.jsonl spec drift** — field names now correct (`ts, command, args, exit_code, duration_ms, stdout_json, stderr`) at `load/lib/load/adapter_client.rb:53-60`, `:66-74`. BUT `args` still includes `--json` and the subcommand name: `["--json", "prepare", "--app-root", "..."]` vs spec §9.2 example `["--app-root", "/..."]`. Test asserts the drifted shape at `load/test/adapter_client_test.rb:35`. Fix: `args: argv[1..]` (strip subcommand) or update spec.
+
+2. ✅ **FIXED: zero-seed flake** — `load/test/runner_test.rb:231-249` replaces `AdvancingClock` + `Thread.pass` with `Time.now.utc` + bounded `sleep(min(seconds, 0.001))` + `Timeout.timeout(1.0)` wrapper. 8/8 full-suite runs passed locally (previously 6/8 failed). Codex independently confirmed 20/20 isolated and 10/10 file-level passes.
+
+3. ✅ **FIXED: sigterm-test flake** — root cause was non-atomic `run.json` writes (resolved by #4). Test at `load/test/cli_test.rb:170-206` no longer observes partial JSON. 8/8 full-suite runs include this test and all passed.
+
+4. ✅ **FIXED: non-atomic run.json writes** — `load/lib/load/run_record.rb:27-30` now writes to `run.json.tmp` then `File.rename`. Regression test `load/test/run_record_test.rb:37-67` spins a reader thread against 50 concurrent 5MB-payload writes and asserts no partial reads. Codex confirmed the atomic-replace on source inspection.
+
+### New findings (round 3)
+
+None. The one remaining issue is the narrow `args` semantics residue of residual #1.
+
+### Test totals (round 3)
+
+- load/test: **51 tests** (+1 new `test_write_run_never_exposes_partial_json_to_concurrent_readers`). 8/8 full-suite runs clean.
+- adapters/rails/test: 21 tests (2 skipped, opt-in integration).
+- workloads/missing_index_todos/test: 8 tests.
+- **All green. Zero flakes observed across 8 consecutive full-suite runs.**
+
