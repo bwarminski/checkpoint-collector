@@ -3,6 +3,7 @@
 require_relative "load/action"
 require_relative "load/action_entry"
 require_relative "load/adapter_client"
+require_relative "load/exit_codes"
 require_relative "load/cli"
 require_relative "load/client"
 require_relative "load/load_plan"

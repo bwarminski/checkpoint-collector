@@ -336,6 +336,23 @@ class RunnerTest < Minitest::Test
 
     assert_equal 3, exit_code
     assert_equal 1, adapter.stop_calls
+    assert_equal 0, run_record.outcome.fetch(:requests_error)
+  end
+
+  def test_drain_workers_kills_threads_that_do_not_stop
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record: FakeRunRecord.new,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+    )
+    thread = Thread.new { sleep 10 }
+
+    runner.send(:drain_workers, [thread])
+
+    refute thread.alive?
   end
 
   def test_runner_returns_one_when_stop_fails_after_successful_run

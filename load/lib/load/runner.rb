@@ -7,6 +7,9 @@ require "time"
 module Load
   class Runner
     WORKER_DRAIN_TIMEOUT_SECONDS = 1.0
+    Runtime = Data.define(:clock, :sleeper, :http, :stop_flag)
+    Settings = Data.define(:readiness_path, :startup_grace_seconds, :metrics_interval_seconds, :workload_file, :app_root, :adapter_bin)
+
     MetricsSink = Data.define(:run_record) do
       def <<(line)
         run_record.append_metrics(line)
@@ -39,16 +42,8 @@ module Load
       @workload = workload
       @adapter_client = adapter_client
       @run_record = run_record
-      @clock = clock
-      @sleeper = sleeper
-      @http = http
-      @readiness_path = readiness_path
-      @startup_grace_seconds = startup_grace_seconds
-      @metrics_interval_seconds = metrics_interval_seconds
-      @workload_file = workload_file
-      @app_root = app_root
-      @adapter_bin = adapter_bin
-      @stop_flag = stop_flag || InternalStopFlag.new
+      @runtime = Runtime.new(clock, sleeper, http, stop_flag || InternalStopFlag.new)
+      @settings = Settings.new(readiness_path, startup_grace_seconds, metrics_interval_seconds, workload_file, app_root, adapter_bin)
       @state_mutex = Mutex.new
       @request_totals = { total: 0, ok: 0, error: 0 }
       @state = initial_state
@@ -56,22 +51,21 @@ module Load
     end
 
     def run
-
       begin
         @run_record.write_run(snapshot_state)
         adapter_describe = @adapter_client.describe
         validate_adapter_response!(adapter_describe, %w[name framework runtime], "describe")
         write_state(adapter: {
           describe: adapter_describe,
-          bin: @adapter_bin || @adapter_client.adapter_bin,
-          app_root: @app_root,
+          bin: @settings.adapter_bin || @adapter_client.adapter_bin,
+          app_root: @settings.app_root,
         })
 
-        @adapter_client.prepare(app_root: @app_root)
-        reset_state = @adapter_client.reset_state(app_root: @app_root, workload: @workload.name, scale: @workload.scale)
+        @adapter_client.prepare(app_root: @settings.app_root)
+        reset_state = @adapter_client.reset_state(app_root: @settings.app_root, workload: @workload.name, scale: @workload.scale)
         write_state(query_ids: Array(reset_state["query_ids"]).map(&:to_s)) if reset_state.is_a?(Hash) && reset_state["query_ids"]
 
-        start_response = @adapter_client.start(app_root: @app_root)
+        start_response = @adapter_client.start(app_root: @settings.app_root)
         validate_adapter_response!(start_response, %w[pid base_url], "start")
         write_state(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
 
@@ -81,10 +75,10 @@ module Load
         result = finish_run
       rescue AdapterClient::AdapterError
         write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
-        result = 1
+        result = Load::ExitCodes::ADAPTER_ERROR
       rescue Load::ReadinessGate::Timeout
         write_state(outcome: outcome_payload(aborted: true, error_code: "readiness_timeout"))
-        result = 1
+        result = Load::ExitCodes::ADAPTER_ERROR
       ensure
         result = stop_adapter_safely(result)
       end
@@ -99,11 +93,11 @@ module Load
         window: {
           readiness: Load::ReadinessGate.new(
             base_url:,
-            readiness_path: @readiness_path,
-            startup_grace_seconds: @startup_grace_seconds,
-            clock: @clock,
-            sleeper: @sleeper,
-            http: @http,
+            readiness_path: @settings.readiness_path,
+            startup_grace_seconds: @settings.startup_grace_seconds,
+            clock: @runtime.clock,
+            sleeper: @runtime.sleeper,
+            http: @runtime.http,
           ).call,
         },
       )
@@ -111,8 +105,8 @@ module Load
 
     def start_workers(base_url)
       plan = @workload.load_plan
-      client = Load::Client.new(base_url: base_url, http: @http)
-      rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @clock, sleeper: @sleeper)
+      client = Load::Client.new(base_url: base_url, http: @runtime.http)
+      rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @runtime.clock, sleeper: @runtime.sleeper)
       entries = @workload.actions
       seed = plan.seed.nil? ? @workload.scale.seed : plan.seed
 
@@ -125,16 +119,16 @@ module Load
           ctx: { base_url: base_url },
           rng: Random.new(seed + index),
           rate_limiter: rate_limiter,
-          stop_flag: @stop_flag,
+          stop_flag: @runtime.stop_flag,
         )
       end
 
       reporter = Load::Reporter.new(
         workers:,
-        interval_seconds: @metrics_interval_seconds,
+        interval_seconds: @settings.metrics_interval_seconds,
         sink: MetricsSink.new(@run_record),
-        clock: @clock,
-        sleeper: @sleeper,
+        clock: @runtime.clock,
+        sleeper: @runtime.sleeper,
       )
       reporter.start
       threads = workers.map { |worker| Thread.new { worker.run } }
@@ -146,20 +140,20 @@ module Load
     def wait_for_window_end(duration_seconds)
       deadline = current_time + duration_seconds
 
-      until @stop_flag.call
+      until @runtime.stop_flag.call
         remaining = deadline - current_time
         if remaining <= 0
-          @stop_flag.trigger(:timeout) if @stop_flag.respond_to?(:trigger)
+          @runtime.stop_flag.trigger(:timeout) if @runtime.stop_flag.respond_to?(:trigger)
           break
         end
 
         Thread.pass
-        next if @stop_flag.call
+        next if @runtime.stop_flag.call
 
         remaining = deadline - current_time
         next if remaining <= 0
 
-        @sleeper.call([1.0, remaining].min)
+        @runtime.sleeper.call([1.0, remaining].min)
       end
     end
 
@@ -171,9 +165,8 @@ module Load
         thread.join(remaining)
         next unless thread.alive?
 
-        thread.raise(DrainTimeout)
-        thread.join(0.1)
-        thread.kill if thread.alive?
+        thread.kill
+        thread.join
       end
     end
 
@@ -181,17 +174,17 @@ module Load
       write_state(window: { end_ts: current_time })
       if @window_started
         write_state(outcome: outcome_payload(aborted: stop_aborted?))
-        return 0
+        return Load::ExitCodes::SUCCESS
       end
 
       write_state(outcome: outcome_payload(aborted: true, error_code: "no_successful_requests"))
-      3
+      Load::ExitCodes::NO_SUCCESSFUL_REQUESTS
     end
 
     def stop_aborted?
-      return false unless @stop_flag.respond_to?(:reason)
+      return false unless @runtime.stop_flag.respond_to?(:reason)
 
-      %i[sigint sigterm].include?(@stop_flag.reason)
+      %i[sigint sigterm].include?(@runtime.stop_flag.reason)
     end
 
     def tracking_buffer
@@ -211,7 +204,7 @@ module Load
     end
 
     def current_time
-      @clock.call
+      @runtime.clock.call
     end
 
     public :pin_window_start
@@ -228,8 +221,8 @@ module Load
         },
         adapter: {
           describe: nil,
-          bin: @adapter_bin || @adapter_client.adapter_bin,
-          app_root: @app_root,
+          bin: @settings.adapter_bin || @adapter_client.adapter_bin,
+          app_root: @settings.app_root,
           base_url: nil,
           pid: nil,
         },
@@ -237,12 +230,12 @@ module Load
           start_ts: nil,
           end_ts: nil,
           readiness: {
-            path: @readiness_path,
+            path: @settings.readiness_path,
             probe_duration_ms: nil,
             probe_attempts: nil,
           },
-          startup_grace_seconds: @startup_grace_seconds,
-          metrics_interval_seconds: @metrics_interval_seconds,
+          startup_grace_seconds: @settings.startup_grace_seconds,
+          metrics_interval_seconds: @settings.metrics_interval_seconds,
         },
         outcome: outcome_payload(aborted: false),
         query_ids: [],
@@ -250,7 +243,7 @@ module Load
     end
 
     def workload_file
-      return @workload_file if @workload_file
+      return @settings.workload_file if @settings.workload_file
 
       path = @workload.class.instance_method(:name).source_location&.first
       return nil unless path
@@ -297,9 +290,9 @@ module Load
       @adapter_client.stop(pid:)
       result
     rescue AdapterClient::AdapterError
-      if result.nil? || result.zero?
+      if result.nil? || result == Load::ExitCodes::SUCCESS
         write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
-        return 1
+        return Load::ExitCodes::ADAPTER_ERROR
       end
 
       result
@@ -359,10 +352,5 @@ module Load
       end
     end
 
-    class ReadinessTimeout < StandardError
-    end
-
-    class DrainTimeout < StandardError
-    end
   end
 end

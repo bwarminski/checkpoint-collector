@@ -24,10 +24,10 @@ module Load
         run_command
       when "--help", "-h", nil
         @stdout.puts(USAGE)
-        0
+        Load::ExitCodes::SUCCESS
       when "--version", "-v"
         @stdout.puts(@version)
-        0
+        Load::ExitCodes::SUCCESS
       else
         @stderr.puts("unknown command: #{command}")
         usage_error
@@ -37,7 +37,7 @@ module Load
       usage_error
     rescue StandardError => error
       @stderr.puts(error.message)
-      2
+      Load::ExitCodes::USAGE_ERROR
     end
 
     private
@@ -123,7 +123,7 @@ module Load
 
     def usage_error
       @stderr.puts(USAGE)
-      2
+      Load::ExitCodes::USAGE_ERROR
     end
 
     def workload_path(name)
