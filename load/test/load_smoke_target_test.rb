@@ -10,6 +10,6 @@ class LoadSmokeTargetTest < Minitest::Test
     assert_includes makefile, "DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo"
     assert_includes makefile, "BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres"
     assert_includes makefile,
-      "bin/load run --workload workloads/missing_index_todos/workload.rb"
+      "bin/load run --workload missing-index-todos"
   end
 end

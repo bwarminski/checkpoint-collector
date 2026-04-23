@@ -1,14 +1,15 @@
-# ABOUTME: Parses the load runner CLI and loads workload files.
-# ABOUTME: Keeps argument handling separate from runner orchestration.
+# ABOUTME: Parses the load runner CLI and resolves named workloads.
+# ABOUTME: Keeps command handling separate from runner orchestration.
 require "optparse"
 require "tmpdir"
 
 module Load
   class CLI
-    USAGE = "Usage: bin/load run --workload PATH --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5]".freeze
+    USAGE = "Usage: bin/load run --workload NAME --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5]".freeze
 
-    def initialize(argv:, runner: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
+    def initialize(argv:, version:, runner: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
       @argv = argv.dup
+      @version = version
       @runner = runner || default_runner
       @stop_flag = stop_flag || Load::Runner::InternalStopFlag.new
       @stdout = stdout
@@ -17,8 +18,31 @@ module Load
 
     def run
       command = @argv.shift
-      return usage_error unless command == "run"
 
+      case command
+      when "run"
+        run_command
+      when "--help", "-h", nil
+        @stdout.puts(USAGE)
+        0
+      when "--version", "-v"
+        @stdout.puts(@version)
+        0
+      else
+        @stderr.puts("unknown command: #{command}")
+        usage_error
+      end
+    rescue OptionParser::ParseError, ArgumentError => error
+      @stderr.puts(error.message)
+      usage_error
+    rescue StandardError => error
+      @stderr.puts(error.message)
+      2
+    end
+
+    private
+
+    def run_command
       options = parse_options
       workload = load_workload(options.fetch(:workload))
       runner = @runner.call(
@@ -34,15 +58,7 @@ module Load
         stderr: @stderr,
       )
       runner.run
-    rescue OptionParser::ParseError, ArgumentError => error
-      @stderr.puts(error.message)
-      usage_error
-    rescue StandardError => error
-      @stderr.puts(error.message)
-      2
     end
-
-    private
 
     def default_runner
       lambda do |workload:, adapter_bin:, app_root:, runs_dir:, readiness_path:, startup_grace_seconds:, metrics_interval_seconds:, stop_flag:, stdout:, stderr:|
@@ -74,7 +90,7 @@ module Load
       }
 
       parser = OptionParser.new do |parser|
-        parser.on("--workload PATH") { |value| options[:workload] = value }
+        parser.on("--workload NAME") { |value| options[:workload] = value }
         parser.on("--adapter PATH") { |value| options[:adapter_bin] = value }
         parser.on("--app-root PATH") { |value| options[:app_root] = value }
         parser.on("--runs-dir DIR") { |value| options[:runs_dir] = value }
@@ -87,29 +103,30 @@ module Load
       raise OptionParser::ParseError, "missing --workload" unless options[:workload]
       raise OptionParser::ParseError, "missing --adapter" unless options[:adapter_bin]
       raise OptionParser::ParseError, "missing --app-root" unless options[:app_root]
-      raise OptionParser::ParseError, "workload file not found: #{options[:workload]}" unless File.exist?(options[:workload])
 
       options
     end
 
-    def load_workload(path)
-      absolute_path = File.expand_path(path)
-      load absolute_path
-
-      subclasses = ObjectSpace.each_object(Class).select do |klass|
-        klass < Load::Workload &&
-          klass.instance_methods(false).include?(:name) &&
-          klass.instance_method(:name).source_location&.first == absolute_path
+    def load_workload(name)
+      Load::WorkloadRegistry.fetch(name).new
+    rescue Load::WorkloadRegistry::Error
+      begin
+        require workload_path(name)
+      rescue LoadError
+        raise ArgumentError, "unknown workload: #{name}"
       end
-
-      raise StandardError, "expected exactly one Load::Workload subclass in #{path}" unless subclasses.length == 1
-
-      subclasses.first.new
+      Load::WorkloadRegistry.fetch(name).new
+    rescue Load::WorkloadRegistry::Error
+      raise ArgumentError, "unknown workload: #{name}"
     end
 
     def usage_error
       @stderr.puts(USAGE)
       2
+    end
+
+    def workload_path(name)
+      File.expand_path("../../../workloads/#{name.tr("-", "_")}/workload", __dir__)
     end
   end
 end

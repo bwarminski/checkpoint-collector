@@ -18,7 +18,7 @@ This workload drives `GET /todos/status?status=open` against `~/db-specialist-de
 
 ```bash
 bin/load run \
-  --workload workloads/missing_index_todos/workload.rb \
+  --workload missing-index-todos \
   --adapter adapters/rails/bin/bench-adapter \
   --app-root /home/bjw/db-specialist-demo
 ```

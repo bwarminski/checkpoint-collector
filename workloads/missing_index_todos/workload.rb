@@ -26,3 +26,5 @@ module Load
     end
   end
 end
+
+Load::WorkloadRegistry.register("missing-index-todos", Load::Workloads::MissingIndexTodos::Workload)

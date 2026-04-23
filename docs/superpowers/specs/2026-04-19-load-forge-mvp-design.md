@@ -345,7 +345,7 @@ end
 
 ```
 bin/load run \
-  --workload workloads/missing_index_todos/workload.rb \
+  --workload missing-index-todos \
   --adapter adapters/rails/bin/bench-adapter \
   --app-root /home/bjw/db-specialist-demo \
   [--runs-dir runs/] \
@@ -354,15 +354,15 @@ bin/load run \
   [--debug-log path]
 ```
 
-The `--workload` file must `require` its action files and define exactly one class inheriting `Load::Workload`. The runner instantiates it (no args) and reads its fields.
+`--workload` is a logical workload name. `bin/load` resolves it to `workloads/<name.tr("-", "_")>/workload.rb`, requires that file, and expects the file to register exactly one workload class into `Load::WorkloadRegistry`. The runner instantiates the registered class (no args) and reads its fields.
 
 ## 8. Runner Behavior
 
 ### 8.1 Top-level flow
 
 ```
- 1. Parse CLI args; validate paths exist.
- 2. Load workload class from --workload; instantiate.
+ 1. Parse CLI args; validate required flags are present.
+ 2. Resolve the workload name from --workload, require its file, fetch the registered class, and instantiate it.
  3. adapter.describe → capture metadata into run record.
  4. adapter.prepare
  5. adapter.reset-state --seed <scale.seed> --env <scale fields as KEY=VALUE...>
@@ -570,7 +570,7 @@ Not wired into the runner. Runner exits cleanly regardless. When workloads stabi
 ## 12. `bin/load` CLI
 
 ```
-bin/load run --workload <path> --adapter <path> --app-root <path> \
+bin/load run --workload <name> --adapter <path> --app-root <path> \
   [--runs-dir runs/] [--startup-grace-seconds 15] \
   [--readiness-path /up | --readiness-path none] \
   [--metrics-interval-seconds 5] [--debug-log <path|->]
@@ -581,7 +581,7 @@ bin/load --help
 Exit codes:
 - `0`: run completed, at least one successful request
 - `1`: adapter error (startup/readiness/shutdown/lifecycle) — includes `readiness_timeout`
-- `2`: workload load error (file missing / no Workload subclass defined)
+- `2`: workload lookup error (unknown workload / file missing / registration missing)
 - `3`: no successful requests during the window (degenerate run)
 
 ## 13. MVP Parity Target
@@ -591,7 +591,7 @@ Against a freshly-started docker-compose stack + db-specialist-demo on its defau
 ```
 docker compose up -d postgres clickhouse collector
 bin/load run \
-  --workload workloads/missing_index_todos/workload.rb \
+  --workload missing-index-todos \
   --adapter adapters/rails/bin/bench-adapter \
   --app-root ~/db-specialist-demo
 ruby workloads/missing_index_todos/oracle.rb runs/<latest>

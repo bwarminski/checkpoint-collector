@@ -1,20 +1,48 @@
-# ABOUTME: Verifies the CLI loads workloads and delegates to the injected runner seam.
-# ABOUTME: Covers missing workloads and workloads that do not define a Load::Workload subclass.
+# ABOUTME: Verifies the CLI resolves named workloads and delegates to the injected runner seam.
+# ABOUTME: Covers top-level help/version handling and workload lookup failures.
 require "open3"
+require "socket"
 require "rbconfig"
-require "tempfile"
+require "stringio"
 require "tmpdir"
 require "timeout"
 require_relative "test_helper"
 
 class CliTest < Minitest::Test
+  class FixtureWorkload < Load::Workload
+    def name
+      "fixture-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+    end
+
+    def actions
+      []
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 1, duration_seconds: 0, rate_limit: :unlimited, seed: 42)
+    end
+  end
+
+  def setup
+    Load::WorkloadRegistry.clear
+    Load::WorkloadRegistry.register("fixture-workload", FixtureWorkload)
+  end
+
+  def teardown
+    Load::WorkloadRegistry.clear
+  end
+
   def test_run_command_uses_runner_factory_and_calls_run
     factory = FakeRunnerFactory.new(exit_code: 0)
 
     status = run_bin_load(
       "run",
       "--workload",
-      fixture_workload_path,
+      "fixture-workload",
       "--adapter",
       "fake-adapter",
       "--app-root",
@@ -37,7 +65,7 @@ class CliTest < Minitest::Test
     status = run_bin_load(
       "run",
       "--workload",
-      fixture_workload_path,
+      "fixture-workload",
       "--adapter",
       "fake-adapter",
       "--app-root",
@@ -71,7 +99,7 @@ class CliTest < Minitest::Test
     _stdout, stderr, status = capture_bin_load(
       "run",
       "--workload",
-      fixture_workload_path,
+      "missing-index-todos",
       "--adapter",
       "/nonexistent-adapter",
       "--app-root",
@@ -88,7 +116,7 @@ class CliTest < Minitest::Test
     status = run_bin_load(
       "run",
       "--workload",
-      fixture_workload_path,
+      "fixture-workload",
       "--adapter",
       "fake-adapter",
       "--app-root",
@@ -105,7 +133,7 @@ class CliTest < Minitest::Test
     status = run_bin_load(
       "run",
       "--workload",
-      fixture_workload_path,
+      "fixture-workload",
       "--adapter",
       "fake-adapter",
       "--app-root",
@@ -117,11 +145,11 @@ class CliTest < Minitest::Test
     assert_equal 1, factory.runners.first.run_calls
   end
 
-  def test_run_command_exits_two_when_workload_file_missing
+  def test_run_command_exits_two_when_workload_name_is_unknown
     status = run_bin_load(
       "run",
       "--workload",
-      "/nonexistent.rb",
+      "unknown-workload",
       "--adapter",
       "fake-adapter",
       "--app-root",
@@ -131,23 +159,18 @@ class CliTest < Minitest::Test
     assert_equal 2, status
   end
 
-  def test_run_command_exits_two_when_workload_file_defines_no_subclass
-    Dir.mktmpdir do |dir|
-      path = File.join(dir, "bad_workload.rb")
-      File.write(path, "# no Load::Workload subclass\n")
+  def test_run_command_exits_two_when_workload_file_is_missing
+    status = run_bin_load(
+      "run",
+      "--workload",
+      "missing-file",
+      "--adapter",
+      "fake-adapter",
+      "--app-root",
+      "/tmp/demo",
+    )
 
-      status = run_bin_load(
-        "run",
-        "--workload",
-        path,
-        "--adapter",
-        "fake-adapter",
-        "--app-root",
-        "/tmp/demo",
-      )
-
-      assert_equal 2, status
-    end
+    assert_equal 2, status
   end
 
   def test_run_command_exits_three_when_no_successful_requests
@@ -155,7 +178,7 @@ class CliTest < Minitest::Test
     status = run_bin_load(
       "run",
       "--workload",
-      fixture_workload_path,
+      "fixture-workload",
       "--adapter",
       "fake-adapter",
       "--app-root",
@@ -170,38 +193,38 @@ class CliTest < Minitest::Test
   def test_bin_load_handles_sigterm_and_marks_run_aborted
     Dir.mktmpdir do |dir|
       runs_dir = File.join(dir, "runs")
-      workload_path = write_signal_workload(dir)
       adapter_path = write_fake_adapter(dir)
       stdout_path = File.join(dir, "stdout.log")
       stderr_path = File.join(dir, "stderr.log")
+      with_http_server(3999) do
+        pid = Process.spawn(
+          RbConfig.ruby,
+          bin_load_path,
+          "run",
+          "--workload",
+          "missing-index-todos",
+          "--adapter",
+          adapter_path,
+          "--app-root",
+          dir,
+          "--runs-dir",
+          runs_dir,
+          "--readiness-path",
+          "none",
+          "--startup-grace-seconds",
+          "0",
+          out: stdout_path,
+          err: stderr_path,
+        )
 
-      pid = Process.spawn(
-        RbConfig.ruby,
-        bin_load_path,
-        "run",
-        "--workload",
-        workload_path,
-        "--adapter",
-        adapter_path,
-        "--app-root",
-        dir,
-        "--runs-dir",
-        runs_dir,
-        "--readiness-path",
-        "none",
-        "--startup-grace-seconds",
-        "0",
-        out: stdout_path,
-        err: stderr_path,
-      )
+        run_path = wait_for_run_start(runs_dir)
+        Process.kill("TERM", pid)
+        _pid, status = Process.wait2(pid)
 
-      run_path = wait_for_run_start(runs_dir)
-      Process.kill("TERM", pid)
-      _pid, status = Process.wait2(pid)
-
-      assert_equal 0, status.exitstatus
-      payload = JSON.parse(File.read(run_path))
-      assert_equal true, payload.fetch("outcome").fetch("aborted")
+        assert_equal 0, status.exitstatus
+        payload = JSON.parse(File.read(run_path))
+        assert_equal true, payload.fetch("outcome").fetch("aborted")
+      end
     end
   end
 
@@ -217,69 +240,6 @@ class CliTest < Minitest::Test
 
   def version_path
     @version_path ||= File.expand_path("../../VERSION", __dir__)
-  end
-
-  def fixture_workload_path
-    @fixture_workload_path ||= begin
-      dir = Dir.mktmpdir
-      path = File.join(dir, "fixture_workload.rb")
-      File.write(path, <<~RUBY)
-        class FixtureWorkload < Load::Workload
-          def name
-            "fixture-workload"
-          end
-
-          def scale
-            Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
-          end
-
-          def actions
-            []
-          end
-
-          def load_plan
-            Load::LoadPlan.new(workers: 1, duration_seconds: 0, rate_limit: :unlimited, seed: 42)
-          end
-        end
-      RUBY
-      path
-    end
-  end
-
-  def write_signal_workload(dir)
-    path = File.join(dir, "signal_workload.rb")
-    File.write(path, <<~RUBY)
-      class SignalAction < Load::Action
-        Response = Struct.new(:code)
-
-        def name
-          :signal_action
-        end
-
-        def call
-          Response.new("200")
-        end
-      end
-
-      class SignalWorkload < Load::Workload
-        def name
-          "signal-workload"
-        end
-
-        def scale
-          Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
-        end
-
-        def actions
-          [Load::ActionEntry.new(SignalAction, 1)]
-        end
-
-        def load_plan
-          Load::LoadPlan.new(workers: 1, duration_seconds: 30, rate_limit: :unlimited, seed: 42)
-        end
-      end
-    RUBY
-    path
   end
 
   def write_fake_adapter(dir)
@@ -327,8 +287,45 @@ class CliTest < Minitest::Test
     end
   end
 
+  def with_http_server(port)
+    server = TCPServer.new("127.0.0.1", port)
+    stop_reader, stop_writer = IO.pipe
+    thread = Thread.new do
+      loop do
+        ready = IO.select([server, stop_reader])
+        next unless ready
+
+        if ready.first.include?(stop_reader)
+          break
+        end
+
+        client = server.accept
+        begin
+          client.readpartial(1024)
+          client.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        ensure
+          client.close
+        end
+      rescue EOFError, IOError
+      end
+    end
+    yield
+  ensure
+    stop_writer&.write("stop")
+    stop_writer&.close
+    server&.close
+    thread&.join(1) || thread&.kill
+    stop_reader&.close
+  end
+
   def run_bin_load(*argv, runner: FakeRunnerFactory.new(exit_code: 0))
-    Load::CLI.new(argv:, runner:).run
+    Load::CLI.new(
+      argv:,
+      version: "test-version",
+      runner:,
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    ).run
   end
 
   class FakeRunnerFactory

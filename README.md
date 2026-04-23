@@ -19,7 +19,7 @@ adapter, and an app root:
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
 BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
-bin/load run --workload workloads/missing_index_todos/workload.rb \
+bin/load run --workload missing-index-todos \
   --adapter adapters/rails/bin/bench-adapter \
   --app-root /home/bjw/db-specialist-demo
 ```

@@ -15,6 +15,7 @@ require_relative "load/scale"
 require_relative "load/selector"
 require_relative "load/worker"
 require_relative "load/workload"
+require_relative "load/workload_registry"
 
 module Load
 end
