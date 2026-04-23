@@ -14,26 +14,24 @@ module Load
     end
 
     class TrackingBuffer < Load::Metrics::Buffer
-      def initialize(on_first_success:, on_request_ok:, on_request_error:)
+      def initialize(runner)
         super()
-        @on_first_success = on_first_success
-        @on_request_ok = on_request_ok
-        @on_request_error = on_request_error
+        @runner = runner
         @started = false
       end
 
       def record_ok(**kwargs)
         super(**kwargs)
-        @on_request_ok.call
+        @runner.record_request_ok
         return if @started
 
         @started = true
-        @on_first_success.call
+        @runner.pin_window_start
       end
 
       def record_error(**kwargs)
         super(**kwargs)
-        @on_request_error.call
+        @runner.record_request_error
       end
     end
 
@@ -58,7 +56,7 @@ module Load
     end
 
     def run
-      result = nil
+
       begin
         @run_record.write_run(snapshot_state)
         adapter_describe = @adapter_client.describe
@@ -197,11 +195,7 @@ module Load
     end
 
     def tracking_buffer
-      TrackingBuffer.new(
-        on_first_success: method(:pin_window_start),
-        on_request_ok: method(:record_request_ok),
-        on_request_error: method(:record_request_error),
-      )
+      TrackingBuffer.new(self)
     end
 
     def pin_window_start
@@ -219,6 +213,8 @@ module Load
     def current_time
       @clock.call
     end
+
+    public :pin_window_start
 
     def initial_state
       {
@@ -291,6 +287,8 @@ module Load
         @request_totals[:error] += 1
       end
     end
+
+    public :record_request_ok, :record_request_error
 
     def stop_adapter_safely(result)
       pid = @state.dig(:adapter, :pid)

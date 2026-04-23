@@ -292,6 +292,30 @@ class RunnerTest < Minitest::Test
     assert_operator run_record.metrics_lines.length, :>, 0
   end
 
+  def test_tracking_buffer_records_totals_and_pins_window_once
+    run_record = FakeRunRecord.new
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+    )
+    buffer = Load::Runner::TrackingBuffer.new(runner)
+
+    buffer.record_ok(action: :list, latency_ns: 1, status: 200)
+    first_start = run_record.window.fetch(:start_ts)
+    buffer.record_ok(action: :list, latency_ns: 1, status: 200)
+    buffer.record_error(action: :list, latency_ns: 1, error_class: "RuntimeError")
+
+    runner.send(:write_state, outcome: runner.send(:outcome_payload, aborted: false))
+    assert_equal first_start, run_record.window.fetch(:start_ts)
+    assert_equal 3, run_record.outcome.fetch(:requests_total)
+    assert_equal 2, run_record.outcome.fetch(:requests_ok)
+    assert_equal 1, run_record.outcome.fetch(:requests_error)
+  end
+
   def test_runner_completes_when_http_request_hangs_after_stop
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
