@@ -1,5 +1,5 @@
 # ABOUTME: Spaces requests according to a shared rate limit.
-# ABOUTME: Preserves the limiter timing behavior used by the fixture harness.
+# ABOUTME: Coordinates shared slot reservations without serializing worker sleeps.
 require "thread"
 
 module Load
@@ -13,15 +13,18 @@ module Load
     end
 
     def wait_turn
-      @mutex.synchronize do
-        return if @rate_limit == :unlimited
+      return if @rate_limit == :unlimited
 
+      target_time = @mutex.synchronize do
         now = @clock.call
         @next_allowed_at ||= now
-        sleep_for = @next_allowed_at - now
-        @sleeper.call(sleep_for) if sleep_for.positive?
-        @next_allowed_at = [@next_allowed_at, now].max + (1.0 / @rate_limit)
+        target_time = [@next_allowed_at, now].max
+        @next_allowed_at = target_time + (1.0 / @rate_limit)
+        target_time
       end
+
+      sleep_for = target_time - @clock.call
+      @sleeper.call(sleep_for) if sleep_for.positive?
     end
   end
 end

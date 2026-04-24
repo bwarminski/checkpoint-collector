@@ -11,7 +11,7 @@ class RateLimiterTest < Minitest::Test
 
   def test_finite_rate_spaces_requests
     sleeps = []
-    times = [0.0, 0.0, 0.2].each
+    times = [0.0, 0.0, 0.0, 0.0].each
     limiter = Load::RateLimiter.new(rate_limit: 5.0, clock: -> { times.next }, sleeper: ->(seconds) { sleeps << seconds })
 
     limiter.wait_turn
@@ -58,5 +58,40 @@ class RateLimiterTest < Minitest::Test
     grant_times.sort.each_with_index do |granted_at, index|
       assert_in_delta index / rate_limit, granted_at, 0.001
     end
+  end
+
+  def test_workers_can_sleep_concurrently_while_waiting_for_future_slots
+    sleep_events = {}
+    events_mutex = Mutex.new
+    limiter = Load::RateLimiter.new(
+      rate_limit: 10.0,
+      clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+      sleeper: lambda { |seconds|
+        started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        Kernel.sleep(seconds)
+        finished_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        events_mutex.synchronize do
+          sleep_events[Thread.current[:label]] = { started_at:, finished_at: }
+        end
+      },
+    )
+
+    limiter.wait_turn
+
+    slow = Thread.new do
+      Thread.current[:label] = :slow
+      limiter.wait_turn
+    end
+    Kernel.sleep(0.01)
+    later = Thread.new do
+      Thread.current[:label] = :later
+      limiter.wait_turn
+    end
+
+    [slow, later].each(&:join)
+
+    refute_nil sleep_events[:slow]
+    refute_nil sleep_events[:later]
+    assert_operator sleep_events[:later][:started_at], :<, sleep_events[:slow][:finished_at]
   end
 end
