@@ -7,6 +7,23 @@ module Load
   class Client
     HTTP_TIMEOUT_SECONDS = 5
 
+    class Connection
+      def initialize(http)
+        @http = http
+      end
+
+      def start
+        self
+      end
+
+      def request(request)
+        @http.request(request)
+      end
+
+      def finish
+      end
+    end
+
     def initialize(base_url:, http: Net::HTTP)
       @base_url = URI(base_url)
       @http = http
@@ -39,13 +56,18 @@ module Load
 
       if @connection
         @connection.request(request)
-      else
+      elsif @http.respond_to?(:new)
         connection = build_connection
         begin
           connection.start
           connection.request(request)
         ensure
           connection&.finish
+        end
+      else
+        @http.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
+          configure_timeouts(http)
+          http.request(request)
         end
       end
     end
@@ -64,6 +86,8 @@ module Load
     end
 
     def build_connection
+      return Connection.new(@http) unless @http.respond_to?(:new)
+
       connection = @http.new(@base_url.host, @base_url.port)
       connection.use_ssl = @base_url.scheme == "https" if connection.respond_to?(:use_ssl=)
       configure_timeouts(connection)

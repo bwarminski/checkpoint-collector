@@ -21,11 +21,14 @@ module Load
         super()
         @runner = runner
         @started = false
+        @request_totals = { total: 0, ok: 0, error: 0 }
+        @runner.send(:register_tracking_buffer, self)
       end
 
       def record_ok(**kwargs)
         super(**kwargs)
-        @runner.record_request_ok
+        @request_totals[:total] += 1
+        @request_totals[:ok] += 1
         return if @started
 
         @started = true
@@ -34,7 +37,12 @@ module Load
 
       def record_error(**kwargs)
         super(**kwargs)
-        @runner.record_request_error
+        @request_totals[:total] += 1
+        @request_totals[:error] += 1
+      end
+
+      def request_totals
+        @request_totals.dup
       end
     end
 
@@ -45,7 +53,7 @@ module Load
       @runtime = Runtime.new(clock, sleeper, http, stop_flag || InternalStopFlag.new)
       @settings = Settings.new(readiness_path, startup_grace_seconds, metrics_interval_seconds, workload_file, app_root, adapter_bin)
       @state_mutex = Mutex.new
-      @request_totals = { total: 0, ok: 0, error: 0 }
+      @tracking_buffers = []
       @state = initial_state
       @window_started = false
     end
@@ -254,10 +262,11 @@ module Load
     end
 
     def outcome_payload(aborted:, error_code: nil)
+      request_totals = aggregate_request_totals
       {
-        requests_total: @request_totals.fetch(:total),
-        requests_ok: @request_totals.fetch(:ok),
-        requests_error: @request_totals.fetch(:error),
+        requests_total: request_totals.fetch(:total),
+        requests_ok: request_totals.fetch(:ok),
+        requests_error: request_totals.fetch(:error),
         aborted:,
         error_code:,
       }.compact
@@ -266,22 +275,6 @@ module Load
     def snapshot_state
       deep_copy(@state)
     end
-
-    def record_request_ok
-      @state_mutex.synchronize do
-        @request_totals[:total] += 1
-        @request_totals[:ok] += 1
-      end
-    end
-
-    def record_request_error
-      @state_mutex.synchronize do
-        @request_totals[:total] += 1
-        @request_totals[:error] += 1
-      end
-    end
-
-    public :record_request_ok, :record_request_error
 
     def stop_adapter_safely(result)
       pid = @state.dig(:adapter, :pid)
@@ -305,6 +298,18 @@ module Load
         snapshot = snapshot_state
       end
       @run_record.write_run(snapshot)
+    end
+
+    def register_tracking_buffer(buffer)
+      @tracking_buffers << buffer
+    end
+
+    def aggregate_request_totals
+      @tracking_buffers.each_with_object({ total: 0, ok: 0, error: 0 }) do |buffer, totals|
+        buffer.request_totals.each do |key, value|
+          totals[key] += value
+        end
+      end
     end
 
     def validate_adapter_response!(response, required_keys, response_name)

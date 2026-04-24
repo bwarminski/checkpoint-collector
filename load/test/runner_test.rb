@@ -316,6 +316,33 @@ class RunnerTest < Minitest::Test
     assert_equal 1, run_record.outcome.fetch(:requests_error)
   end
 
+  def test_tracking_buffer_does_not_need_state_mutex_for_non_first_success
+    run_record = FakeRunRecord.new
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+    )
+    buffer = Load::Runner::TrackingBuffer.new(runner)
+    buffer.record_ok(action: :list, latency_ns: 1, status: 200)
+    completed = Queue.new
+    thread = nil
+
+    runner.instance_variable_get(:@state_mutex).synchronize do
+      thread = Thread.new do
+        buffer.record_ok(action: :list, latency_ns: 1, status: 200)
+        completed << true
+      end
+      sleep 0.05
+      assert_equal 1, completed.size
+    end
+
+    thread.join
+  end
+
   def test_runner_completes_when_http_request_hangs_after_stop
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
