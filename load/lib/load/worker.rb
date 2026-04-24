@@ -16,8 +16,9 @@ module Load
     attr_reader :buffer
 
     def run
+      @client.start if @client.respond_to?(:start)
+
       until @stop_flag.call
-        started_ns = monotonic_ns
         action = nil
         request_started_ns = nil
 
@@ -32,6 +33,8 @@ module Load
           @buffer.record_error(action: action_name(action), latency_ns: request_started_ns ? elapsed_ns(request_started_ns) : 0, error_class: error.class.name)
         end
       end
+    ensure
+      @client.finish if @client.respond_to?(:finish)
     end
 
     private
