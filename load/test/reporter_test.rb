@@ -1,0 +1,193 @@
+# ABOUTME: Verifies the reporter merges worker buffers into interval snapshots.
+# ABOUTME: Covers the final tail flush behavior when the reporter stops.
+require "timeout"
+require_relative "test_helper"
+
+class ReporterTest < Minitest::Test
+  FakeWorker = Struct.new(:buffer)
+
+  class FakeClock
+    def initialize(times = [0.0])
+      @times = times.dup
+      @mutex = Mutex.new
+    end
+
+    def call
+      @mutex.synchronize do
+        value = @times.shift
+        return value unless value.nil?
+
+        @times.last || 0.0
+      end
+    end
+  end
+
+  def test_reporter_merges_per_worker_buffers_at_each_interval
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new), FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers[0].buffer.record_ok(action: :a, latency_ns: 5_000_000, status: 200)
+    workers[1].buffer.record_ok(action: :a, latency_ns: 15_000_000, status: 200)
+    sink = []
+    reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new([0.0, 5.0]), sleeper: ->(*) {})
+
+    reporter.snapshot_once
+
+    line = sink.last
+    assert_equal 5000, line.fetch(:interval_ms)
+    assert line.key?(:ts)
+    assert_equal 2, line.fetch(:actions).fetch(:a).fetch(:count)
+  end
+
+  def test_reporter_runs_periodic_snapshots_automatically
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    sink = []
+    sleep_calls = []
+    ready = Queue.new
+    release = Queue.new
+    sleeper = ->(seconds) do
+      sleep_calls << seconds
+      if sleep_calls.length == 1
+        ready << true
+        release.pop
+      else
+        raise StopIteration
+      end
+    end
+    reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new([0.0]), sleeper:)
+
+    reporter.start
+    wait_until { !ready.empty? }
+    assert_equal [], sink
+    release << true
+    wait_until { sink.any? }
+
+    assert_equal 5, sleep_calls.first
+    assert_equal 1, sink.length
+    assert_equal 1, sink.last.fetch(:actions).fetch(:a).fetch(:count)
+  end
+
+  def test_reporter_emits_final_tail_snapshot_on_stop
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    sink = []
+    reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new, sleeper: ->(*) {})
+
+    reporter.start
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    reporter.stop
+
+    assert_equal 1, sink.sum { |line| line.fetch(:actions).fetch(:a, {}).fetch(:count, 0) }
+  end
+
+  def test_reporter_uses_elapsed_interval_for_final_tail_snapshot
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    sink = []
+    reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new([5.0, 7.0]), sleeper: ->(*) {})
+
+    reporter.snapshot_once
+    workers.first.buffer.record_ok(action: :a, latency_ns: 3_000_000, status: 200)
+    reporter.stop
+
+    assert_equal 5000, sink.first.fetch(:interval_ms)
+    assert_equal 2000, sink.last.fetch(:interval_ms)
+  end
+
+  def test_reporter_flushes_tail_data_even_if_never_started
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    sink = []
+    reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new, sleeper: ->(*) {})
+
+    reporter.stop
+
+    assert_equal 1, sink.sum { |line| line.fetch(:actions).fetch(:a, {}).fetch(:count, 0) }
+  end
+
+  def test_reporter_stop_interrupts_waiting_sleeper_promptly
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    sink = []
+    started = Queue.new
+    blocker = Queue.new
+    reporter = Load::Reporter.new(
+      workers:,
+      interval_seconds: 5,
+      sink:,
+      clock: FakeClock.new([0.0]),
+      sleeper: ->(*) do
+        started << true
+        blocker.pop
+      end,
+    )
+
+    reporter.start
+    started.pop
+
+    elapsed = Timeout.timeout(0.5) do
+      start_ns = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+      reporter.stop
+      (Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond) - start_ns) / 1_000_000_000.0
+    end
+
+    assert_operator elapsed, :<, 0.2
+    assert_equal 1, sink.length
+  end
+
+  def test_reporter_stop_waits_for_inflight_snapshot_before_flushing_tail
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    sink = []
+    sleep_started = Queue.new
+    release_sleep = Queue.new
+    snapshot_started = Queue.new
+    release_snapshot = Queue.new
+    sleep_calls = 0
+    reporter = Load::Reporter.new(
+      workers:,
+      interval_seconds: 5,
+      sink:,
+      clock: FakeClock.new([0.0, 5.0]),
+      sleeper: ->(*) do
+        sleep_calls += 1
+        if sleep_calls == 1
+          sleep_started << true
+          release_sleep.pop
+        else
+          raise StopIteration
+        end
+      end,
+    )
+
+    first_snapshot = true
+    reporter.define_singleton_method(:snapshot_once) do
+      if first_snapshot
+        first_snapshot = false
+        snapshot_started << true
+        release_snapshot.pop
+      end
+      super()
+    end
+
+    reporter.start
+    sleep_started.pop
+    release_sleep << true
+    snapshot_started.pop
+    stop_thread = Thread.new { reporter.stop }
+    assert_equal 0, sink.length
+    release_snapshot << true
+    stop_thread.join
+
+    assert_equal 1, sink.first.fetch(:actions).fetch(:a).fetch(:count)
+  end
+
+  private
+
+  def wait_until(timeout_seconds: 1.0)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
+
+    until yield
+      raise "timed out waiting for reporter" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      Thread.pass
+    end
+  end
+end

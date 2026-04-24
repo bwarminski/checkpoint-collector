@@ -1,0 +1,209 @@
+# ABOUTME: Verifies the missing-index workload reproduced both the bad plan and ClickHouse activity.
+# ABOUTME: Reads a run record, tree-walks EXPLAIN JSON, and polls ClickHouse by queryid fingerprints.
+require "json"
+require "net/http"
+require "optparse"
+require "pg"
+require "time"
+require "uri"
+
+module Load
+  module Workloads
+    module MissingIndexTodos
+      class Oracle
+        CLICKHOUSE_CALL_THRESHOLD = 500
+        INDEX_SCAN_NODE_TYPES = ["Index Scan", "Index Only Scan", "Bitmap Index Scan"].freeze
+        EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'"
+        QUERY_TEXT_CANDIDATES = [
+          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1),
+          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open'),
+        ].freeze
+
+        class Failure < StandardError
+        end
+
+        def initialize(stdout: $stdout, stderr: $stderr, pg: PG, clickhouse_query: nil, clock: -> { Time.now.utc }, sleeper: ->(seconds) { sleep(seconds) })
+          @stdout = stdout
+          @stderr = stderr
+          @pg = pg
+          @clickhouse_query = clickhouse_query || method(:query_clickhouse)
+          @clock = clock
+          @sleeper = sleeper
+        end
+
+        def run(argv)
+          options = parse(argv)
+          result = call(**options)
+
+          @stdout.puts("PASS: explain (#{result.fetch(:plan).fetch("Node Type")} on todos, plan node confirmed)")
+          @stdout.puts("PASS: clickhouse (#{result.fetch(:clickhouse).fetch("total_exec_count")} calls; mean #{result.fetch(:clickhouse).fetch("mean_exec_time_ms")}ms)")
+          exit 0
+        rescue Failure => error
+          @stderr.puts(error.message)
+          exit 1
+        end
+
+        def call(run_dir:, database_url:, clickhouse_url:, timeout_seconds: 30)
+          run_record = load_run_record(run_dir)
+          queryids = extract_queryids(run_record, database_url)
+          plan = explain_todos_scan(database_url)
+          clickhouse = wait_for_clickhouse!(
+            window: run_record.fetch("window"),
+            queryids:,
+            clickhouse_url:,
+            timeout_seconds:
+          )
+
+          {
+            plan:,
+            clickhouse: normalize_clickhouse_snapshot(clickhouse),
+          }
+        end
+
+        private
+
+        def parse(argv)
+          options = {
+            database_url: ENV["DATABASE_URL"],
+            clickhouse_url: ENV["CLICKHOUSE_URL"],
+            timeout_seconds: 30,
+          }
+
+          parser = OptionParser.new
+          parser.on("--database-url URL") { |value| options[:database_url] = value }
+          parser.on("--clickhouse-url URL") { |value| options[:clickhouse_url] = value }
+          parser.on("--timeout-seconds SECONDS", Integer) { |value| options[:timeout_seconds] = value }
+
+          args = argv.dup
+          parser.parse!(args)
+          run_dir = args.shift
+          raise Failure, "FAIL: missing run record directory" if run_dir.nil? || run_dir.empty?
+          raise Failure, "FAIL: missing --database-url (or DATABASE_URL)" if options[:database_url].nil? || options[:database_url].empty?
+          raise Failure, "FAIL: missing --clickhouse-url (or CLICKHOUSE_URL)" if options[:clickhouse_url].nil? || options[:clickhouse_url].empty?
+
+          options.merge(run_dir:)
+        end
+
+        def load_run_record(run_dir)
+          path = File.join(run_dir, "run.json")
+          JSON.parse(File.read(path))
+        rescue Errno::ENOENT
+          raise Failure, "FAIL: missing run record at #{path}"
+        end
+
+        def extract_queryids(run_record, database_url)
+          candidates = [
+            run_record["query_ids"],
+            run_record["queryids"],
+            run_record.dig("oracle", "query_ids"),
+            run_record.dig("oracle", "queryids"),
+            run_record.dig("workload", "query_ids"),
+            run_record.dig("workload", "queryids"),
+            run_record.dig("workload", "oracle", "query_ids"),
+            run_record.dig("workload", "oracle", "queryids"),
+          ].compact
+
+          queryids = Array(candidates.first).map(&:to_s).reject(&:empty?).uniq
+          return queryids unless queryids.empty?
+
+          queryids = lookup_queryids(database_url)
+          raise Failure, "FAIL: run record is missing query_ids and pg_stat_statements had no matching queryids" if queryids.empty?
+
+          queryids
+        end
+
+        def explain_todos_scan(database_url)
+          connection = @pg.connect(database_url)
+          rows = connection.exec(EXPLAIN_SQL)
+          payload = JSON.parse(rows.first.fetch("QUERY PLAN"))
+          plan = payload.fetch(0).fetch("Plan")
+          todos_nodes = relation_nodes(plan, "todos")
+          raise Failure, "FAIL: explain (could not find todos in plan)" if todos_nodes.empty?
+
+          rejected_node = todos_nodes.find { |node| INDEX_SCAN_NODE_TYPES.include?(node.fetch("Node Type")) }
+          raise Failure, "FAIL: explain (expected Seq Scan, got #{rejected_node.fetch("Node Type")})" if rejected_node
+
+          seq_scan = todos_nodes.find { |node| node.fetch("Node Type") == "Seq Scan" }
+          return seq_scan if seq_scan
+
+          raise Failure, "FAIL: explain (expected Seq Scan, got #{todos_nodes.first.fetch("Node Type")})"
+        ensure
+          connection&.close
+        end
+
+        def lookup_queryids(database_url)
+          connection = @pg.connect(database_url)
+          queryids = QUERY_TEXT_CANDIDATES.flat_map do |query_text|
+            connection.exec_params(
+              "SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1",
+              [query_text],
+            ).map { |row| row.fetch("queryid") }
+          end
+
+          queryids.uniq
+        ensure
+          connection&.close
+        end
+
+        def relation_nodes(node, relation_name)
+          matches = []
+          matches << node if node["Relation Name"] == relation_name
+          Array(node["Plans"]).each do |child|
+            matches.concat(relation_nodes(child, relation_name))
+          end
+          matches
+        end
+
+        def wait_for_clickhouse!(window:, queryids:, clickhouse_url:, timeout_seconds:)
+          deadline = @clock.call + timeout_seconds
+
+          loop do
+            snapshot = normalize_clickhouse_snapshot(
+              @clickhouse_query.call(window:, queryids:, clickhouse_url:)
+            )
+            return snapshot if snapshot.fetch("total_exec_count") >= CLICKHOUSE_CALL_THRESHOLD
+
+            raise Failure, "FAIL: clickhouse (saw #{snapshot.fetch("total_exec_count")} calls before timeout)" if @clock.call >= deadline
+
+            @sleeper.call(1)
+          end
+        end
+
+        def normalize_clickhouse_snapshot(snapshot)
+          {
+            "total_exec_count" => snapshot.fetch("total_exec_count").to_i,
+            "mean_exec_time_ms" => snapshot.fetch("mean_exec_time_ms", "0.0").to_s,
+          }
+        end
+
+        def query_clickhouse(window:, queryids:, clickhouse_url:)
+          uri = URI.parse(clickhouse_url)
+          uri.path = "/" if uri.path.nil? || uri.path.empty?
+          uri.query = URI.encode_www_form(query: "#{build_clickhouse_sql(window:, queryids:)} FORMAT JSONEachRow")
+          response = Net::HTTP.get_response(uri)
+          raise Failure, "FAIL: clickhouse (query failed: #{response.code} #{response.body})" if response.code.to_i >= 400
+
+          body = response.body.to_s.each_line.first || "{\"total_exec_count\":\"0\",\"mean_exec_time_ms\":\"0.0\"}"
+          JSON.parse(body)
+        end
+
+        def build_clickhouse_sql(window:, queryids:)
+          escaped_queryids = queryids.map { |queryid| "'#{queryid.gsub("'", "''")}'" }.join(", ")
+
+          <<~SQL
+            SELECT
+              toString(coalesce(sum(total_exec_count), 0)) AS total_exec_count,
+              toString(round(coalesce(avg(avg_exec_time_ms), 0), 1)) AS mean_exec_time_ms
+            FROM query_intervals
+            WHERE interval_ended_at BETWEEN parseDateTime64BestEffort('#{window.fetch("start_ts")}') AND parseDateTime64BestEffort('#{window.fetch("end_ts")}') + INTERVAL 90 SECOND
+              AND queryid IN (#{escaped_queryids})
+          SQL
+        end
+      end
+    end
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  Load::Workloads::MissingIndexTodos::Oracle.new.run(ARGV)
+end

@@ -1,0 +1,5 @@
+# ABOUTME: Loads Rails tasks for the fixture adapter integration app.
+# ABOUTME: Enables `bin/rails` commands to resolve the app environment.
+require_relative "config/application"
+
+Rails.application.load_tasks

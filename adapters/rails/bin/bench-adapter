@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+# ABOUTME: Runs the Rails benchmark adapter command-line entrypoint.
+# ABOUTME: Parses command args, dispatches commands, and prints one JSON object.
+require "json"
+require "optparse"
+require_relative "../lib/rails_adapter"
+
+global = { json: false }
+OptionParser.new do |parser|
+  parser.on("--json") { global[:json] = true }
+end.order!(ARGV)
+
+command_name = ARGV.shift
+options = {}
+
+OptionParser.new do |parser|
+  parser.on("--app-root PATH") { |value| options[:app_root] = value }
+  parser.on("--workload NAME") { |value| options[:workload] = value }
+  parser.on("--seed N", Integer) { |value| options[:seed] = value }
+  parser.on("--env KEY=VALUE") do |value|
+    key, env_value = value.split("=", 2)
+    (options[:env_pairs] ||= {})[key] = env_value
+  end
+  parser.on("--pid N", Integer) { |value| options[:pid] = value }
+end.parse!(ARGV)
+
+begin
+  command = case command_name
+  when "describe" then RailsAdapter::Commands::Describe.new
+  when "prepare" then RailsAdapter::Commands::Prepare.new(**options.slice(:app_root))
+  when "migrate" then RailsAdapter::Commands::Migrate.new(**options.slice(:app_root))
+  when "load-dataset" then RailsAdapter::Commands::LoadDataset.new(**options.slice(:app_root, :workload, :seed, :env_pairs))
+  when "reset-state" then RailsAdapter::Commands::ResetState.new(**options.slice(:app_root, :workload, :seed, :env_pairs))
+  when "start" then RailsAdapter::Commands::Start.new(**options.slice(:app_root))
+  when "stop" then RailsAdapter::Commands::Stop.new(**options.slice(:pid))
+  else
+    result = RailsAdapter::Result.error(command_name.to_s, "unknown_command", "unknown command: #{command_name}", {})
+    $stdout.puts(JSON.generate(result))
+    exit 1
+  end
+
+  result = command.call
+  $stdout.puts(JSON.generate(result))
+  exit(result.fetch("ok") ? 0 : 1)
+rescue OptionParser::ParseError => error
+  result = RailsAdapter::Result.error(command_name.to_s, "parse_error", error.message, {})
+  $stdout.puts(JSON.generate(result))
+  exit 1
+end

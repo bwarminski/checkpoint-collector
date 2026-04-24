@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+# ABOUTME: Starts Rails commands for the fixture adapter integration app.
+# ABOUTME: Points Rails at the fixture app's application config.
+APP_PATH = File.expand_path("../config/application", __dir__)
+
+require_relative "../config/boot"
+require "rails/commands"
