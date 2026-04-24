@@ -213,10 +213,10 @@ class CliTest < Minitest::Test
   def test_bin_load_handles_sigterm_and_marks_run_aborted
     Dir.mktmpdir do |dir|
       runs_dir = File.join(dir, "runs")
-      adapter_path = write_fake_adapter(dir)
       stdout_path = File.join(dir, "stdout.log")
       stderr_path = File.join(dir, "stderr.log")
-      with_http_server(3999) do
+      with_http_server do |port|
+        adapter_path = write_fake_adapter(dir, port:)
         pid = Process.spawn(
           RbConfig.ruby,
           bin_load_path,
@@ -262,7 +262,7 @@ class CliTest < Minitest::Test
     @version_path ||= File.expand_path("../../VERSION", __dir__)
   end
 
-  def write_fake_adapter(dir)
+  def write_fake_adapter(dir, port: 3999)
     path = File.join(dir, "fake-adapter")
     File.write(path, <<~RUBY)
       #!/usr/bin/env ruby
@@ -279,7 +279,7 @@ class CliTest < Minitest::Test
       when "reset-state"
         {"ok" => true, "command" => "reset-state"}
       when "start"
-        {"ok" => true, "command" => "start", "pid" => Process.pid, "base_url" => "http://127.0.0.1:3999"}
+        {"ok" => true, "command" => "start", "pid" => Process.pid, "base_url" => "http://127.0.0.1:#{port}"}
       when "stop"
         {"ok" => true, "command" => "stop"}
       else
@@ -307,8 +307,8 @@ class CliTest < Minitest::Test
     end
   end
 
-  def with_http_server(port)
-    server = TCPServer.new("127.0.0.1", port)
+  def with_http_server
+    server = TCPServer.new("127.0.0.1", 0)
     stop_reader, stop_writer = IO.pipe
     thread = Thread.new do
       loop do
@@ -329,7 +329,7 @@ class CliTest < Minitest::Test
       rescue EOFError, IOError
       end
     end
-    yield
+    yield server.local_address.ip_port
   ensure
     stop_writer&.write("stop")
     stop_writer&.close

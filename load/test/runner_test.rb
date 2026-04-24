@@ -34,8 +34,17 @@ class RunnerTest < Minitest::Test
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new
     stop_flag = StopFlag.new
+    clock = AdvancingClock.new(Time.utc(2026, 4, 24, 0, 0, 0))
     sleeper = ->(*) { stop_flag.trigger(:sigint) }
-    runner = Load::Runner.new(workload: FakeWorkload.new, adapter_client: adapter, run_record:, clock: fake_clock, sleeper:, http: FakeHttp.new, stop_flag:)
+    runner = Load::Runner.new(
+      workload: FakeWorkload.new,
+      adapter_client: adapter,
+      run_record:,
+      clock: -> { clock.now },
+      sleeper:,
+      http: FakeHttp.new,
+      stop_flag:,
+    )
 
     runner.run
 
@@ -746,7 +755,7 @@ class RunnerTest < Minitest::Test
     end
 
     def load_plan
-      Load::LoadPlan.new(workers: 1, duration_seconds: 0.05, rate_limit: :unlimited, seed: 42)
+      Load::LoadPlan.new(workers: 1, duration_seconds: 1.0, rate_limit: :unlimited, seed: 42)
     end
   end
 
