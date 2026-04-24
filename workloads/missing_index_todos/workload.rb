@@ -12,7 +12,7 @@ module Load
         end
 
         def scale
-          Load::Scale.new(rows_per_table: 10_000_000, open_fraction: 0.002, seed: 42)
+          Load::Scale.new(rows_per_table: 500_000, open_fraction: 0.002, seed: 42)
         end
 
         def actions
