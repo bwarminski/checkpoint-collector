@@ -1468,3 +1468,17 @@ Addressed the `DO_NOT_SHIP` findings from `docs/superpowers/plans/2026-04-23-loa
 ### Deferred
 
 - P3 items remain deferred for a follow-up cleanup pass. Nothing from the P3 bucket was bundled into this round.
+
+## GSTACK REVIEW REPORT (Round 4 — 2026-04-24)
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Plan Eng Review | `/plan-eng-review` | Verify d6a31a3 addresses 2026-04-23 ship-review findings | 4 | SHIP_WITH_FIXES | 1 new P0 (R4.1 worker client sharing) + 1 P1 (R4.2 test-gap) |
+
+**VERIFIED FIXED:** P0.1 template cache seed-env digest · P0.2 rate_limiter mutex released before sleep · P0.3 Load::Client persistent lifecycle · P1.1 per-worker counters · P2.1 reporter actual elapsed interval_ms · P2.2 database_name identifier validation · P2.3 adapter-commands.jsonl secret redaction · P2.4 spec drift cluster (db:schema:load, --workload on reset-state, query_ids, schema_version, --debug-log removed) · P2.5 LoadDataset integrated into ResetState.build_template · P2.6 stale fixture-harness ABOUTMEs. Regression tests are real: `test_workers_can_sleep_concurrently_while_waiting_for_future_slots` uses real `Kernel.sleep`; `test_tracking_buffer_does_not_need_state_mutex_for_non_first_success` holds `@state_mutex` explicitly and asserts a recording thread still completes.
+
+**NEW — R4.1 (P0 ship-blocker):** `load/lib/load/runner.rb:116` constructs a single `Load::Client` and passes the same reference to all N workers at `runner.rb:121-132`. The client's `start` is idempotent (`client.rb:37-44`), so all workers share one `Net::HTTP` connection. `Net::HTTP` is not thread-safe for concurrent `request` calls — this serializes worker requests at the socket layer, partially reintroducing P0.2/P0.3 through the HTTP path. Worse: first worker through `Worker#run`'s `ensure` calls `finish`, closing the shared connection mid-run; subsequent worker requests then fall through to `client.rb:60-67` and reopen a fresh connection per request (P0.3 in the tail). **Fix:** move `Load::Client.new(base_url:, http:)` inside the `Array.new(plan.workers)` block at `runner.rb:121` so each worker owns its own client.
+
+**NEW — R4.2 (P1 test-gap):** `load/test/client_test.rb` only exercises single-threaded lifecycle (`client.get("/one"); client.get("/two")` on one instance). Nothing simulates N workers using a shared client reference concurrently, which is why R4.1 slipped through. Add a regression test alongside the R4.1 fix: spawn N threads each with their own `Load::Client`, assert `http.calls.length == N` (one Net::HTTP instance per worker). Or instrument at the runner level and assert `plan.workers` instances were constructed.
+
+**VERDICT:** SHIP_WITH_FIXES — one two-line wiring change plus a concurrent regression test gates Round 5 / re-ship. All other ship-review findings are closed.
