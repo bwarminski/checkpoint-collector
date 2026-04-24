@@ -5,31 +5,32 @@ require "fileutils"
 require_relative "test_helper"
 
 class TemplateCacheTest < Minitest::Test
-  def test_build_template_uses_schema_specific_template_name
+  def test_build_template_uses_schema_and_seed_specific_template_name
     first_connection = RecordingConnection.new
     second_connection = RecordingConnection.new
     cache = RailsAdapter::TemplateCache.new(pg: FakePgDriver.new([first_connection, second_connection]), admin_url: "postgres://postgres:postgres@localhost:5432/checkpoint_demo")
 
-    first_root = build_app_root(schema: "create_table :todos do |t|\nend\n")
-    second_root = build_app_root(schema: "create_table :todos do |t|\n  t.index [:status]\nend\n")
+    app_root = build_app_root(schema: "create_table :todos do |t|\nend\n")
 
-    cache.build_template(database_name: "checkpoint_demo", app_root: first_root)
-    cache.build_template(database_name: "checkpoint_demo", app_root: second_root)
+    cache.build_template(database_name: "checkpoint_demo", app_root:, env_pairs: { "ROWS_PER_TABLE" => "1000", "OPEN_FRACTION" => "0.2", "SEED" => "7" })
+    cache.build_template(database_name: "checkpoint_demo", app_root:, env_pairs: { "ROWS_PER_TABLE" => "10000000", "OPEN_FRACTION" => "0.002", "SEED" => "42" })
 
     refute_equal first_connection.exec_calls.first, second_connection.exec_calls.first
-    assert_match(/CREATE DATABASE checkpoint_demo_tmpl_[0-9a-f]{12} TEMPLATE checkpoint_demo/, first_connection.exec_calls.first)
-    assert_match(/CREATE DATABASE checkpoint_demo_tmpl_[0-9a-f]{12} TEMPLATE checkpoint_demo/, second_connection.exec_calls.first)
+    assert_match(/CREATE DATABASE checkpoint_demo_tmpl_[0-9a-f]{12}_[0-9a-f]{8} TEMPLATE checkpoint_demo/, first_connection.exec_calls.first)
+    assert_match(/CREATE DATABASE checkpoint_demo_tmpl_[0-9a-f]{12}_[0-9a-f]{8} TEMPLATE checkpoint_demo/, second_connection.exec_calls.first)
   end
 
-  def test_template_exists_queries_schema_specific_template_name
+  def test_template_exists_queries_schema_and_seed_specific_template_name
     connection = RecordingConnection.new
     cache = RailsAdapter::TemplateCache.new(pg: FakePgDriver.new([connection]), admin_url: "postgres://postgres:postgres@localhost:5432/checkpoint_demo")
     schema = "create_table :todos do |t|\nend\n"
     app_root = build_app_root(schema:)
 
-    cache.template_exists?(database_name: "checkpoint_demo", app_root:)
+    seed_env = { "ROWS_PER_TABLE" => "1000", "OPEN_FRACTION" => "0.2", "SEED" => "7" }
+    cache.template_exists?(database_name: "checkpoint_demo", app_root:, env_pairs: seed_env)
 
-    assert_equal ["checkpoint_demo_tmpl_#{Digest::SHA256.hexdigest(schema)[0, 12]}"], connection.exec_params_calls.first.fetch(:params)
+    seed_digest = Digest::SHA256.hexdigest(seed_env.sort.to_a.to_s)[0, 8]
+    assert_equal ["checkpoint_demo_tmpl_#{Digest::SHA256.hexdigest(schema)[0, 12]}_#{seed_digest}"], connection.exec_params_calls.first.fetch(:params)
   end
 
   private

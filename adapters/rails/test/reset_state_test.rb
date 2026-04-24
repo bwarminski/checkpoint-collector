@@ -42,6 +42,33 @@ class ResetStateTest < Minitest::Test
     assert_includes runner.argv_history, ["bin/rails", "db:drop", "db:create", "db:schema:load"]
   end
 
+  def test_reset_state_rebuilds_template_when_seed_env_changes
+    runner = FakeCommandRunner.new
+    cache = SeedAwareTemplateCache.new
+    first_command = RailsAdapter::Commands::ResetState.new(
+      app_root: "/tmp/demo",
+      seed: 7,
+      env_pairs: { "ROWS_PER_TABLE" => "1000", "OPEN_FRACTION" => "0.2" },
+      command_runner: runner,
+      template_cache: cache,
+      clock: fake_clock(0.0, 2.0, 4.0),
+    )
+    second_command = RailsAdapter::Commands::ResetState.new(
+      app_root: "/tmp/demo",
+      seed: 42,
+      env_pairs: { "ROWS_PER_TABLE" => "10000000", "OPEN_FRACTION" => "0.002" },
+      command_runner: runner,
+      template_cache: cache,
+      clock: fake_clock(10.0, 12.0, 14.0),
+    )
+
+    first_command.call
+    second_command.call
+
+    assert_equal 2, cache.build_calls
+    assert_equal 0, cache.clone_calls
+  end
+
   def test_reset_state_resets_pg_stat_statements_counters
     runner = FakeCommandRunner.new
     command = RailsAdapter::Commands::ResetState.new(
@@ -94,6 +121,28 @@ class ResetStateTest < Minitest::Test
   ensure
     previous.each do |key, value|
       value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+  end
+
+  class SeedAwareTemplateCache < FakeTemplateCache
+    def initialize
+      super(template_exists: false)
+      @templates = {}
+    end
+
+    def template_exists?(**kwargs)
+      @templates[key(kwargs)]
+    end
+
+    def build_template(**kwargs)
+      super
+      @templates[key(kwargs)] = true
+    end
+
+    private
+
+    def key(kwargs)
+      [kwargs.fetch(:database_name), kwargs.fetch(:app_root), kwargs.fetch(:env_pairs).sort]
     end
   end
 end

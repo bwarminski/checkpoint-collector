@@ -34,11 +34,11 @@ module RailsAdapter
       end
 
       def call
-        if @template_cache.template_exists?(database_name: database_name, app_root: @app_root, env_pairs: @env_pairs)
-          @template_cache.clone_template(database_name: database_name, app_root: @app_root, env_pairs: @env_pairs)
+        if @template_cache.template_exists?(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+          @template_cache.clone_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
         else
           build_template
-          @template_cache.build_template(database_name: database_name, app_root: @app_root, env_pairs: @env_pairs)
+          @template_cache.build_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
         end
 
         ensure_pg_stat_statements
@@ -59,7 +59,7 @@ module RailsAdapter
           "bin/rails",
           "runner",
           %(load Rails.root.join("db/seeds.rb").to_s),
-          env: rails_env.merge("SEED" => @seed.to_s).merge(@env_pairs),
+          env: rails_env.merge(seed_env),
           chdir: @app_root,
           command_name: "reset-state",
         )
@@ -120,6 +120,10 @@ module RailsAdapter
 
       def rails_env
         RailsAdapter::Environment.benchmark(@app_root)
+      end
+
+      def seed_env
+        @seed_env ||= @env_pairs.merge("SEED" => @seed.to_s)
       end
     end
   end

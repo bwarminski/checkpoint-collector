@@ -6,26 +6,26 @@ require "uri"
 module RailsAdapter
   class TemplateCache
     IDENTIFIER_LIMIT = 63
-    TEMPLATE_SUFFIX_LENGTH = "_tmpl_".length + 12
+    TEMPLATE_SUFFIX_LENGTH = "_tmpl_".length + 12 + 1 + 8
 
     def initialize(pg: nil, admin_url: ENV["BENCH_ADAPTER_PG_ADMIN_URL"] || ENV["DATABASE_URL"])
       @pg = pg
       @admin_url = admin_url
     end
 
-    def template_exists?(database_name:, app_root:, **)
+    def template_exists?(database_name:, app_root:, env_pairs: {}, **)
       with_connection do |connection|
-        connection.exec_params("SELECT 1 FROM pg_database WHERE datname = $1", [template_name(database_name, app_root:)]).ntuples.positive?
+        connection.exec_params("SELECT 1 FROM pg_database WHERE datname = $1", [template_name(database_name, app_root:, env_pairs:)]).ntuples.positive?
       end
     end
 
-    def build_template(database_name:, app_root:, **)
+    def build_template(database_name:, app_root:, env_pairs: {}, **)
       with_connection do |connection|
-        connection.exec("CREATE DATABASE #{template_name(database_name, app_root:)} TEMPLATE #{database_name}")
+        connection.exec("CREATE DATABASE #{template_name(database_name, app_root:, env_pairs:)} TEMPLATE #{database_name}")
       end
     end
 
-    def clone_template(database_name:, app_root:, **)
+    def clone_template(database_name:, app_root:, env_pairs: {}, **)
       with_connection do |connection|
         connection.exec_params(<<~SQL, [database_name])
           SELECT pg_terminate_backend(pid)
@@ -33,7 +33,7 @@ module RailsAdapter
           WHERE datname = $1 AND pid <> pg_backend_pid()
         SQL
         connection.exec("DROP DATABASE IF EXISTS #{database_name}")
-        connection.exec("CREATE DATABASE #{database_name} TEMPLATE #{template_name(database_name, app_root:)}")
+        connection.exec("CREATE DATABASE #{database_name} TEMPLATE #{template_name(database_name, app_root:, env_pairs:)}")
       end
     end
 
@@ -57,11 +57,12 @@ module RailsAdapter
       PG
     end
 
-    def template_name(database_name, app_root:)
+    def template_name(database_name, app_root:, env_pairs:)
       digest = schema_digest(app_root)
+      seed_digest = Digest::SHA256.hexdigest(env_pairs.sort.to_a.to_s)[0, 8]
       max_prefix_length = IDENTIFIER_LIMIT - TEMPLATE_SUFFIX_LENGTH
       prefix = database_name[0, max_prefix_length]
-      "#{prefix}_tmpl_#{digest}"
+      "#{prefix}_tmpl_#{digest}_#{seed_digest}"
     end
 
     def schema_digest(app_root)
