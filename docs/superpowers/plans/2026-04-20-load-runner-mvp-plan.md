@@ -1447,3 +1447,24 @@ None. The one remaining issue is the narrow `args` semantics residue of residual
 - workloads/missing_index_todos/test: 8 tests.
 - **All green. Zero flakes observed across 8 consecutive full-suite runs.**
 
+
+## Round 4 — Ship Review Follow-Up (2026-04-24)
+
+Addressed the `DO_NOT_SHIP` findings from `docs/superpowers/plans/2026-04-23-load-runner-ship-review.md`.
+
+### What moved
+
+- P0.2: `Load::RateLimiter` now reserves future slots under the mutex and sleeps after releasing it. Coverage now includes a wall-clock overlap test so multi-worker serialization cannot hide behind the fake sleeper.
+- P0.3: worker traffic now uses a started `Load::Client` per worker and closes it in `ensure`, so the request hot path reuses one connection instead of reconnecting for every request.
+- P0.1: `RailsAdapter::TemplateCache` now keys template databases by schema digest plus the full seed-time environment, including `SEED`, so clone hits cannot silently restore the wrong dataset.
+- P1.1: request totals moved into each worker-owned `TrackingBuffer` and are aggregated when the runner writes outcome state; the shared runner mutex is no longer on every request counter increment.
+- P2.1: `Reporter` now writes the actual elapsed `interval_ms` for the final tail flush.
+- P2.2: `TemplateCache` now rejects invalid Postgres database identifiers before interpolating them into SQL.
+- P2.3: `adapter-commands.jsonl` now redacts sensitive env-style keys and URL credentials before writing logged args or stderr.
+- P2.4: the spec now matches the implemented contract for `migrate`, `reset-state --workload`, `query_ids`, `schema_version`, and `outcome.error_code`; `--debug-log` was removed from the spec rather than implemented.
+- P2.5: `reset-state` now reuses the existing `LoadDataset` command for seed loading while preserving its explicit full-reset `db:drop` step.
+- P2.6: stale temporal wording referencing the removed fixture harness was removed from surviving docs/comments.
+
+### Deferred
+
+- P3 items remain deferred for a follow-up cleanup pass. Nothing from the P3 bucket was bundled into this round.

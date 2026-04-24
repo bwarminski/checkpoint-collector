@@ -464,6 +464,7 @@ class RunnerTest < Minitest::Test
     assert_equal 0, exit_code
     payload = run_record.writes.last
     assert_equal File.basename(run_record.run_dir), payload.fetch(:run_id)
+    assert_equal 1, payload.fetch(:schema_version)
     assert_equal "metrics-workload", payload.fetch(:workload).fetch(:name)
     assert_equal "workloads/metrics_workload.rb", payload.fetch(:workload).fetch(:file)
     assert_equal 1, payload.fetch(:workload).fetch(:actions).length

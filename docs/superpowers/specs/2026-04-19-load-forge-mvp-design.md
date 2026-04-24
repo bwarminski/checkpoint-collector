@@ -155,9 +155,9 @@ Every command:
 |---|---|---|---|
 | `describe` | — | `name`, `framework`, `runtime` | Static metadata. No side effects. |
 | `prepare` | `--app-root` | — | Idempotent. For Rails: `bundle check` only (no install). If `bundle check` fails, return error `bundle_missing` — the developer runs `bundle install` once in the app-under-test. Also verifies DB cluster reachable. |
-| `migrate` | `--app-root` | `schema_version` | `bin/rails db:create db:migrate`. |
+| `migrate` | `--app-root` | `schema_version` | `bin/rails db:create db:schema:load`. This command canonicalizes the benchmark schema from the app's checked-in schema, rather than replaying migration files. |
 | `load-dataset` | `--app-root --workload <name> --seed <n> --env KEY=VALUE [--env ...]` | `loaded_rows`, `duration_ms` | Runs `bin/rails runner 'load Rails.root.join("db/seeds.rb").to_s'` with `SEED` and all `--env` key/values propagated. `--workload` is informational. |
-| `reset-state` | `--app-root --seed <n> --env KEY=VALUE [--env ...]` | — | Full reset: `bin/rails db:drop db:create db:migrate` then the same seed invocation as `load-dataset`, then `SELECT pg_stat_statements_reset()` so per-run counters start at zero (executed via `bin/rails runner`, not direct PG). Failure path must leave no half-dropped DB. |
+| `reset-state` | `--app-root --workload <name> --seed <n> --env KEY=VALUE [--env ...]` | `query_ids` | Full reset: `bin/rails db:drop`, `bin/rails db:create db:schema:load`, then the same seed invocation as `load-dataset`, then `SELECT pg_stat_statements_reset()` so per-run counters start at zero (executed via `bin/rails runner`, not direct PG). `--workload` lets the adapter capture workload-specific canonical `query_ids` during reset. Failure path must leave no half-dropped DB. |
 | `start` | `--app-root` | `pid`, `base_url` | Spawns `bin/rails server` on a port the adapter picks. Returns immediately with the pid and resolved base URL. Does NOT `Process.detach`; the runner owns the lifecycle and will call `stop`. |
 | `stop` | `--pid <n>` | — | Terminates the process by pid (see §6.4 for full lifecycle): `SIGTERM`, poll `Process.kill(0, pid)` every 200ms up to 10s, escalate to `SIGKILL`, poll `kill(0, pid)` for another 2s. Never calls `Process.waitpid` — start and stop are separate adapter invocations, so the target is not a child of the stopping process. Idempotent: unknown pid (`Errno::ESRCH`) returns `ok: true`. |
 
@@ -220,15 +220,15 @@ Never call `Process.detach` in `start` or `Process.waitpid` in `stop`. Those pri
 
 ### 6.5 Postgres template caching (adapter-private)
 
-The Rails adapter caches a template database (`<dbname>_tmpl`) populated by the first full reset, and clones from it on subsequent resets. Not part of the contract — a purely adapter-internal capability. Strongly recommended for day one: without it, every reset takes minutes instead of seconds.
+The Rails adapter caches a template database (`<dbname>_tmpl_<schema-digest>_<seed-digest>`) populated by the first full reset, and clones from it on subsequent resets. Not part of the contract — a purely adapter-internal capability. Strongly recommended for day one: without it, every reset takes minutes instead of seconds.
 
 **Contract divergence, called out explicitly:** template operations (`CREATE DATABASE ... TEMPLATE ...`, `DROP DATABASE`) cannot be run through `bin/rails` against the current connection, and cannot target the database currently being cloned. The adapter therefore connects directly to Postgres (to the `postgres` maintenance database) as a privileged role. This is the one case where the adapter reaches Postgres outside a Rails subprocess (see §3). The connection URL comes from a dedicated env var (`BENCH_ADAPTER_PG_ADMIN_URL`) distinct from the app's `DATABASE_URL` to keep concerns separated, with a fallback to `DATABASE_URL` for local dev.
 
 Behavior:
 
-- First reset: `db:drop db:create db:migrate`, run seed, then (via admin connection) `CREATE DATABASE <dbname>_tmpl TEMPLATE <dbname>`.
-- Subsequent resets: via admin connection, terminate other sessions on `<dbname>` (`pg_terminate_backend`), `DROP DATABASE <dbname>`, `CREATE DATABASE <dbname> TEMPLATE <dbname>_tmpl`. Then run `pg_stat_statements_reset()` via `bin/rails runner`.
-- Invalidation: template is considered stale when the Rails migration version or the workload scale fields differ from what was used to build it; on mismatch, drop and rebuild the template.
+- First reset: `db:drop`, `db:create db:schema:load`, run seed, then (via admin connection) `CREATE DATABASE <dbname>_tmpl_<schema-digest>_<seed-digest> TEMPLATE <dbname>`.
+- Subsequent resets: via admin connection, terminate other sessions on `<dbname>` (`pg_terminate_backend`), `DROP DATABASE <dbname>`, `CREATE DATABASE <dbname> TEMPLATE <dbname>_tmpl_<schema-digest>_<seed-digest>`. Then run `pg_stat_statements_reset()` via `bin/rails runner`.
+- Invalidation: template is considered stale when the checked-in schema digest or the seed-time environment differs from what was used to build it; on mismatch, drop and rebuild the template.
 
 ## 7. Workload Contract (Ruby)
 
@@ -350,8 +350,7 @@ bin/load run \
   --app-root /home/bjw/db-specialist-demo \
   [--runs-dir runs/] \
   [--startup-grace-seconds 3] \
-  [--metrics-interval-seconds 5] \
-  [--debug-log path]
+  [--metrics-interval-seconds 5]
 ```
 
 `--workload` is a logical workload name. `bin/load` resolves it to `workloads/<name.tr("-", "_")>/workload.rb`, requires that file, and expects the file to register exactly one workload class into `Load::WorkloadRegistry`. The runner instantiates the registered class (no args) and reads its fields.
@@ -365,7 +364,7 @@ bin/load run \
  2. Resolve the workload name from --workload, require its file, fetch the registered class, and instantiate it.
  3. adapter.describe → capture metadata into run record.
  4. adapter.prepare
- 5. adapter.reset-state --seed <scale.seed> --env <scale fields as KEY=VALUE...>
+ 5. adapter.reset-state --workload <workload.name> --seed <scale.seed> --env <scale fields as KEY=VALUE...>
  6. adapter.start --app-root <...>
  7. base_url = response.base_url; pid = response.pid
  8. Create run record directory: runs/<UTC_ISO>-<workload-name>/
@@ -441,12 +440,6 @@ Final interval (on stop) runs the same snapshot-merge-compute-append once more s
 {"ts":"2026-04-19T14:32:05.000Z","interval_ms":5000,"actions":{"list_open_todos":{"count":4500,"error_count":2,"errors_by_class":{"Net::ReadTimeout":2},"p50_ms":12.3,"p95_ms":34.1,"p99_ms":87.2,"max_ms":204.5,"status_counts":{"200":4498,"500":0}}}}
 ```
 
-**Debug logging (off by default):** `--debug-log <path>` or `--debug-log -` (stderr) enables per-request lines written to the specified sink. Format is a single-line human-readable log:
-```
-2026-04-19T14:32:00.456Z w=2 list_open_todos GET /todos/status?status=open 200 18.2ms
-```
-Never enabled for production runs. Intended for implementor debugging and for running one-off diagnostic loads.
-
 ## 9. Run Record Layout
 
 ```
@@ -463,6 +456,7 @@ No `requests.jsonl`, no `state-dir/`, no `plans/`, no `signals.json`.
 ```json
 {
   "run_id": "2026-04-19T14-32-00Z-missing-index-todos",
+  "schema_version": 1,
   "workload": {
     "name": "missing-index-todos",
     "file": "workloads/missing_index_todos/workload.rb",
@@ -484,11 +478,13 @@ No `requests.jsonl`, no `state-dir/`, no `plans/`, no `signals.json`.
     "startup_grace_seconds": 15,
     "metrics_interval_seconds": 5
   },
+  "query_ids": ["-4089485683541066655"],
   "outcome": {
     "requests_total": 14302,
     "requests_ok": 14300,
     "requests_error": 2,
-    "aborted": false
+    "aborted": false,
+    "error_code": null
   }
 }
 ```
@@ -559,7 +555,7 @@ Behavior (ported from today's `fixtures/missing-index/validate/assert.rb`, with 
 
 1. Read `run.json` for the window (`start_ts`, `end_ts`, workload fingerprint).
 2. Connect to PG; run `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'`. Walk the JSON plan tree recursively and assert that *some* scan node on relation `todos` has `Node Type == "Seq Scan"`. Do NOT rely on the root node's shape: the Rails action may wrap the scan under a `Limit`, `Gather`, or `Sort` node depending on Rails query construction. Rejection cases to flag: any `Index Scan` / `Index Only Scan` / `Bitmap Index Scan` on `todos` (these indicate the missing index has been added).
-3. Identify the target statement by ClickHouse `queryid` fingerprint (the `pg_stat_statements.queryid` column), NOT by `SQL LIKE '%todos%status%'` text matching. The runner records the expected queryid into `run.json` at seed time by running the canonical EXPLAIN in step 2 and reading back `pg_stat_statements.queryid` for that statement's normalized form. If multiple queryids match the same normalized text (parameter-variant queries), the oracle sums `total_exec_count` across them for the window.
+3. Identify the target statement by ClickHouse `queryid` fingerprint (the `pg_stat_statements.queryid` column), NOT by `SQL LIKE '%todos%status%'` text matching. The adapter returns the expected queryid set during `reset-state`, and the runner records it into `run.json`. If multiple queryids match the same normalized text (parameter-variant queries), the oracle sums `total_exec_count` across them for the window.
 4. Poll ClickHouse for the window until `sum(total_exec_count) >= 500` for the queryid set, or timeout (default 30s past `window.end_ts`). Timeout → print `FAIL: clickhouse (saw N calls before timeout)`, exit 1.
 5. Print `PASS: explain ...` / `PASS: clickhouse ...`, exit 0. On mismatch: print `FAIL:` with observed vs expected, exit 1.
 
@@ -573,7 +569,7 @@ Not wired into the runner. Runner exits cleanly regardless. When workloads stabi
 bin/load run --workload <name> --adapter <path> --app-root <path> \
   [--runs-dir runs/] [--startup-grace-seconds 15] \
   [--readiness-path /up | --readiness-path none] \
-  [--metrics-interval-seconds 5] [--debug-log <path|->]
+  [--metrics-interval-seconds 5]
 bin/load --version
 bin/load --help
 ```

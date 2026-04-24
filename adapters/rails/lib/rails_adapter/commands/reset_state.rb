@@ -52,18 +52,21 @@ module RailsAdapter
       private
 
       def build_template
-        migrate = @command_runner.capture3("bin/rails", "db:drop", "db:create", "db:schema:load", env: rails_env, chdir: @app_root, command_name: "reset-state")
-        raise "db:drop db:create db:schema:load failed" unless migrate.success?
+        drop = @command_runner.capture3("bin/rails", "db:drop", env: rails_env, chdir: @app_root, command_name: "reset-state")
+        raise "db:drop failed" unless drop.success?
 
-        seed = @command_runner.capture3(
-          "bin/rails",
-          "runner",
-          %(load Rails.root.join("db/seeds.rb").to_s),
-          env: rails_env.merge(seed_env),
-          chdir: @app_root,
-          command_name: "reset-state",
-        )
-        raise "seed runner failed" unless seed.success?
+        migrate = RailsAdapter::Commands::Migrate.new(app_root: @app_root, command_runner: @command_runner).call
+        raise "db:create db:schema:load failed" unless migrate.fetch("ok")
+
+        load_dataset = RailsAdapter::Commands::LoadDataset.new(
+          app_root: @app_root,
+          workload: @workload,
+          seed: @seed,
+          env_pairs: @env_pairs,
+          command_runner: @command_runner,
+          clock: @clock,
+        ).call
+        raise "seed runner failed" unless load_dataset.fetch("ok")
       end
 
       def reset_pg_stat_statements

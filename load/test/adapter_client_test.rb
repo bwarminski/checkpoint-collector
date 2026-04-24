@@ -63,6 +63,33 @@ class AdapterClientTest < Minitest::Test
     assert_equal false, line.fetch(:stdout_json).fetch("ok")
   end
 
+  def test_adapter_client_redacts_secrets_from_logged_args_and_stderr
+    capture = FakeCapture3.new(
+      stdout: %({"ok":false,"command":"reset-state"}),
+      stderr: "DATABASE_URL=postgres://postgres:secret@localhost:5432/checkpoint_demo API_TOKEN=abc123",
+      exit_status: 1,
+    )
+    run_record = FakeRunRecord.new
+    client = Load::AdapterClient.new(
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+      capture3: capture,
+      run_record:,
+      clock: FakeClock.new([Time.utc(2026, 4, 24, 3, 0, 0), Time.utc(2026, 4, 24, 3, 0, 1)]),
+    )
+
+    assert_raises(Load::AdapterClient::AdapterError) do
+      client.send(:invoke, "reset-state", "--app-root", "/tmp/app", "--env", "DATABASE_URL=postgres://postgres:secret@localhost:5432/checkpoint_demo")
+    end
+
+    line = run_record.lines.first
+    refute_includes line.fetch(:stderr), "secret"
+    refute_includes line.fetch(:stderr), "abc123"
+    assert_includes line.fetch(:args), "--env"
+    assert_includes line.fetch(:args), "DATABASE_URL=[REDACTED]"
+    assert_includes line.fetch(:stderr), "DATABASE_URL=[REDACTED]"
+    assert_includes line.fetch(:stderr), "API_TOKEN=[REDACTED]"
+  end
+
   def test_describe_raises_adapter_error_on_malformed_json
     capture = FakeCapture3.new(stdout: "not json")
     client = Load::AdapterClient.new(adapter_bin: "adapters/rails/bin/bench-adapter", capture3: capture)

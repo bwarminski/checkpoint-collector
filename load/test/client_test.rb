@@ -26,6 +26,8 @@ class ClientTest < Minitest::Test
     end
 
     def finish
+      raise IOError, "HTTP session not yet started" unless @started
+
       @finished = true
     end
 
@@ -68,5 +70,18 @@ class ClientTest < Minitest::Test
     assert_equal 2, connection.requests.length
     assert_equal "/one", connection.requests.first.path
     assert_equal "/two", connection.requests.last.path
+  end
+
+  def test_finish_is_safe_after_start_raises_before_session_begins
+    connection = FakeConnection.new
+    connection.define_singleton_method(:start) do
+      raise IOError, "boom"
+    end
+    http = FakeHttp.new(connection)
+    client = Load::Client.new(base_url: "http://example.test:3000", http:)
+
+    assert_raises(IOError) { client.start }
+
+    client.finish
   end
 end

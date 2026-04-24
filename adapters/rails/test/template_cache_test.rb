@@ -33,6 +33,17 @@ class TemplateCacheTest < Minitest::Test
     assert_equal ["checkpoint_demo_tmpl_#{Digest::SHA256.hexdigest(schema)[0, 12]}_#{seed_digest}"], connection.exec_params_calls.first.fetch(:params)
   end
 
+  def test_template_cache_rejects_invalid_database_names
+    cache = RailsAdapter::TemplateCache.new(pg: FakePgDriver.new([RecordingConnection.new]), admin_url: "postgres://postgres:postgres@localhost:5432/checkpoint_demo")
+    app_root = build_app_root(schema: "create_table :todos do |t|\nend\n")
+
+    error = assert_raises(ArgumentError) do
+      cache.build_template(database_name: "bad-name;drop database postgres", app_root:, env_pairs: {})
+    end
+
+    assert_includes error.message, "invalid database name"
+  end
+
   private
 
   def build_app_root(schema:)

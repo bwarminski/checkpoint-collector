@@ -39,7 +39,8 @@ class ResetStateTest < Minitest::Test
 
     assert_equal 1, cache.build_calls
     assert_equal 1, cache.clone_calls
-    assert_includes runner.argv_history, ["bin/rails", "db:drop", "db:create", "db:schema:load"]
+    assert_includes runner.argv_history, ["bin/rails", "db:drop"]
+    assert_includes runner.argv_history, ["bin/rails", "db:create", "db:schema:load"]
   end
 
   def test_reset_state_rebuilds_template_when_seed_env_changes

@@ -37,15 +37,16 @@ module Load
     def start
       return self if @connection
 
-      @connection = build_connection
-      @connection.start
+      connection = build_connection
+      connection.start
+      @connection = connection
       self
     end
 
     def finish
       return unless @connection
 
-      @connection.finish
+      @connection.finish if !@connection.respond_to?(:started?) || @connection.started?
       @connection = nil
     end
 

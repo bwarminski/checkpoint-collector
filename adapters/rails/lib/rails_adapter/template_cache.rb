@@ -14,18 +14,21 @@ module RailsAdapter
     end
 
     def template_exists?(database_name:, app_root:, env_pairs: {}, **)
+      validate_database_name!(database_name)
       with_connection do |connection|
         connection.exec_params("SELECT 1 FROM pg_database WHERE datname = $1", [template_name(database_name, app_root:, env_pairs:)]).ntuples.positive?
       end
     end
 
     def build_template(database_name:, app_root:, env_pairs: {}, **)
+      validate_database_name!(database_name)
       with_connection do |connection|
         connection.exec("CREATE DATABASE #{template_name(database_name, app_root:, env_pairs:)} TEMPLATE #{database_name}")
       end
     end
 
     def clone_template(database_name:, app_root:, env_pairs: {}, **)
+      validate_database_name!(database_name)
       with_connection do |connection|
         connection.exec_params(<<~SQL, [database_name])
           SELECT pg_terminate_backend(pid)
@@ -73,6 +76,12 @@ module RailsAdapter
       end
 
       Digest::SHA256.file(schema_path).hexdigest[0, 12]
+    end
+
+    def validate_database_name!(database_name)
+      return if /\A[a-zA-Z_][a-zA-Z0-9_]{0,62}\z/.match?(database_name)
+
+      raise ArgumentError, "invalid database name"
     end
   end
 end

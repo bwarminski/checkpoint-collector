@@ -3,7 +3,7 @@
 
 # Missing Index Todos
 
-This workload drives `GET /todos/status?status=open` against `~/db-specialist-demo` at the same scale as the fixture harness it replaces.
+This workload drives `GET /todos/status?status=open` against `~/db-specialist-demo` with a 10M-row `todos` seed and 16 concurrent workers.
 
 ## Defaults
 

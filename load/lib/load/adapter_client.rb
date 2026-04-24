@@ -53,11 +53,11 @@ module Load
       append_adapter_command(
         ts: started_at,
         command: argv.first,
-        args: argv.drop(1),
+        args: redact_args(argv.drop(1)),
         exit_code: status.exitstatus,
         duration_ms: ((ended_at - started_at) * 1000).round,
         stdout_json:,
-        stderr: stderr.to_s,
+        stderr: redact_text(stderr.to_s),
       )
       raise AdapterError, stderr unless status.success?
 
@@ -66,17 +66,44 @@ module Load
       append_adapter_command(
         ts: started_at,
         command: argv.first,
-        args: argv.drop(1),
+        args: redact_args(argv.drop(1)),
         exit_code: status&.exitstatus,
         duration_ms: started_at && ended_at ? ((ended_at - started_at) * 1000).round : nil,
         stdout_json: nil,
-        stderr: stderr.to_s,
+        stderr: redact_text(stderr.to_s),
       )
       raise AdapterError, error.message
     end
 
     def append_adapter_command(payload)
       @run_record&.append_adapter_command(payload)
+    end
+
+    def redact_args(args)
+      args.each_slice(2).flat_map do |flag, value|
+        if flag == "--env" && value
+          [flag, redact_env_pair(value)]
+        else
+          [flag, value].compact
+        end
+      end
+    end
+
+    def redact_env_pair(value)
+      key, env_value = value.split("=", 2)
+      return value unless env_value
+      return "#{key}=[REDACTED]" if sensitive_key?(key)
+
+      "#{key}=#{redact_text(env_value)}"
+    end
+
+    def redact_text(text)
+      redacted = text.gsub(%r{(://[^:\s]+:)[^@\s]+@}, '\1[REDACTED]@')
+      redacted.gsub(/((?:\A|[\s,])(?:[A-Z0-9_]*?(?:URL|PASSWORD|TOKEN|KEY|SECRET)))=([^\s,]+)/, '\1=[REDACTED]')
+    end
+
+    def sensitive_key?(key)
+      key.match?(/(?:URL|PASSWORD|TOKEN|KEY|SECRET)\z/)
     end
   end
 end

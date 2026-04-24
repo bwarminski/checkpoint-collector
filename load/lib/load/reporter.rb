@@ -15,6 +15,7 @@ module Load
       @mutex = Mutex.new
       @state_mutex = Mutex.new
       @sleeping = false
+      @last_snapshot_ts = nil
     end
 
     def start
@@ -71,17 +72,25 @@ module Load
           end
         end
 
+        now = @clock.call
         line = {
-          ts: @clock.call,
-          interval_ms: (@interval_seconds * 1000).to_i,
+          ts: now,
+          interval_ms: snapshot_interval_ms(now),
           actions: Load::Metrics::Snapshot.build(merged),
         }
+        @last_snapshot_ts = now
         @sink << line
         line
       end
     end
 
     private
+
+    def snapshot_interval_ms(now)
+      return (@interval_seconds * 1000).to_i unless @last_snapshot_ts
+
+      ((now - @last_snapshot_ts) * 1000).round
+    end
 
     def mark_sleeping(value)
       @state_mutex.synchronize do

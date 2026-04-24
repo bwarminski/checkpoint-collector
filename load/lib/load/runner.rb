@@ -220,6 +220,7 @@ module Load
     def initial_state
       {
         run_id: File.basename(@run_record.run_dir),
+        schema_version: 1,
         workload: {
           name: @workload.name,
           file: workload_file,

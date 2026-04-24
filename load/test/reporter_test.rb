@@ -78,6 +78,20 @@ class ReporterTest < Minitest::Test
     assert_equal 1, sink.sum { |line| line.fetch(:actions).fetch(:a, {}).fetch(:count, 0) }
   end
 
+  def test_reporter_uses_elapsed_interval_for_final_tail_snapshot
+    workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
+    workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
+    sink = []
+    reporter = Load::Reporter.new(workers:, interval_seconds: 5, sink:, clock: FakeClock.new([5.0, 7.0]), sleeper: ->(*) {})
+
+    reporter.snapshot_once
+    workers.first.buffer.record_ok(action: :a, latency_ns: 3_000_000, status: 200)
+    reporter.stop
+
+    assert_equal 5000, sink.first.fetch(:interval_ms)
+    assert_equal 2000, sink.last.fetch(:interval_ms)
+  end
+
   def test_reporter_flushes_tail_data_even_if_never_started
     workers = [FakeWorker.new(Load::Metrics::Buffer.new)]
     workers.first.buffer.record_ok(action: :a, latency_ns: 2_000_000, status: 200)
