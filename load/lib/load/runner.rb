@@ -113,7 +113,6 @@ module Load
 
     def start_workers(base_url)
       plan = @workload.load_plan
-      client = Load::Client.new(base_url: base_url, http: @runtime.http)
       rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @runtime.clock, sleeper: @runtime.sleeper)
       entries = @workload.actions
       seed = plan.seed.nil? ? @workload.scale.seed : plan.seed
@@ -123,7 +122,7 @@ module Load
           worker_id: index + 1,
           selector: Load::Selector.new(entries: entries, rng: Random.new(seed + index)),
           buffer: tracking_buffer,
-          client: client,
+          client: Load::Client.new(base_url: base_url, http: @runtime.http),
           ctx: { base_url: base_url },
           rng: Random.new(seed + index),
           rate_limiter: rate_limiter,

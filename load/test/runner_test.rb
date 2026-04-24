@@ -292,6 +292,38 @@ class RunnerTest < Minitest::Test
     assert_operator run_record.metrics_lines.length, :>, 0
   end
 
+  def test_runner_builds_one_client_per_worker
+    run_record = FakeRunRecord.new
+    stop_flag = StopFlag.new
+    stop_flag.trigger(:sigterm)
+    runner = Load::Runner.new(
+      workload: MultiWorkerWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+    )
+    calls = []
+    client_singleton = Load::Client.singleton_class
+    original_new = Load::Client.method(:new)
+
+    client_singleton.send(:define_method, :new) do |*args, **kwargs|
+      calls << { args:, kwargs: }
+      original_new.call(*args, **kwargs)
+    end
+
+    runner.run
+
+    assert_equal 3, calls.length
+  ensure
+    client_singleton.send(:remove_method, :new)
+    client_singleton.send(:define_method, :new, original_new)
+  end
+
   def test_tracking_buffer_records_totals_and_pins_window_once
     run_record = FakeRunRecord.new
     runner = Load::Runner.new(
@@ -828,6 +860,24 @@ class RunnerTest < Minitest::Test
 
     def load_plan
       Load::LoadPlan.new(workers: 1, duration_seconds: 0.1, rate_limit: :unlimited, seed: 42)
+    end
+  end
+
+  class MultiWorkerWorkload < Load::Workload
+    def name
+      "multi-worker-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+    end
+
+    def actions
+      [Load::ActionEntry.new(FastAction, 1)]
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 3, duration_seconds: 0.01, rate_limit: :unlimited, seed: 42)
     end
   end
 
