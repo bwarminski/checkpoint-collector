@@ -8,8 +8,26 @@ against external apps.
 
 ```bash
 docker compose up -d --build
+make test
 make load-smoke
 ```
+
+`make test` is the local code-level verification target. It runs:
+
+- `make test-load`
+- `make test-adapters`
+- `make test-workloads`
+
+Those targets cover the load runner, the Rails adapter, and the
+`missing-index-todos` workload/oracle. The adapter suite includes the existing
+opt-in integration coverage, so the default run still reports the two expected
+skips unless you explicitly enable those integration tests.
+
+`make load-smoke` is different. It is the environment-dependent end-to-end path
+against `~/db-specialist-demo`, local Postgres, ClickHouse, and the collector
+stack. Use `make test` to verify the branch logic; use `make load-smoke` to see
+whether the current dataset, app settings, and workload shape still behave
+acceptably together.
 
 ## Load Runner
 

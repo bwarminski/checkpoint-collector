@@ -9,7 +9,7 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     workload = Load::Workloads::MissingIndexTodos::Workload.new
 
     assert_equal "missing-index-todos", workload.name
-    assert_equal Load::Scale.new(rows_per_table: 10_000_000, open_fraction: 0.002, seed: 42), workload.scale
+    assert_equal Load::Scale.new(rows_per_table: 500_000, open_fraction: 0.002, seed: 42), workload.scale
     assert_equal [Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::ListOpenTodos, 100)], workload.actions
     assert_equal Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil), workload.load_plan
   end
