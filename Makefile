@@ -1,4 +1,4 @@
-.PHONY: load-smoke test test-load test-adapters test-workloads
+.PHONY: load-smoke test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads
 
 test: test-load test-adapters test-workloads
 
@@ -7,6 +7,14 @@ test-load:
 
 test-adapters:
 	BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir["adapters/rails/test/*_test.rb"].sort.each { |path| load path }'
+
+test-adapters-fixture-integration:
+	RUN_RAILS_INTEGRATION=1 BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby adapters/rails/test/integration_test.rb --name test_prepare_migrate_load_start_and_stop_against_fixture_app
+
+test-adapters-demo-integration:
+	DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres RUN_DB_SPECIALIST_DEMO_INTEGRATION=1 DB_SPECIALIST_DEMO_PATH=/home/bjw/db-specialist-demo BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby adapters/rails/test/integration_test.rb --name test_real_db_specialist_demo_end_to_end
+
+test-adapters-integration: test-adapters-fixture-integration test-adapters-demo-integration
 
 test-workloads:
 	BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir["workloads/missing_index_todos/test/*_test.rb"].sort.each { |path| load path }'

@@ -17,11 +17,28 @@ make load-smoke
 - `make test-load`
 - `make test-adapters`
 - `make test-workloads`
+- `make test-adapters-integration` when you want the opt-in Rails integration coverage
 
 Those targets cover the load runner, the Rails adapter, and the
 `missing-index-todos` workload/oracle. The adapter suite includes the existing
 opt-in integration coverage, so the default run still reports the two expected
 skips unless you explicitly enable those integration tests.
+
+`make test-adapters-integration` runs both adapter integration cases through
+separate targets with the env each one needs:
+
+- `make test-adapters-fixture-integration`
+  - runs the fixture Rails app under `adapters/rails/test/fixtures/demo_app`
+  - exports `RUN_RAILS_INTEGRATION=1`
+- `make test-adapters-demo-integration`
+  - runs the real `~/db-specialist-demo` path
+  - exports `RUN_DB_SPECIALIST_DEMO_INTEGRATION=1`
+  - exports `DB_SPECIALIST_DEMO_PATH=/home/bjw/db-specialist-demo`
+  - exports `DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo`
+  - exports `BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres`
+
+The split matters because the fixture app is SQLite-backed while the real demo
+integration needs the Postgres benchmark URLs.
 
 `make load-smoke` is different. It is the environment-dependent end-to-end path
 against `~/db-specialist-demo`, local Postgres, ClickHouse, and the collector
