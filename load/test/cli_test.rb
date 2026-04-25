@@ -16,7 +16,7 @@ class CliTest < Minitest::Test
     end
 
     def scale
-      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+      Load::Scale.new(rows_per_table: 1, seed: 42)
     end
 
     def actions
@@ -868,9 +868,9 @@ class CliTest < Minitest::Test
                 "#{name}"
               end
 
-              def scale
-                Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
-              end
+    def scale
+      Load::Scale.new(rows_per_table: 1, seed: 42)
+    end
 
               def actions
                 [Load::ActionEntry.new(Action, 1)]
