@@ -14,8 +14,6 @@ begin
   exit Load::CLI.new(
     argv: ARGV,
     version: File.read(VERSION_PATH).strip,
-    runner_factory: nil,
-    verifier_factory: nil,
     stop_flag:,
     stdout: $stdout,
     stderr: $stderr,

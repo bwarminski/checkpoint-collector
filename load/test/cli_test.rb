@@ -52,6 +52,7 @@ class CliTest < Minitest::Test
 
     assert_equal 0, status
     assert_equal 1, factory.calls.length
+    assert_equal :finite, factory.calls.first.fetch(:mode)
     assert_equal "fixture-workload", factory.calls.first.fetch(:workload).name
     assert_equal "fake-adapter", factory.calls.first.fetch(:adapter_bin)
     assert_equal "/tmp/demo", factory.calls.first.fetch(:app_root)
@@ -86,6 +87,56 @@ class CliTest < Minitest::Test
     assert_equal 0, cli.run
     assert_equal 1, verifier_calls.length
     assert_equal "missing-index-todos", verifier_calls.first.fetch(:workload_name)
+  end
+
+  def test_cli_runs_verify_fixture_command_with_runner_only_flag_rejected
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    cli = Load::CLI.new(
+      argv: [
+        "verify-fixture",
+        "--workload",
+        "missing-index-todos",
+        "--adapter",
+        "adapters/rails/bin/bench-adapter",
+        "--app-root",
+        "/tmp/demo",
+        "--runs-dir",
+        "runs",
+      ],
+      version: "0.3.0",
+      stdout:,
+      stderr:,
+    )
+
+    assert_equal Load::ExitCodes::USAGE_ERROR, cli.run
+    assert_includes stderr.string, "--runs-dir"
+    assert_includes stderr.string, "Usage: bin/load"
+  end
+
+  def test_cli_runs_verify_fixture_command_without_factory_exits_usage_error
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    cli = Load::CLI.new(
+      argv: [
+        "verify-fixture",
+        "--workload",
+        "missing-index-todos",
+        "--adapter",
+        "adapters/rails/bin/bench-adapter",
+        "--app-root",
+        "/tmp/demo",
+      ],
+      version: "0.3.0",
+      stdout:,
+      stderr:,
+    )
+
+    assert_equal Load::ExitCodes::USAGE_ERROR, cli.run
+    assert_includes stderr.string, "verify-fixture"
+    assert_includes stderr.string, "Usage: bin/load"
   end
 
   def test_cli_runs_soak_command
