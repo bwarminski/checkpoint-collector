@@ -60,6 +60,55 @@ class CliTest < Minitest::Test
     assert_equal 1, factory.runners.first.run_calls
   end
 
+  def test_default_runner_factory_builds_a_fixture_verifier_for_finite_runs
+    cli = Load::CLI.new(
+      argv: [],
+      version: "0.3.0",
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    )
+
+    original_database_url = ENV["DATABASE_URL"]
+    ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
+
+    verifier_factory = cli.send(:default_verifier_factory)
+    verifier = verifier_factory.call(
+      workload_name: "missing-index-todos",
+      adapter_bin: "adapters/rails/bin/bench-adapter",
+      app_root: "/tmp/demo",
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    )
+
+    assert_instance_of Load::FixtureVerifier, verifier
+    assert_equal "missing-index-todos", verifier.instance_variable_get(:@workload_name)
+
+    captured_runner_kwargs = nil
+    Load::Runner.stub(:new, ->(**kwargs) do
+      captured_runner_kwargs = kwargs
+      Object.new
+    end) do
+      cli.send(:default_runner_factory).call(
+        workload: FixtureWorkload.new,
+        mode: :finite,
+        adapter_bin: "adapters/rails/bin/bench-adapter",
+        app_root: "/tmp/demo",
+        runs_dir: Dir.mktmpdir,
+        readiness_path: "/up",
+        startup_grace_seconds: 15.0,
+        metrics_interval_seconds: 5.0,
+        stop_flag: Load::Runner::InternalStopFlag.new,
+        stdout: StringIO.new,
+        stderr: StringIO.new,
+      )
+    end
+
+    assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
+    assert_equal "fixture-workload", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
+  ensure
+    ENV["DATABASE_URL"] = original_database_url
+  end
+
   def test_cli_runs_verify_fixture_command
     verifier_calls = []
     verifier = Object.new
@@ -225,19 +274,21 @@ class CliTest < Minitest::Test
   end
 
   def test_bin_load_run_dispatches_into_cli
-    _stdout, stderr, status = capture_bin_load(
-      "run",
-      "--workload",
-      "missing-index-todos",
-      "--adapter",
-      "/nonexistent-adapter",
-      "--app-root",
-      "/tmp/demo",
-    )
+    with_database_url do
+      _stdout, stderr, status = capture_bin_load(
+        "run",
+        "--workload",
+        "missing-index-todos",
+        "--adapter",
+        "/nonexistent-adapter",
+        "--app-root",
+        "/tmp/demo",
+      )
 
-    refute status.success?
-    refute_includes stderr, "Usage: bin/load"
-    assert_includes stderr, "/nonexistent-adapter"
+      refute status.success?
+      refute_includes stderr, "Usage: bin/load"
+      assert_includes stderr, "/nonexistent-adapter"
+    end
   end
 
   def test_run_command_exits_zero_on_successful_run
@@ -319,40 +370,42 @@ class CliTest < Minitest::Test
     assert_equal 1, factory.runners.first.run_calls
   end
 
-  def test_bin_load_handles_sigterm_and_marks_run_aborted
-    Dir.mktmpdir do |dir|
-      runs_dir = File.join(dir, "runs")
-      stdout_path = File.join(dir, "stdout.log")
-      stderr_path = File.join(dir, "stderr.log")
-      with_http_server do |port|
-        adapter_path = write_fake_adapter(dir, port:)
-        pid = Process.spawn(
-          RbConfig.ruby,
-          bin_load_path,
-          "run",
-          "--workload",
-          "missing-index-todos",
-          "--adapter",
-          adapter_path,
-          "--app-root",
-          dir,
-          "--runs-dir",
-          runs_dir,
-          "--readiness-path",
-          "none",
-          "--startup-grace-seconds",
-          "0",
-          out: stdout_path,
-          err: stderr_path,
-        )
+  def test_bin_load_handles_sigterm_and_marks_soak_run_aborted
+    with_database_url do
+      Dir.mktmpdir do |dir|
+        runs_dir = File.join(dir, "runs")
+        stdout_path = File.join(dir, "stdout.log")
+        stderr_path = File.join(dir, "stderr.log")
+        with_http_server do |port|
+          adapter_path = write_fake_adapter(dir, port:)
+          pid = Process.spawn(
+            RbConfig.ruby,
+            bin_load_path,
+            "soak",
+            "--workload",
+            "missing-index-todos",
+            "--adapter",
+            adapter_path,
+            "--app-root",
+            dir,
+            "--runs-dir",
+            runs_dir,
+            "--readiness-path",
+            "none",
+            "--startup-grace-seconds",
+            "0",
+            out: stdout_path,
+            err: stderr_path,
+          )
 
-        run_path = wait_for_run_start(runs_dir)
-        Process.kill("TERM", pid)
-        _pid, status = Process.wait2(pid)
+          run_path = wait_for_run_start(runs_dir)
+          Process.kill("TERM", pid)
+          _pid, status = Process.wait2(pid)
 
-        assert_equal 0, status.exitstatus
-        payload = JSON.parse(File.read(run_path))
-        assert_equal true, payload.fetch("outcome").fetch("aborted")
+          assert_equal 0, status.exitstatus
+          payload = JSON.parse(File.read(run_path))
+          assert_equal true, payload.fetch("outcome").fetch("aborted")
+        end
       end
     end
   end
@@ -445,6 +498,14 @@ class CliTest < Minitest::Test
     server&.close
     thread&.join(1) || thread&.kill
     stop_reader&.close
+  end
+
+  def with_database_url
+    original_database_url = ENV["DATABASE_URL"]
+    ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
+    yield
+  ensure
+    ENV["DATABASE_URL"] = original_database_url
   end
 
   def run_bin_load(*argv, runner_factory: FakeRunnerFactory.new(exit_code: 0))

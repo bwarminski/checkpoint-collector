@@ -10,8 +10,8 @@ module Load
     def initialize(argv:, version:, runner_factory: nil, verifier_factory: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
       @argv = argv.dup
       @version = version
-      @runner_factory = runner_factory || default_runner_factory
       @verifier_factory = verifier_factory || default_verifier_factory
+      @runner_factory = runner_factory || default_runner_factory
       @stop_flag = stop_flag || Load::Runner::InternalStopFlag.new
       @stdout = stdout
       @stderr = stderr
@@ -83,6 +83,13 @@ module Load
         run_dir = File.join(runs_dir, "#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}-#{workload.name}")
         run_record = Load::RunRecord.new(run_dir:)
         adapter_client = Load::AdapterClient.new(adapter_bin:, run_record:)
+        verifier = @verifier_factory.call(
+          workload_name: workload.name,
+          adapter_bin:,
+          app_root:,
+          stdout:,
+          stderr:,
+        ) if mode == :finite
         Load::Runner.new(
           workload:,
           adapter_client:,
@@ -96,15 +103,22 @@ module Load
           app_root:,
           adapter_bin:,
           stop_flag:,
+          verifier:,
         )
       end
     end
 
     def default_verifier_factory
-      lambda do |**_kwargs|
-        lambda do
-          raise ArgumentError, "verify-fixture is not configured"
-        end
+      lambda do |workload_name:, adapter_bin:, app_root:, stdout:, stderr:|
+        Load::FixtureVerifier.new(
+          workload_name:,
+          adapter_bin:,
+          app_root:,
+          stdout:,
+          stderr:,
+          database_url: ENV["DATABASE_URL"],
+          pg: PG,
+        )
       end
     end
 
