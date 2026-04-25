@@ -170,9 +170,9 @@ class RunnerTest < Minitest::Test
     BarrierAction.ready_queue = workers_ready
     sampler = FakeInvariantSampler.new(
       [
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
       ],
       first_sample_barrier: workers_ready,
     )
@@ -197,9 +197,9 @@ class RunnerTest < Minitest::Test
     BarrierAction.ready_queue = workers_ready
     sampler = FakeInvariantSampler.new(
       [
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
       ],
       first_sample_barrier: workers_ready,
     )
@@ -223,9 +223,9 @@ class RunnerTest < Minitest::Test
     started = Queue.new
     release = Queue.new
     samples = [
-      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
     ]
     sample_index = 0
     sampler = Object.new
@@ -359,9 +359,9 @@ class RunnerTest < Minitest::Test
   def test_runner_records_invariant_breach_before_first_successful_request
     sampler = FakeInvariantSampler.new(
       [
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
       ],
     )
     run_record = FakeRunRecord.new
@@ -394,11 +394,11 @@ class RunnerTest < Minitest::Test
     BarrierAction.ready_queue = workers_ready
     sampler = FakeInvariantSampler.new(
       [
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
       ],
       first_sample_barrier: workers_ready,
     )
@@ -478,6 +478,49 @@ class RunnerTest < Minitest::Test
     assert_equal 1, thread.join_calls
   end
 
+  def test_invariant_check_reports_min_and_max_breaches
+    check = Load::Runner::InvariantCheck.new("total_count", 250, 300, 200)
+
+    assert_equal [
+      "total_count 250 is below min 300",
+      "total_count 250 is above max 200",
+    ], check.breaches
+    assert_equal true, check.breach?
+  end
+
+  def test_invariant_check_with_nil_min_and_max_never_breaches
+    check = Load::Runner::InvariantCheck.new("total_count", 250, nil, nil)
+
+    assert_equal [], check.breaches
+    assert_equal false, check.breach?
+  end
+
+  def test_invariant_check_actual_equal_to_min_does_not_breach
+    check = Load::Runner::InvariantCheck.new("total_count", 250, 250, 300)
+
+    assert_equal [], check.breaches
+  end
+
+  def test_invariant_sample_with_empty_checks_is_healthy
+    sample = Load::Runner::InvariantSample.new([])
+
+    assert_equal true, sample.healthy?
+    assert_equal false, sample.breach?
+  end
+
+  def test_invariant_sample_aggregates_check_records_for_warning_and_run_json
+    sample = Load::Runner::InvariantSample.new(
+      [
+        Load::Runner::InvariantCheck.new("open_count", 100, 300, nil),
+        Load::Runner::InvariantCheck.new("total_count", 1000, 800, 1200),
+      ],
+    )
+
+    assert_equal true, sample.breach?
+    assert_equal 2, sample.to_warning.fetch(:checks).length
+    assert_equal 2, sample.to_record(sampled_at: Time.utc(2026, 4, 25, 0, 0, 0)).fetch(:checks).length
+  end
+
   def test_invariant_sampler_uses_isolated_pg_connection
     pg = FakePg.new(
       open_count: 35_000,
@@ -530,8 +573,8 @@ class RunnerTest < Minitest::Test
     sampler = PersistedSamplesInvariantSampler.new(
       stop_flag:,
       samples: [
-        Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-        Load::Runner::InvariantSample.new(open_count: 20_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        invariant_sample(open_count: 20_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
       ],
     )
     runner = Load::Runner.new(
@@ -1060,7 +1103,7 @@ class RunnerTest < Minitest::Test
     assert_equal 0, exit_code
     payload = run_record.writes.last
     assert_equal File.basename(run_record.run_dir), payload.fetch(:run_id)
-    assert_equal 1, payload.fetch(:schema_version)
+    assert_equal 2, payload.fetch(:schema_version)
     assert_equal "metrics-workload", payload.fetch(:workload).fetch(:name)
     assert_equal "workloads/metrics_workload.rb", payload.fetch(:workload).fetch(:file)
     assert_equal 1, payload.fetch(:workload).fetch(:actions).length
@@ -1079,10 +1122,39 @@ class RunnerTest < Minitest::Test
     assert_equal ["metrics-workload"], adapter.reset_state_workloads
   end
 
+  def test_runner_initial_state_uses_schema_version_2
+    run_record = FakeRunRecord.new
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+    )
+
+    assert_equal 2, runner.send(:initial_state).fetch(:schema_version)
+  end
+
+  def test_workload_invariant_sampler_defaults_to_nil
+    assert_nil Load::Workload.new.invariant_sampler(database_url: "postgres://example.test/db", pg: Object.new)
+  end
+
   private
 
   def fake_clock
     -> { Time.now.utc }
+  end
+
+  def invariant_sample(open_count:, total_count:, open_floor:, total_floor:, total_ceiling:)
+    Load::Runner::InvariantSample.new(
+      [
+        Load::Runner::InvariantCheck.new("open_count", open_count, open_floor, nil),
+        Load::Runner::InvariantCheck.new("total_count", total_count, total_floor, total_ceiling),
+      ],
+    )
   end
 
   def build_continuous_runner(run_record:, stop_flag: Load::Runner::InternalStopFlag.new, invariant_sampler: :default_sampler, invariant_policy: :enforce, stderr: StringIO.new, database_url: nil)
@@ -1661,7 +1733,12 @@ class RunnerTest < Minitest::Test
       @mutex.synchronize do
         barrier = @first_sample_barrier if @first_sample
         @first_sample = false
-        sample = @samples.shift || Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000)
+        sample = @samples.shift || Load::Runner::InvariantSample.new(
+          [
+            Load::Runner::InvariantCheck.new("open_count", 35_000, 30_000, nil),
+            Load::Runner::InvariantCheck.new("total_count", 100_000, 80_000, 200_000),
+          ],
+        )
         @drained << true if @samples.empty?
       end
 
@@ -1695,7 +1772,12 @@ class RunnerTest < Minitest::Test
 
     def call
       @call_times << @clock.now
-      Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000)
+      Load::Runner::InvariantSample.new(
+        [
+          Load::Runner::InvariantCheck.new("open_count", 35_000, 30_000, nil),
+          Load::Runner::InvariantCheck.new("total_count", 100_000, 80_000, 200_000),
+        ],
+      )
     end
   end
 

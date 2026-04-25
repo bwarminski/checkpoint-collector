@@ -22,6 +22,13 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     assert_equal Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil), workload.load_plan
   end
 
+  def test_workload_builds_a_missing_index_invariant_sampler
+    workload = Load::Workloads::MissingIndexTodos::Workload.new
+    sampler = workload.invariant_sampler(database_url: "postgres://example.test/checkpoint", pg: Object.new)
+
+    assert_instance_of Load::Workloads::MissingIndexTodos::InvariantSampler, sampler
+  end
+
   def test_list_open_todos_gets_open_status_endpoint
     response = Object.new
     client = FakeClient.new(response)

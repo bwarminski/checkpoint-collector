@@ -17,5 +17,9 @@ module Load
     def load_plan
       raise NotImplementedError
     end
+
+    def invariant_sampler(database_url:, pg:)
+      nil
+    end
   end
 end

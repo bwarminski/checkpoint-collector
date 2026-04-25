@@ -49,13 +49,26 @@ module Load
       end
     end
 
-    InvariantSample = Data.define(:open_count, :total_count, :open_floor, :total_floor, :total_ceiling) do
+    InvariantCheck = Data.define(:name, :actual, :min, :max) do
       def breaches
         [].tap do |messages|
-          messages << "open_count #{open_count} is below open_floor #{open_floor}" if open_count < open_floor
-          messages << "total_count #{total_count} is below total_floor #{total_floor}" if total_count < total_floor
-          messages << "total_count #{total_count} is above total_ceiling #{total_ceiling}" if total_count > total_ceiling
+          messages << "#{name} #{actual} is below min #{min}" if !min.nil? && actual < min
+          messages << "#{name} #{actual} is above max #{max}" if !max.nil? && actual > max
         end
+      end
+
+      def breach?
+        !breaches.empty?
+      end
+
+      def to_record
+        { name:, actual:, min:, max:, breach: breach?, breaches: }
+      end
+    end
+
+    InvariantSample = Data.define(:checks) do
+      def breaches
+        checks.flat_map(&:breaches)
       end
 
       def breach?
@@ -67,28 +80,11 @@ module Load
       end
 
       def to_warning
-        {
-          type: "invariant_breach",
-          message: breaches.join("; "),
-          open_count:,
-          total_count:,
-          open_floor:,
-          total_floor:,
-          total_ceiling:,
-        }
+        { type: "invariant_breach", message: breaches.join("; "), checks: checks.map(&:to_record) }
       end
 
       def to_record(sampled_at:)
-        {
-          sampled_at:,
-          open_count:,
-          total_count:,
-          open_floor:,
-          total_floor:,
-          total_ceiling:,
-          breach: breach?,
-          breaches:,
-        }
+        { sampled_at:, checks: checks.map(&:to_record), breach: breach?, breaches: }
       end
     end
 
@@ -111,11 +107,10 @@ module Load
             open_count = txn.exec(OPEN_COUNT_SQL).first.fetch("count").to_i
             total_count = txn.exec(TOTAL_COUNT_SQL).first.fetch("count").to_i
             InvariantSample.new(
-              open_count:,
-              total_count:,
-              open_floor: @open_floor,
-              total_floor: @total_floor,
-              total_ceiling: @total_ceiling,
+              [
+                InvariantCheck.new("open_count", open_count, @open_floor, nil),
+                InvariantCheck.new("total_count", total_count, @total_floor, @total_ceiling),
+              ],
             )
           end
         end
@@ -451,7 +446,7 @@ module Load
     def initial_state
       {
         run_id: File.basename(@run_record.run_dir),
-        schema_version: 1,
+        schema_version: 2,
         workload: {
           name: @workload.name,
           file: workload_file,
