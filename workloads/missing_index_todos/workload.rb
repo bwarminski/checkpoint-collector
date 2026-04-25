@@ -28,7 +28,7 @@ module Load
             Load::ActionEntry.new(Actions::CreateTodo, 7),
             Load::ActionEntry.new(Actions::CloseTodo, 7),
             Load::ActionEntry.new(Actions::DeleteCompletedTodos, 3),
-            Load::ActionEntry.new(Actions::FetchCounts, 6),
+            Load::ActionEntry.new(Actions::FetchCounts, 2),
             Load::ActionEntry.new(Actions::SearchTodos, 3),
           ]
         end

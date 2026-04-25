@@ -145,15 +145,17 @@ The workload remains named `missing-index-todos`, but the action mix becomes mix
 
 ### 6.1 Default action mix
 
-Recommended initial weights:
+Verified default weights:
 
-- 60-70% list open todos
-- 10-15% list recent pages of all todos
-- 5-10% create todo
-- 5-10% close todo
-- 2-5% delete completed
-- 5-10% fetch counts
-- 2-5% text search
+- `68` list open todos
+- `12` list recent pages of all todos
+- `7` create todo
+- `7` close todo
+- `3` delete completed
+- `2` fetch counts
+- `3` text search
+
+These are relative weights, not percentages. The operative contract is the resulting traffic shape and the §8 dominance margin, not a requirement that the weights sum to 100.
 
 The key requirement is not the exact percentages. It is that:
 

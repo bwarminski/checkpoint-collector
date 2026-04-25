@@ -76,8 +76,8 @@ class MissingIndexTodosOracleTest < Minitest::Test
     pg = FakePg.new(
       explain_rows,
       {
-        [%(SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1), [%(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1)]] => [{ "queryid" => "111" }],
-        [%(SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1), [%(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open')]] => [{ "queryid" => "222" }],
+        [%(SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1), [%(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $2 OFFSET $3)]] => [{ "queryid" => "111" }],
+        [%(SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1), [%(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open' ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT 50 OFFSET 0)]] => [{ "queryid" => "222" }],
       },
     )
     observed_queryids = nil

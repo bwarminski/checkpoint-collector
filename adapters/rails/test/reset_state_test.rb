@@ -110,6 +110,14 @@ class ResetStateTest < Minitest::Test
     assert_equal ["111", "222"], result.fetch("query_ids")
   end
 
+  def test_reset_state_query_id_script_matches_open_todos_api_query_shape
+    script = RailsAdapter::Commands::ResetState::QUERY_IDS_SCRIPT.fetch("missing-index-todos")
+
+    assert_includes script, %(Todo.ordered_by_created_desc.with_status("open").page(1, 50).load)
+    assert_includes script, %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $2 OFFSET $3)
+    assert_includes script, %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open' ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT 50 OFFSET 0)
+  end
+
   private
 
   def with_env(overrides)

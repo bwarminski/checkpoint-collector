@@ -16,7 +16,7 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::CreateTodo, 7),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::CloseTodo, 7),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::DeleteCompletedTodos, 3),
-      Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::FetchCounts, 6),
+      Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::FetchCounts, 2),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::SearchTodos, 3),
     ], workload.actions
     assert_equal Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil), workload.load_plan

@@ -9,11 +9,11 @@ module RailsAdapter
       QUERY_IDS_SCRIPT = {
         "missing-index-todos" => <<~RUBY.strip,
           require "json"
-          Todo.where(status: "open").load
+          Todo.ordered_by_created_desc.with_status("open").page(1, 50).load
           connection = ActiveRecord::Base.connection
           query_ids = [
-            %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1),
-            %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open'),
+            %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $2 OFFSET $3),
+            %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open' ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT 50 OFFSET 0),
           ].flat_map do |query_text|
             connection.exec_query(
               "SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = \#{connection.quote(query_text)}"

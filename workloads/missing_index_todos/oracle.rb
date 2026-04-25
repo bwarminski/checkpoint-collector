@@ -17,8 +17,8 @@ module Load
         CLICKHOUSE_TOPN_LIMIT = 10
         EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'"
         QUERY_TEXT_CANDIDATES = [
-          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1),
-          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open'),
+          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $2 OFFSET $3),
+          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open' ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT 50 OFFSET 0),
         ].freeze
 
         class Failure < StandardError
