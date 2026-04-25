@@ -151,6 +151,15 @@ class RunnerTest < Minitest::Test
     BarrierAction.reset!
   end
 
+  def test_internal_stop_flag_preserves_first_reason
+    stop_flag = Load::Runner::InternalStopFlag.new
+
+    stop_flag.trigger(:sigterm)
+    stop_flag.trigger(:invariant_breach)
+
+    assert_equal :sigterm, stop_flag.reason
+  end
+
   def test_runner_aborts_after_three_consecutive_invariant_breaches
     workers_ready = Queue.new
     BarrierAction.reset!

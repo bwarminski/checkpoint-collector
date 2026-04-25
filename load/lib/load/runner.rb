@@ -603,7 +603,7 @@ module Load
       end
 
       def trigger(reason)
-        @reason = reason
+        @reason ||= reason
       end
 
       def call
