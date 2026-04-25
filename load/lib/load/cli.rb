@@ -5,12 +5,13 @@ require "tmpdir"
 
 module Load
   class CLI
-    USAGE = "Usage: bin/load run --workload NAME --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5]".freeze
+    USAGE = "Usage: bin/load run|soak|verify-fixture --workload NAME --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5]".freeze
 
-    def initialize(argv:, version:, runner: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
+    def initialize(argv:, version:, runner_factory: nil, verifier_factory: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
       @argv = argv.dup
       @version = version
-      @runner = runner || default_runner
+      @runner_factory = runner_factory || default_runner_factory
+      @verifier_factory = verifier_factory || default_verifier_factory
       @stop_flag = stop_flag || Load::Runner::InternalStopFlag.new
       @stdout = stdout
       @stderr = stderr
@@ -21,7 +22,11 @@ module Load
 
       case command
       when "run"
-        run_command
+        run_command(mode: :finite)
+      when "soak"
+        run_command(mode: :continuous)
+      when "verify-fixture"
+        verify_fixture_command
       when "--help", "-h", nil
         @stdout.puts(USAGE)
         Load::ExitCodes::SUCCESS
@@ -42,11 +47,12 @@ module Load
 
     private
 
-    def run_command
+    def run_command(mode:)
       options = parse_options
       workload = load_workload(options.fetch(:workload))
-      runner = @runner.call(
+      runner = @runner_factory.call(
         workload: workload,
+        mode: mode,
         adapter_bin: options.fetch(:adapter_bin),
         app_root: options.fetch(:app_root),
         runs_dir: options.fetch(:runs_dir),
@@ -60,8 +66,20 @@ module Load
       runner.run
     end
 
-    def default_runner
-      lambda do |workload:, adapter_bin:, app_root:, runs_dir:, readiness_path:, startup_grace_seconds:, metrics_interval_seconds:, stop_flag:, stdout:, stderr:|
+    def verify_fixture_command
+      options = parse_options
+      verifier = @verifier_factory.call(
+        workload_name: options.fetch(:workload),
+        adapter_bin: options.fetch(:adapter_bin),
+        app_root: options.fetch(:app_root),
+        stdout: @stdout,
+        stderr: @stderr,
+      )
+      verifier.call
+    end
+
+    def default_runner_factory
+      lambda do |workload:, adapter_bin:, app_root:, runs_dir:, readiness_path:, startup_grace_seconds:, metrics_interval_seconds:, stop_flag:, stdout:, stderr:, mode:|
         run_dir = File.join(runs_dir, "#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}-#{workload.name}")
         run_record = Load::RunRecord.new(run_dir:)
         adapter_client = Load::AdapterClient.new(adapter_bin:, run_record:)
@@ -79,6 +97,12 @@ module Load
           adapter_bin:,
           stop_flag:,
         )
+      end
+    end
+
+    def default_verifier_factory
+      lambda do |**_kwargs|
+        raise NotImplementedError, "verify-fixture is not configured"
       end
     end
 

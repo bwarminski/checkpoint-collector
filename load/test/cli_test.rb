@@ -47,7 +47,7 @@ class CliTest < Minitest::Test
       "fake-adapter",
       "--app-root",
       "/tmp/demo",
-      runner: factory,
+      runner_factory: factory,
     )
 
     assert_equal 0, status
@@ -57,6 +57,64 @@ class CliTest < Minitest::Test
     assert_equal "/tmp/demo", factory.calls.first.fetch(:app_root)
     assert_equal 5.0, factory.calls.first.fetch(:metrics_interval_seconds)
     assert_equal 1, factory.runners.first.run_calls
+  end
+
+  def test_cli_runs_verify_fixture_command
+    verifier_calls = []
+    verifier = Object.new
+    verifier.define_singleton_method(:call) { 0 }
+
+    cli = Load::CLI.new(
+      argv: [
+        "verify-fixture",
+        "--workload",
+        "missing-index-todos",
+        "--adapter",
+        "adapters/rails/bin/bench-adapter",
+        "--app-root",
+        "/tmp/demo",
+      ],
+      version: "0.3.0",
+      verifier_factory: ->(**kwargs) do
+        verifier_calls << kwargs
+        verifier
+      end,
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    )
+
+    assert_equal 0, cli.run
+    assert_equal 1, verifier_calls.length
+    assert_equal "missing-index-todos", verifier_calls.first.fetch(:workload_name)
+  end
+
+  def test_cli_runs_soak_command
+    runner_calls = []
+    runner = Object.new
+    runner.define_singleton_method(:run) { Load::ExitCodes::SUCCESS }
+
+    cli = Load::CLI.new(
+      argv: [
+        "soak",
+        "--workload",
+        "missing-index-todos",
+        "--adapter",
+        "adapters/rails/bin/bench-adapter",
+        "--app-root",
+        "/tmp/demo",
+      ],
+      version: "0.3.0",
+      runner_factory: ->(**kwargs) do
+        runner_calls << kwargs
+        runner
+      end,
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    )
+
+    assert_equal Load::ExitCodes::SUCCESS, cli.run
+    assert_equal 1, runner_calls.length
+    assert_equal :continuous, runner_calls.first.fetch(:mode)
   end
 
   def test_run_command_passes_metrics_interval_override
@@ -72,7 +130,7 @@ class CliTest < Minitest::Test
       "/tmp/demo",
       "--metrics-interval-seconds",
       "2.5",
-      runner: factory,
+      runner_factory: factory,
     )
 
     assert_equal 0, status
@@ -92,7 +150,7 @@ class CliTest < Minitest::Test
       "/tmp/demo",
       "--readiness-path",
       "none",
-      runner: factory,
+      runner_factory: factory,
     )
 
     assert_equal 0, status
@@ -141,7 +199,7 @@ class CliTest < Minitest::Test
       "fake-adapter",
       "--app-root",
       "/tmp/demo",
-      runner: factory,
+      runner_factory: factory,
     )
 
     assert_equal 0, status
@@ -158,7 +216,7 @@ class CliTest < Minitest::Test
       "fake-adapter",
       "--app-root",
       "/tmp/demo",
-      runner: factory,
+      runner_factory: factory,
     )
 
     assert_equal 1, status
@@ -203,7 +261,7 @@ class CliTest < Minitest::Test
       "fake-adapter",
       "--app-root",
       "/tmp/demo",
-      runner: factory,
+      runner_factory: factory,
     )
 
     assert_equal 3, status
@@ -338,11 +396,11 @@ class CliTest < Minitest::Test
     stop_reader&.close
   end
 
-  def run_bin_load(*argv, runner: FakeRunnerFactory.new(exit_code: 0))
+  def run_bin_load(*argv, runner_factory: FakeRunnerFactory.new(exit_code: 0))
     Load::CLI.new(
       argv:,
       version: "test-version",
-      runner:,
+      runner_factory:,
       stdout: StringIO.new,
       stderr: StringIO.new,
     ).run
