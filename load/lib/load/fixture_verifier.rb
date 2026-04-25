@@ -8,6 +8,7 @@ module Load
     VerificationError = Class.new(StandardError)
 
     INDEX_SCAN_NODE_TYPES = ["Index Scan", "Index Only Scan", "Bitmap Index Scan"].freeze
+    SEARCH_PLAN_STABLE_KEYS = ["Node Type", "Relation Name", "Sort Key", "Filter", "Plans"].freeze
     COUNTS_PATH = "/api/todos/counts".freeze
     MISSING_INDEX_PATH = "/api/todos?status=open".freeze
     SEARCH_PATH = "/api/todos/search?q=foo".freeze
@@ -80,7 +81,7 @@ module Load
     def verify_search_rewrite
       plan = @explain_reader.call(SEARCH_SQL)
       reference_plan = @search_reference_reader.call
-      unless plan_matches_reference?(actual: plan, reference: reference_plan)
+      unless search_plan_matches_reference?(actual: plan, reference: reference_plan)
         raise VerificationError, "fixture verification failed for #{SEARCH_PATH}: search explain tree drifted from fixtures/mixed-todo-app/search-explain.json"
       end
 
@@ -109,6 +110,14 @@ module Load
       end
     end
 
+    def search_plan_matches_reference?(actual:, reference:)
+      SEARCH_PLAN_STABLE_KEYS.all? do |key|
+        next true unless reference.key?(key)
+
+        actual.key?(key) && search_plan_values_match_reference?(actual.fetch(key), reference.fetch(key))
+      end
+    end
+
     def values_match_reference?(actual, reference)
       case reference
       when Hash
@@ -118,6 +127,21 @@ module Load
           actual.length >= reference.length &&
           reference.each_with_index.all? do |child_reference, index|
             values_match_reference?(actual.fetch(index), child_reference)
+          end
+      else
+        actual == reference
+      end
+    end
+
+    def search_plan_values_match_reference?(actual, reference)
+      case reference
+      when Hash
+        actual.is_a?(Hash) && search_plan_matches_reference?(actual:, reference:)
+      when Array
+        actual.is_a?(Array) &&
+          actual.length >= reference.length &&
+          reference.each_with_index.all? do |child_reference, index|
+            search_plan_values_match_reference?(actual.fetch(index), child_reference)
           end
       else
         actual == reference

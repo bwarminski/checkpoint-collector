@@ -150,6 +150,18 @@ class FixtureVerifierTest < Minitest::Test
     assert_includes error.message, "search"
   end
 
+  def test_verifier_allows_search_plan_when_only_volatile_fields_drift
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?("status = 'open'") ? missing_index_plan : search_plan_with_volatile_drift
+      end,
+    )
+
+    result = verifier.call(base_url: "http://app.test")
+
+    assert_equal "search_rewrite", result.fetch(:checks).last.fetch(:name)
+  end
+
   private
 
   def build_verifier(explain_reader: nil, counts_calls_reader: nil, counts_body: counts_body_for_users(2))
@@ -203,6 +215,46 @@ class FixtureVerifierTest < Minitest::Test
               "Node Type" => "Seq Scan",
               "Relation Name" => "todos",
               "Filter" => "((title)::text ~~ '%bar%'::text)",
+            },
+          ],
+        },
+      ],
+    }
+  end
+
+  def search_plan_with_volatile_drift
+    {
+      "Node Type" => "Limit",
+      "Parallel Aware" => true,
+      "Async Capable" => true,
+      "Startup Cost" => 999.99,
+      "Total Cost" => 1000.01,
+      "Plan Rows" => 50,
+      "Plan Width" => 88,
+      "Plans" => [
+        {
+          "Node Type" => "Sort",
+          "Parent Relationship" => "Inner",
+          "Parallel Aware" => true,
+          "Async Capable" => true,
+          "Startup Cost" => 777.77,
+          "Total Cost" => 888.88,
+          "Plan Rows" => 44,
+          "Plan Width" => 66,
+          "Sort Key" => ["created_at DESC"],
+          "Plans" => [
+            {
+              "Node Type" => "Seq Scan",
+              "Parent Relationship" => "Inner",
+              "Parallel Aware" => true,
+              "Async Capable" => true,
+              "Relation Name" => "todos",
+              "Alias" => "todo_items",
+              "Startup Cost" => 111.11,
+              "Total Cost" => 222.22,
+              "Plan Rows" => 33,
+              "Plan Width" => 55,
+              "Filter" => "((title)::text ~~ '%foo%'::text)",
             },
           ],
         },
