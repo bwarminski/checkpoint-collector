@@ -7,7 +7,10 @@ require "tmpdir"
 module Load
   class CLI
     VerifierError = Class.new(StandardError)
-    USAGE = "Usage: bin/load run|soak|verify-fixture --workload NAME --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5]".freeze
+    USAGE = <<~USAGE.freeze
+      Usage: bin/load run|soak --workload NAME --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5] [--invariants enforce|warn|off]
+             bin/load verify-fixture --workload NAME --adapter PATH --app-root PATH
+    USAGE
 
     def initialize(argv:, version:, runner_factory: nil, verifier_factory: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
       @argv = argv.dup
@@ -67,6 +70,7 @@ module Load
         readiness_path: options.fetch(:readiness_path),
         startup_grace_seconds: options.fetch(:startup_grace_seconds),
         metrics_interval_seconds: options.fetch(:metrics_interval_seconds),
+        invariant_policy: options.fetch(:invariant_policy),
         stop_flag: @stop_flag,
         stdout: @stdout,
         stderr: @stderr,
@@ -90,7 +94,7 @@ module Load
     end
 
     def default_runner_factory
-      lambda do |workload:, adapter_bin:, app_root:, runs_dir:, readiness_path:, startup_grace_seconds:, metrics_interval_seconds:, stop_flag:, stdout:, stderr:, mode:|
+      lambda do |workload:, adapter_bin:, app_root:, runs_dir:, readiness_path:, startup_grace_seconds:, metrics_interval_seconds:, invariant_policy:, stop_flag:, stdout:, stderr:, mode:|
         run_dir = File.join(runs_dir, "#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}-#{workload.name}")
         run_record = Load::RunRecord.new(run_dir:)
         adapter_client = Load::AdapterClient.new(adapter_bin:, run_record:)
@@ -119,6 +123,8 @@ module Load
           stop_flag:,
           verifier:,
           mode:,
+          invariant_policy:,
+          stderr:,
         )
       end
     end
@@ -156,6 +162,7 @@ module Load
     def verify_fixture(workload:, verifier:, options:)
       adapter_client = nil
       pid = nil
+      failure = nil
       adapter_client = Load::AdapterClient.new(adapter_bin: options.fetch(:adapter_bin))
       adapter_client.describe
       adapter_client.prepare(app_root: options.fetch(:app_root))
@@ -173,12 +180,18 @@ module Load
       ).call
       verifier.call(base_url:)
       Load::ExitCodes::SUCCESS
-    rescue Load::FixtureVerifier::VerificationError
+    rescue Load::FixtureVerifier::VerificationError => error
+      failure = error
       raise
     rescue StandardError => error
+      failure = error
       raise VerifierError, error.message
     ensure
-      adapter_client&.stop(pid:) if pid
+      begin
+        adapter_client&.stop(pid:) if pid
+      rescue StandardError
+        raise unless failure
+      end
     end
 
     def parse_shared_options
@@ -205,6 +218,7 @@ module Load
         readiness_path: "/up",
         startup_grace_seconds: 15.0,
         metrics_interval_seconds: 5.0,
+        invariant_policy: :enforce,
       }
 
       parser = OptionParser.new do |parser|
@@ -215,6 +229,7 @@ module Load
         parser.on("--readiness-path PATH") { |value| options[:readiness_path] = value == "none" ? nil : value }
         parser.on("--startup-grace-seconds N", Float) { |value| options[:startup_grace_seconds] = value }
         parser.on("--metrics-interval-seconds N", Float) { |value| options[:metrics_interval_seconds] = value }
+        parser.on("--invariants POLICY") { |value| options[:invariant_policy] = parse_invariant_policy(value) }
       end
       parser.parse!(@argv)
 
@@ -223,6 +238,13 @@ module Load
       raise OptionParser::ParseError, "missing --app-root" unless options[:app_root]
 
       options
+    end
+
+    def parse_invariant_policy(value)
+      policy = value.to_sym
+      return policy if %i[enforce warn off].include?(policy)
+
+      raise OptionParser::ParseError, "invalid option: --invariants #{value}"
     end
 
     def load_workload(name)

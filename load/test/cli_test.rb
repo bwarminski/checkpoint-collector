@@ -68,6 +68,68 @@ class CliTest < Minitest::Test
     assert_equal 1, factory.runners.first.run_calls
   end
 
+  def test_run_defaults_invariants_to_enforce
+    factory = FakeRunnerFactory.new(exit_code: 0)
+
+    status = run_bin_load(
+      "run",
+      "--workload",
+      "fixture-workload",
+      "--adapter",
+      "fake-adapter",
+      "--app-root",
+      "/tmp/demo",
+      runner_factory: factory,
+    )
+
+    assert_equal 0, status
+    assert_equal :enforce, factory.calls.first.fetch(:invariant_policy)
+  end
+
+  def test_run_accepts_warn_and_off_invariant_policies
+    %i[warn off].each do |policy|
+      factory = FakeRunnerFactory.new(exit_code: 0)
+
+      status = run_bin_load(
+        "run",
+        "--workload",
+        "fixture-workload",
+        "--adapter",
+        "fake-adapter",
+        "--app-root",
+        "/tmp/demo",
+        "--invariants",
+        policy.to_s,
+        runner_factory: factory,
+      )
+
+      assert_equal 0, status
+      assert_equal policy, factory.calls.first.fetch(:invariant_policy)
+    end
+  end
+
+  def test_run_rejects_invalid_invariant_policy
+    %w[run soak].each do |command|
+      stdout, stderr, status = capture_bin_load(
+        command,
+        "--workload",
+        "fixture-workload",
+        "--adapter",
+        "fake-adapter",
+        "--app-root",
+        "/tmp/demo",
+        "--invariants",
+        "invalid",
+      )
+
+      refute status.success?
+      assert_equal Load::ExitCodes::USAGE_ERROR, status.exitstatus
+      assert_equal "", stdout
+      assert_includes stderr, "invalid option"
+      assert_includes stderr, "Usage: bin/load"
+    end
+  end
+
   def test_default_runner_factory_builds_a_fixture_verifier_for_finite_runs
     cli = Load::CLI.new(
       argv: [],
@@ -105,6 +167,7 @@ class CliTest < Minitest::Test
         readiness_path: "/up",
         startup_grace_seconds: 15.0,
         metrics_interval_seconds: 5.0,
+        invariant_policy: :enforce,
         stop_flag: Load::Runner::InternalStopFlag.new,
         stdout: StringIO.new,
         stderr: StringIO.new,
@@ -113,6 +176,7 @@ class CliTest < Minitest::Test
 
     assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
     assert_equal "missing-index-todos", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
+    assert_equal :enforce, captured_runner_kwargs.fetch(:invariant_policy)
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
@@ -142,6 +206,7 @@ class CliTest < Minitest::Test
         readiness_path: "/up",
         startup_grace_seconds: 15.0,
         metrics_interval_seconds: 5.0,
+        invariant_policy: :enforce,
         stop_flag: Load::Runner::InternalStopFlag.new,
         stdout: StringIO.new,
         stderr: StringIO.new,
@@ -151,6 +216,7 @@ class CliTest < Minitest::Test
     assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
     assert_equal "missing-index-todos", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
     assert_equal :continuous, captured_runner_kwargs.fetch(:mode)
+    assert_equal :enforce, captured_runner_kwargs.fetch(:invariant_policy)
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
@@ -180,6 +246,7 @@ class CliTest < Minitest::Test
         readiness_path: "/up",
         startup_grace_seconds: 15.0,
         metrics_interval_seconds: 5.0,
+        invariant_policy: :enforce,
         stop_flag: Load::Runner::InternalStopFlag.new,
         stdout: StringIO.new,
         stderr: StringIO.new,
@@ -187,6 +254,7 @@ class CliTest < Minitest::Test
     end
 
     assert_nil captured_runner_kwargs.fetch(:verifier)
+    assert_equal :enforce, captured_runner_kwargs.fetch(:invariant_policy)
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
@@ -253,6 +321,26 @@ class CliTest < Minitest::Test
     assert_includes stderr.string, "Usage: bin/load"
   end
 
+  def test_verify_fixture_rejects_invariants_with_usage_error
+    stdout, stderr, status = capture_bin_load(
+      "verify-fixture",
+      "--workload",
+      "missing-index-todos",
+      "--adapter",
+      "fake-adapter",
+      "--app-root",
+      "/tmp/demo",
+      "--invariants",
+      "warn",
+    )
+
+    refute status.success?
+    assert_equal Load::ExitCodes::USAGE_ERROR, status.exitstatus
+    assert_equal "", stdout
+    assert_includes stderr, "invalid option"
+    assert_includes stderr, "Usage: bin/load"
+  end
+
   def test_cli_runs_verify_fixture_command_without_factory_treating_setup_failures_as_adapter_errors
     stdout = StringIO.new
     stderr = StringIO.new
@@ -307,6 +395,39 @@ class CliTest < Minitest::Test
         assert_equal Load::ExitCodes::ADAPTER_ERROR, cli.run
         assert_includes stderr.string, "fixture verification failed for /api/todos/counts"
         refute_includes stderr.string, "Usage: bin/load"
+      end
+    end
+  end
+
+  def test_cli_verify_fixture_preserves_verifier_failure_when_stop_also_fails
+    Dir.mktmpdir do |dir|
+      with_http_server do |port|
+        stdout = StringIO.new
+        stderr = StringIO.new
+        verifier = Object.new
+        verifier.define_singleton_method(:call) do |base_url:|
+          raise Load::FixtureVerifier::VerificationError, "fixture verification failed for #{base_url}"
+        end
+
+        cli = Load::CLI.new(
+          argv: [
+            "verify-fixture",
+            "--workload",
+            "missing-index-todos",
+            "--adapter",
+            write_fake_adapter(dir, port:, stop_error_message: "stop exploded"),
+            "--app-root",
+            dir,
+          ],
+          version: "0.3.0",
+          verifier_factory: ->(**) { verifier },
+          stdout:,
+          stderr:,
+        )
+
+        assert_equal Load::ExitCodes::ADAPTER_ERROR, cli.run
+        assert_includes stderr.string, "fixture verification failed for http://127.0.0.1:#{port}"
+        refute_includes stderr.string, "stop exploded"
       end
     end
   end
@@ -417,9 +538,16 @@ class CliTest < Minitest::Test
 
   def test_bin_load_help_prints_usage_and_exits_zero
     stdout, stderr, status = capture_bin_load("--help")
+    verify_fixture_line = stdout.lines.find { |line| line.include?("bin/load verify-fixture") }
 
     assert status.success?
     assert_includes stdout, "Usage: bin/load"
+    assert_includes stdout, "bin/load run|soak"
+    assert verify_fixture_line
+    refute_includes verify_fixture_line, "--readiness-path"
+    refute_includes verify_fixture_line, "--startup-grace-seconds"
+    refute_includes verify_fixture_line, "--metrics-interval-seconds"
+    refute_includes verify_fixture_line, "--invariants"
     assert_equal "", stderr
   end
 
@@ -637,7 +765,7 @@ class CliTest < Minitest::Test
     @version_path ||= File.expand_path("../../VERSION", __dir__)
   end
 
-  def write_fake_adapter(dir, port: 3999, log_path: nil)
+  def write_fake_adapter(dir, port: 3999, log_path: nil, stop_error_message: nil)
     path = File.join(dir, "fake-adapter")
     File.write(path, <<~RUBY)
       #!/usr/bin/env ruby
@@ -656,7 +784,7 @@ class CliTest < Minitest::Test
       when "start"
         {"ok" => true, "command" => "start", "pid" => Process.pid, "base_url" => "http://127.0.0.1:#{port}"}
       when "stop"
-        {"ok" => true, "command" => "stop"}
+        #{stop_error_message ? "{\"ok\" => false, \"command\" => \"stop\", \"error\" => {\"code\" => \"stop_failed\", \"message\" => \"#{stop_error_message}\", \"details\" => {}}}" : "{\"ok\" => true, \"command\" => \"stop\"}"}
       else
         {"ok" => false, "command" => command, "error" => {"code" => "unknown", "message" => "unknown", "details" => {}}}
       end

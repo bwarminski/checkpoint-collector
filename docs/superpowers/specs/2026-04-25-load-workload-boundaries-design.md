@@ -14,14 +14,16 @@ This design covers three changes:
 
 The design keeps these boundaries unchanged:
 
+- `Load::Runner::InvariantSample` stays in the runner with its current fields and persistence shape.
 - The runner keeps breach counting, warning persistence, and abort behavior.
 - `scale.rows_per_table` remains available to workload actions through `ctx[:scale]`.
+- Run-record `invariant_samples` remain the same.
 
 Out of scope:
 
+- Polymorphic invariant sample shapes.
 - Per-table scale data.
-- Refactors to actions, selector, worker, reporter, oracle, dominance assertion, or fixture verifier when they are expressing workload-owned todo behavior.
-- Todo-specific invariant fields or threshold assumptions in generic core types are in scope and should be removed if they are touched by this seam.
+- Refactors to actions, selector, worker, reporter, oracle, dominance assertion, or fixture verifier beyond wiring needed for this seam.
 
 ## Design
 
@@ -32,16 +34,12 @@ Out of scope:
 ```ruby
 Scale = Data.define(:rows_per_table, :seed, :extra) do
   def initialize(rows_per_table:, seed: 42, extra: {})
-    reserved = %i[seed rows_per_table SEED ROWS_PER_TABLE]
-    bad = extra.keys.find { |key| reserved.include?(key.to_sym) }
-    raise ArgumentError, "extra cannot contain reserved key: #{bad}" if bad
-
     super
   end
 
   def env_pairs
-    { "ROWS_PER_TABLE" => rows_per_table.to_s }
-      .merge(extra.transform_keys { |key| key.to_s.upcase })
+    extra.transform_keys { |key| key.to_s.upcase }
+         .merge("ROWS_PER_TABLE" => rows_per_table.to_s)
   end
 end
 ```
@@ -50,7 +48,6 @@ Implications:
 
 - `rows_per_table` stays first-class so existing action code remains untouched.
 - `seed` remains a scale property but never appears in `env_pairs`, because the adapter already injects `SEED`.
-- `extra` rejects reserved keys for `seed` and `rows_per_table` so workload-specific env knobs cannot override canonical values.
 - Workloads own their extra environment keys without adding fixed fields to the generic type.
 - Generic tests that do not care about extras stop constructing ceremonial `open_fraction: 0.0` values.
 
@@ -71,77 +68,12 @@ This hook returns either:
 - `nil` for workloads with no invariant support.
 - A sampler-like object responding to `#call` and returning `Load::Runner::InvariantSample`.
 
-### Generic invariant contract
-
-`Load::Runner` keeps the invariant orchestration logic, but its value objects stop naming todos-specific fields.
-
-The runner owns two generic types:
-
-```ruby
-InvariantCheck = Data.define(:name, :actual, :min, :max)
-InvariantSample = Data.define(:checks)
-```
-
-`InvariantCheck` is pure data for one measured invariant:
-
-- `name`: stable identifier for the metric being checked
-- `actual`: measured value
-- `min`: optional lower bound
-- `max`: optional upper bound
-
-`InvariantCheck` exposes generic helpers for:
-
-- reporting breach messages
-- reporting whether the check breached
-- serializing itself into the run record
-
-`InvariantSample` becomes a container of checks and exposes:
-
-- `breaches`
-- `breach?`
-- `healthy?`
-- `to_warning`
-- `to_record(sampled_at:)`
-
-The runner iterates checks generically when producing warnings and persisted samples. It no longer knows about `open_count`, `total_count`, or any other workload metric names.
-
-Run-record `invariant_samples` change shape accordingly:
-
-```json
-{
-  "sampled_at": "2026-04-25T15:42:48Z",
-  "checks": [
-    { "name": "open_count", "actual": 61234, "min": 30000, "max": null, "breach": false, "breaches": [] },
-    { "name": "total_count", "actual": 101203, "min": 80000, "max": 200000, "breach": false, "breaches": [] }
-  ],
-  "breach": false,
-  "breaches": []
-}
-```
-
-Because `invariant_samples` changes from flat todo-shaped fields to `checks: [...]`, `run.json` must bump from `schema_version: 1` to `schema_version: 2`.
-
-Warnings follow the same generic shape:
-
-```json
-{
-  "type": "invariant_breach",
-  "message": "open_count 100 is below min 30000; total_count 10000 is below min 80000",
-  "checks": [
-    { "name": "open_count", "actual": 100, "min": 30000, "max": null, "breach": true, "breaches": ["open_count 100 is below min 30000"] },
-    { "name": "total_count", "actual": 10000, "min": 80000, "max": 200000, "breach": true, "breaches": ["total_count 10000 is below min 80000"] }
-  ]
-}
-```
-
-This makes the runner agnostic to future workloads. A different workload can emit checks such as `products_total`, `active_merchants`, or `open_invoices` without changing runner code or persistence rules.
-
 `workloads/missing_index_todos/invariant_sampler.rb` contains the current PG transaction logic and todos SQL. The sampler still:
 
 - Connects through the injected `pg` client.
 - Uses `SET LOCAL pg_stat_statements.track = 'none'`.
 - Counts open todos and total todo rows.
-- Returns `Load::Runner::InvariantSample` containing named checks.
+- Returns `Load::Runner::InvariantSample`.
 
 The threshold math also moves to the workload boundary. `MissingIndexTodos::Workload#invariant_sampler(database_url:, pg:)` computes:
 
@@ -150,17 +82,6 @@ The threshold math also moves to the workload boundary. `MissingIndexTodos::Work
 - `total_ceiling = (rows_per_table * 2.0).to_i`
 
 Those ratios stay workload-specific because they encode this workload's expected open and total drift behavior.
-
-The missing-index sampler returns:
-
-```ruby
-Load::Runner::InvariantSample.new(
-  [
-    Load::Runner::InvariantCheck.new("open_count", open_count, open_floor, nil),
-    Load::Runner::InvariantCheck.new("total_count", total_count, total_floor, total_ceiling),
-  ],
-)
-```
 
 ### Runner integration
 
@@ -186,22 +107,20 @@ Implementation follows this TDD order:
 2. Update `load/lib/load/scale.rb`.
 3. Sweep call sites to remove `open_fraction` from generic tests and migrate the missing-index workload.
 4. Add failing tests for `Load::Workload#invariant_sampler` defaulting to `nil` and for the missing-index workload returning a PG-backed sampler.
-5. Add failing tests for the generic `InvariantCheck` and `InvariantSample` contract and persisted record shape.
-6. Move sampler coverage into `workloads/missing_index_todos/test/invariant_sampler_test.rb`.
-7. Update runner construction to call the workload hook and preserve invariant-thread behavior.
-8. Keep runner tests focused on orchestration by continuing to inject fake samplers there.
+5. Move sampler coverage into `workloads/missing_index_todos/test/invariant_sampler_test.rb`.
+6. Update runner construction to call the workload hook and preserve invariant-thread behavior.
+7. Keep runner tests focused on orchestration by continuing to inject fake samplers there.
 
 Validation gate before completion:
 
 - `make test`
-- `for i in $(seq 1 50); do BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby workloads/missing_index_todos/test/invariant_sampler_test.rb --name test_sampler_uses_isolated_pg_connection_and_returns_named_checks 2>&1 | tail -3; done | grep -E "errors|failures" | sort -u`
+- 50x stability loop on the relocated invariant breach test with one `0 failures, 0 errors` line
 - live finite run through `bin/load run --workload missing-index-todos ... --mode finite --duration 60` with oracle `PASS`
 - `grep -r "open_fraction" load/lib load/test/runner_test.rb load/test/cli_test.rb` returns nothing
-- `grep -rn "todos\\|open_count\\|total_count" load/lib/load/runner.rb load/lib/load/scale.rb load/lib/load/workload.rb` returns nothing
-- `cat runs/<latest>/run.json | jq .schema_version` returns `2`
+- `grep -rn "todos" load/lib/` returns nothing
 
 ## Risks And Non-Goals
 
+- `InvariantSample` still carries todos-shaped fields. That leak is accepted for now because there is only one invariant-producing workload.
 - The workload hook should stay narrow. Pushing thresholds or SQL into generic runner config would recreate the same leak in a different form.
-- `load/lib/load/fixture_verifier.rb` stays as-is in this refactor even though it contains todo-specific workload behavior; moving that logic is a separate boundary cleanup.
 - The change should avoid opportunistic cleanup to reduce merge friction while parallel work continues on the same branch.
