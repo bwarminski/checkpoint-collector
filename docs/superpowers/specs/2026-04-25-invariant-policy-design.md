@@ -65,6 +65,11 @@ Other stop reasons still behave normally. For example, `sigint`, `sigterm`, adap
 - do not append invariant-breach warnings from this mechanism
 - never stop the run because of invariant breaches
 
+`off` does not disable workload-local fixture verification. For
+`missing-index-todos`, `run` and `soak` still execute the pre-flight verifier
+before workers start, so those commands still require whatever verifier inputs
+the workload needs, including `DATABASE_URL`.
+
 The run still records the `warnings` and `invariant_samples` keys in `run.json`; they simply remain empty unless some other mechanism writes to them in the future.
 
 ## CLI Contract
@@ -168,6 +173,7 @@ Add focused coverage for:
   - invariant sampler is not started
   - no invariant samples are recorded
   - no invariant-breach warnings are recorded
+  - workload fixture verification still runs before workers start
 
 Existing `enforce` tests should stay green without semantic changes. They remain the regression proof that the default contract did not drift.
 

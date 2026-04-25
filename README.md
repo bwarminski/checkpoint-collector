@@ -155,7 +155,9 @@ drifted out of the designed regime.
 
 Invariant sampling defaults to `enforce` for `soak` too. `warn` keeps sampling
 and records warnings without stopping the run; `off` disables invariant
-sampling entirely for that run.
+sampling entirely for that run. `off` does not bypass the workload's pre-flight
+fixture verification, so `missing-index-todos` still requires `DATABASE_URL`
+for `soak` and `run`.
 
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \

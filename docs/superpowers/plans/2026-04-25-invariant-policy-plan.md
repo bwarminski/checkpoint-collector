@@ -491,14 +491,6 @@ BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'load "load/test/cli_test.r
 
 Expected: PASS.
 
-Run the explicit no-`DATABASE_URL` regression too:
-
-```bash
-BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb --name test_runner_off_policy_runs_without_database_url
-```
-
-Expected: PASS.
-
 - [ ] **Step 6: Commit the `off` policy slice**
 
 ```bash
@@ -618,7 +610,45 @@ BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby bin/load --help
 
 Expected: usage text includes `--invariants enforce|warn|off`.
 
-- [ ] **Step 4: Commit any verification-only fallout if needed**
+- [ ] **Step 4: Run live operator smokes for `warn` and `off`**
+
+Run:
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+BUNDLE_GEMFILE=collector/Gemfile \
+bundle exec bin/load soak --workload missing-index-todos --invariants warn \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+Degrade the fixture after startup, then confirm:
+
+- one or more `warning: invariant breach:` lines on `stderr`
+- `run.json.warnings` contains invariant-breach entries
+- `run.json.invariant_samples` contains breached samples
+- the soak exits cleanly on `SIGTERM` without `outcome.error_code: "invariant_breach"`
+
+Run:
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+BUNDLE_GEMFILE=collector/Gemfile \
+bundle exec bin/load soak --workload missing-index-todos --invariants off \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+Confirm:
+
+- fixture verification still runs before workers start
+- `run.json.warnings` stays empty
+- `run.json.invariant_samples` stays empty
+- `stderr` contains no invariant-breach warning lines
+
+- [ ] **Step 5: Commit any verification-only fallout if needed**
 
 If verification exposes a small missing test or doc detail, fix it with TDD first, rerun the affected commands, then commit:
 
@@ -638,7 +668,7 @@ If there is no fallout, do not create an extra commit.
 - CLI contract: covered in Task 1.
 - `enforce|warn|off` behavior: covered in Tasks 2 and 3.
 - regression lock: `:enforce` policy still aborts after 3 breaches: covered in Task 2.
-- `:off` policy runs without `DATABASE_URL`: covered in Task 3.
+- `:off` policy disables invariant sampling but does not bypass fixture verification: covered in Tasks 3 and 5.
 - `stderr` output for `warn`: covered in Task 2.
 - docs and `verify-fixture` note: covered in Task 4.
 - regression proof that `enforce` stayed default: covered in Tasks 2 and 5.
