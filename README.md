@@ -46,6 +46,18 @@ stack. Use `make test` to verify the branch logic; use `make load-smoke` to see
 whether the current dataset, app settings, and workload shape still behave
 acceptably together.
 
+The operator commands map directly to `bin/load`:
+
+```bash
+bin/load verify-fixture --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+
+bin/load soak --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
 ## Load Runner
 
 The top-level entrypoint is `bin/load run`, which combines a workload, an
