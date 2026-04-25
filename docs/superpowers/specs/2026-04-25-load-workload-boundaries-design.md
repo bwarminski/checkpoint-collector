@@ -14,16 +14,14 @@ This design covers three changes:
 
 The design keeps these boundaries unchanged:
 
-- `Load::Runner::InvariantSample` stays in the runner with its current fields and persistence shape.
 - The runner keeps breach counting, warning persistence, and abort behavior.
 - `scale.rows_per_table` remains available to workload actions through `ctx[:scale]`.
-- Run-record `invariant_samples` remain the same.
 
 Out of scope:
 
-- Polymorphic invariant sample shapes.
 - Per-table scale data.
-- Refactors to actions, selector, worker, reporter, oracle, dominance assertion, or fixture verifier beyond wiring needed for this seam.
+- Refactors to actions, selector, worker, reporter, oracle, dominance assertion, or fixture verifier when they are expressing workload-owned todo behavior.
+- Todo-specific invariant fields or threshold assumptions in generic core types are in scope and should be removed if they are touched by this seam.
 
 ## Design
 
@@ -68,12 +66,75 @@ This hook returns either:
 - `nil` for workloads with no invariant support.
 - A sampler-like object responding to `#call` and returning `Load::Runner::InvariantSample`.
 
+### Generic invariant contract
+
+`Load::Runner` keeps the invariant orchestration logic, but its value objects stop naming todos-specific fields.
+
+The runner owns two generic types:
+
+```ruby
+InvariantCheck = Data.define(:name, :actual, :min, :max)
+InvariantSample = Data.define(:checks)
+```
+
+`InvariantCheck` is pure data for one measured invariant:
+
+- `name`: stable identifier for the metric being checked
+- `actual`: measured value
+- `min`: optional lower bound
+- `max`: optional upper bound
+
+`InvariantCheck` exposes generic helpers for:
+
+- reporting breach messages
+- reporting whether the check breached
+- serializing itself into the run record
+
+`InvariantSample` becomes a container of checks and exposes:
+
+- `breaches`
+- `breach?`
+- `healthy?`
+- `to_warning`
+- `to_record(sampled_at:)`
+
+The runner iterates checks generically when producing warnings and persisted samples. It no longer knows about `open_count`, `total_count`, or any other workload metric names.
+
+Run-record `invariant_samples` change shape accordingly:
+
+```json
+{
+  "sampled_at": "2026-04-25T15:42:48Z",
+  "checks": [
+    { "name": "open_count", "actual": 61234, "min": 30000, "max": null, "breach": false, "breaches": [] },
+    { "name": "total_count", "actual": 101203, "min": 80000, "max": 200000, "breach": false, "breaches": [] }
+  ],
+  "breach": false,
+  "breaches": []
+}
+```
+
+Warnings follow the same generic shape:
+
+```json
+{
+  "type": "invariant_breach",
+  "message": "open_count 100 is below min 30000; total_count 10000 is below min 80000",
+  "checks": [
+    { "name": "open_count", "actual": 100, "min": 30000, "max": null, "breach": true, "breaches": ["open_count 100 is below min 30000"] },
+    { "name": "total_count", "actual": 10000, "min": 80000, "max": 200000, "breach": true, "breaches": ["total_count 10000 is below min 80000"] }
+  ]
+}
+```
+
+This makes the runner agnostic to future workloads. A different workload can emit checks such as `products_total`, `active_merchants`, or `open_invoices` without changing runner code or persistence rules.
+
 `workloads/missing_index_todos/invariant_sampler.rb` contains the current PG transaction logic and todos SQL. The sampler still:
 
 - Connects through the injected `pg` client.
 - Uses `SET LOCAL pg_stat_statements.track = 'none'`.
 - Counts open todos and total todo rows.
-- Returns `Load::Runner::InvariantSample`.
+- Returns `Load::Runner::InvariantSample` containing named checks.
 
 The threshold math also moves to the workload boundary. `MissingIndexTodos::Workload#invariant_sampler(database_url:, pg:)` computes:
 
@@ -82,6 +143,17 @@ The threshold math also moves to the workload boundary. `MissingIndexTodos::Work
 - `total_ceiling = (rows_per_table * 2.0).to_i`
 
 Those ratios stay workload-specific because they encode this workload's expected open and total drift behavior.
+
+The missing-index sampler returns:
+
+```ruby
+Load::Runner::InvariantSample.new(
+  [
+    Load::Runner::InvariantCheck.new("open_count", open_count, open_floor, nil),
+    Load::Runner::InvariantCheck.new("total_count", total_count, total_floor, total_ceiling),
+  ],
+)
+```
 
 ### Runner integration
 
@@ -107,9 +179,10 @@ Implementation follows this TDD order:
 2. Update `load/lib/load/scale.rb`.
 3. Sweep call sites to remove `open_fraction` from generic tests and migrate the missing-index workload.
 4. Add failing tests for `Load::Workload#invariant_sampler` defaulting to `nil` and for the missing-index workload returning a PG-backed sampler.
-5. Move sampler coverage into `workloads/missing_index_todos/test/invariant_sampler_test.rb`.
-6. Update runner construction to call the workload hook and preserve invariant-thread behavior.
-7. Keep runner tests focused on orchestration by continuing to inject fake samplers there.
+5. Add failing tests for the generic `InvariantCheck` and `InvariantSample` contract and persisted record shape.
+6. Move sampler coverage into `workloads/missing_index_todos/test/invariant_sampler_test.rb`.
+7. Update runner construction to call the workload hook and preserve invariant-thread behavior.
+8. Keep runner tests focused on orchestration by continuing to inject fake samplers there.
 
 Validation gate before completion:
 
@@ -121,6 +194,5 @@ Validation gate before completion:
 
 ## Risks And Non-Goals
 
-- `InvariantSample` still carries todos-shaped fields. That leak is accepted for now because there is only one invariant-producing workload.
 - The workload hook should stay narrow. Pushing thresholds or SQL into generic runner config would recreate the same leak in a different form.
 - The change should avoid opportunistic cleanup to reduce merge friction while parallel work continues on the same branch.
