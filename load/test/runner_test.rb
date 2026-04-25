@@ -38,6 +38,39 @@ class RunnerTest < Minitest::Test
     assert_equal [:describe, :prepare, :reset_state, :start, :readiness, :verify, :worker, :stop], call_order
   end
 
+  def test_runner_calls_verifier_for_continuous_runs_when_present
+    call_order = []
+    stop_flag = StopFlag.new
+    VerifierOrderAction.reset!
+    VerifierOrderAction.call_order = call_order
+    VerifierOrderAction.stop_flag = stop_flag
+    adapter = FakeAdapterClient.new(call_order:)
+    verifier_calls = []
+    verifier = lambda do |base_url:|
+      call_order << :verify
+      verifier_calls << base_url
+      { ok: true }
+    end
+    runner = Load::Runner.new(
+      workload: VerifierOrderWorkload.new,
+      adapter_client: adapter,
+      run_record: FakeRunRecord.new,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: ReadinessLoggingHttp.new(call_order:),
+      startup_grace_seconds: 0.1,
+      stop_flag:,
+      verifier:,
+      mode: :continuous,
+    )
+
+    exit_code = runner.run
+
+    assert_equal 0, exit_code
+    assert_equal ["http://127.0.0.1:3999"], verifier_calls
+    assert_equal [:describe, :prepare, :reset_state, :start, :readiness, :verify, :worker, :stop], call_order
+  end
+
   def test_runner_aborts_before_workers_when_verifier_fails
     stop_flag = StopFlag.new
     call_order = []

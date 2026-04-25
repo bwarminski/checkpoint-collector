@@ -37,6 +37,9 @@ module Load
         @stderr.puts("unknown command: #{command}")
         usage_error
       end
+    rescue Load::FixtureVerifier::VerificationError => error
+      @stderr.puts(error.message)
+      Load::ExitCodes::ADAPTER_ERROR
     rescue OptionParser::ParseError, ArgumentError => error
       @stderr.puts(error.message)
       usage_error
@@ -75,6 +78,8 @@ module Load
         stdout: @stdout,
         stderr: @stderr,
       )
+      raise ArgumentError, "unknown workload: #{options.fetch(:workload)}" unless verifier
+
       verifier.call
     end
 
@@ -83,13 +88,16 @@ module Load
         run_dir = File.join(runs_dir, "#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}-#{workload.name}")
         run_record = Load::RunRecord.new(run_dir:)
         adapter_client = Load::AdapterClient.new(adapter_bin:, run_record:)
-        verifier = @verifier_factory.call(
-          workload_name: workload.name,
-          adapter_bin:,
-          app_root:,
-          stdout:,
-          stderr:,
-        ) if mode == :finite
+        verifier = nil
+        if fixture_verification_required?(workload_name: workload.name, mode:)
+          verifier = @verifier_factory.call(
+            workload_name: workload.name,
+            adapter_bin:,
+            app_root:,
+            stdout:,
+            stderr:,
+          )
+        end
         Load::Runner.new(
           workload:,
           adapter_client:,
@@ -110,6 +118,8 @@ module Load
 
     def default_verifier_factory
       lambda do |workload_name:, adapter_bin:, app_root:, stdout:, stderr:|
+        next unless workload_name == "missing-index-todos"
+
         Load::FixtureVerifier.new(
           workload_name:,
           adapter_bin:,
@@ -182,6 +192,10 @@ module Load
     def usage_error
       @stderr.puts(USAGE)
       Load::ExitCodes::USAGE_ERROR
+    end
+
+    def fixture_verification_required?(workload_name:, mode:)
+      workload_name == "missing-index-todos" && %i[finite continuous].include?(mode)
     end
 
     def workload_path(name)

@@ -103,7 +103,6 @@ module Load
     private
 
     def verify_fixture(base_url:)
-      return unless @mode == :finite
       return unless @verifier
 
       @verifier.call(base_url:)

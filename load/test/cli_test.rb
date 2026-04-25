@@ -6,6 +6,7 @@ require "rbconfig"
 require "stringio"
 require "tmpdir"
 require "timeout"
+require "fileutils"
 require_relative "test_helper"
 
 class CliTest < Minitest::Test
@@ -24,6 +25,12 @@ class CliTest < Minitest::Test
 
     def load_plan
       Load::LoadPlan.new(workers: 1, duration_seconds: 0, rate_limit: :unlimited, seed: 42)
+    end
+  end
+
+  class MissingIndexTodosWorkload < FixtureWorkload
+    def name
+      "missing-index-todos"
     end
   end
 
@@ -89,7 +96,7 @@ class CliTest < Minitest::Test
       Object.new
     end) do
       cli.send(:default_runner_factory).call(
-        workload: FixtureWorkload.new,
+        workload: MissingIndexTodosWorkload.new,
         mode: :finite,
         adapter_bin: "adapters/rails/bin/bench-adapter",
         app_root: "/tmp/demo",
@@ -104,7 +111,80 @@ class CliTest < Minitest::Test
     end
 
     assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
-    assert_equal "fixture-workload", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
+    assert_equal "missing-index-todos", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
+  ensure
+    ENV["DATABASE_URL"] = original_database_url
+  end
+
+  def test_default_runner_factory_builds_a_fixture_verifier_for_missing_index_todos_soak_runs
+    cli = Load::CLI.new(
+      argv: [],
+      version: "0.3.0",
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    )
+
+    original_database_url = ENV["DATABASE_URL"]
+    ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
+
+    captured_runner_kwargs = nil
+    Load::Runner.stub(:new, ->(**kwargs) do
+      captured_runner_kwargs = kwargs
+      Object.new
+    end) do
+      cli.send(:default_runner_factory).call(
+        workload: MissingIndexTodosWorkload.new,
+        mode: :continuous,
+        adapter_bin: "adapters/rails/bin/bench-adapter",
+        app_root: "/tmp/demo",
+        runs_dir: Dir.mktmpdir,
+        readiness_path: "/up",
+        startup_grace_seconds: 15.0,
+        metrics_interval_seconds: 5.0,
+        stop_flag: Load::Runner::InternalStopFlag.new,
+        stdout: StringIO.new,
+        stderr: StringIO.new,
+      )
+    end
+
+    assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
+    assert_equal "missing-index-todos", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
+  ensure
+    ENV["DATABASE_URL"] = original_database_url
+  end
+
+  def test_default_runner_factory_skips_fixture_verifier_for_unrelated_workloads
+    cli = Load::CLI.new(
+      argv: [],
+      version: "0.3.0",
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    )
+
+    original_database_url = ENV["DATABASE_URL"]
+    ENV.delete("DATABASE_URL")
+
+    captured_runner_kwargs = nil
+    Load::Runner.stub(:new, ->(**kwargs) do
+      captured_runner_kwargs = kwargs
+      Object.new
+    end) do
+      cli.send(:default_runner_factory).call(
+        workload: FixtureWorkload.new,
+        mode: :finite,
+        adapter_bin: "adapters/rails/bin/bench-adapter",
+        app_root: "/tmp/demo",
+        runs_dir: Dir.mktmpdir,
+        readiness_path: "/up",
+        startup_grace_seconds: 15.0,
+        metrics_interval_seconds: 5.0,
+        stop_flag: Load::Runner::InternalStopFlag.new,
+        stdout: StringIO.new,
+        stderr: StringIO.new,
+      )
+    end
+
+    assert_nil captured_runner_kwargs.fetch(:verifier)
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
@@ -186,6 +266,35 @@ class CliTest < Minitest::Test
     assert_equal Load::ExitCodes::USAGE_ERROR, cli.run
     assert_includes stderr.string, "verify-fixture"
     assert_includes stderr.string, "Usage: bin/load"
+  end
+
+  def test_cli_runs_verify_fixture_command_without_treating_verification_failure_as_usage_error
+    stdout = StringIO.new
+    stderr = StringIO.new
+    verifier = Object.new
+    verifier.define_singleton_method(:call) do
+      raise Load::FixtureVerifier::VerificationError, "fixture verification failed for /api/todos/counts: expected at least 2 count calls"
+    end
+
+    cli = Load::CLI.new(
+      argv: [
+        "verify-fixture",
+        "--workload",
+        "missing-index-todos",
+        "--adapter",
+        "adapters/rails/bin/bench-adapter",
+        "--app-root",
+        "/tmp/demo",
+      ],
+      version: "0.3.0",
+      verifier_factory: ->(**) { verifier },
+      stdout:,
+      stderr:,
+    )
+
+    assert_equal Load::ExitCodes::ADAPTER_ERROR, cli.run
+    assert_includes stderr.string, "fixture verification failed for /api/todos/counts"
+    refute_includes stderr.string, "Usage: bin/load"
   end
 
   def test_cli_runs_soak_command
@@ -371,7 +480,7 @@ class CliTest < Minitest::Test
   end
 
   def test_bin_load_handles_sigterm_and_marks_soak_run_aborted
-    with_database_url do
+    with_temporary_cli_workload("signal-fixtureless") do |workload_name|
       Dir.mktmpdir do |dir|
         runs_dir = File.join(dir, "runs")
         stdout_path = File.join(dir, "stdout.log")
@@ -383,7 +492,7 @@ class CliTest < Minitest::Test
             bin_load_path,
             "soak",
             "--workload",
-            "missing-index-todos",
+            workload_name,
             "--adapter",
             adapter_path,
             "--app-root",
@@ -506,6 +615,57 @@ class CliTest < Minitest::Test
     yield
   ensure
     ENV["DATABASE_URL"] = original_database_url
+  end
+
+  def with_temporary_cli_workload(name)
+    directory = File.expand_path("../../workloads/#{name.tr("-", "_")}", __dir__)
+    path = File.join(directory, "workload.rb")
+    FileUtils.mkdir_p(directory)
+    File.write(path, <<~RUBY)
+      # ABOUTME: Defines a temporary workload for the CLI subprocess signal test.
+      # ABOUTME: Issues simple GET requests so soak mode can start without fixture verification.
+      require_relative "../../load/lib/load"
+
+      module Load
+        module Workloads
+          module SignalFixtureless
+            class Workload < Load::Workload
+              def name
+                "#{name}"
+              end
+
+              def scale
+                Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+              end
+
+              def actions
+                [Load::ActionEntry.new(Action, 1)]
+              end
+
+              def load_plan
+                Load::LoadPlan.new(workers: 1, duration_seconds: 60, rate_limit: :unlimited, seed: 42)
+              end
+            end
+
+            class Action < Load::Action
+              def name
+                :ping
+              end
+
+              def call
+                client.get("/up")
+              end
+            end
+          end
+        end
+      end
+
+      Load::WorkloadRegistry.register("#{name}", Load::Workloads::SignalFixtureless::Workload)
+    RUBY
+
+    yield name
+  ensure
+    FileUtils.rm_rf(directory) if directory
   end
 
   def run_bin_load(*argv, runner_factory: FakeRunnerFactory.new(exit_code: 0))
