@@ -176,18 +176,16 @@ class RunnerTest < Minitest::Test
       first_sample_barrier: workers_ready,
     )
 
-    Dir.mktmpdir do |dir|
-      run_record = Load::RunRecord.new(run_dir: File.join(dir, "run"))
-      runner = build_continuous_runner(run_record:, invariant_sampler: sampler)
+    run_record = FakeRunRecord.new
+    runner = build_continuous_runner(run_record:, invariant_sampler: sampler)
 
-      assert_equal Load::ExitCodes::ADAPTER_ERROR, Timeout.timeout(2.0) { runner.run }
+    assert_equal Load::ExitCodes::ADAPTER_ERROR, Timeout.timeout(2.0) { runner.run }
 
-      payload = run_record.read_run_json
-      warnings = payload.fetch("warnings")
-      assert_equal 3, warnings.length
-      assert_includes warnings.last.fetch("message"), "open_count"
-      assert_equal "invariant_breach", payload.dig("outcome", "error_code")
-    end
+    payload = run_record.read_run_json
+    warnings = payload.fetch("warnings")
+    assert_equal 3, warnings.length
+    assert_includes warnings.last.fetch("message"), "open_count"
+    assert_equal "invariant_breach", payload.dig("outcome", "error_code")
   ensure
     BarrierAction.reset!
   end
