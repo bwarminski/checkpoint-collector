@@ -26,7 +26,7 @@ class MissingIndexTodosActionsTest < Minitest::Test
       [:get, "/api/todos?status=all&page=1&per_page=50&order=created_desc", nil],
       [:post, "/api/todos", { user_id: 1, title: "load" }],
       [:patch, "/api/todos/123", { status: "closed" }],
-      [:delete, "/api/todos/completed?user_id=7", nil],
+      [:delete, "/api/todos/completed", { user_id: 7 }],
       [:get, "/api/todos/counts", nil],
       [:get, "/api/todos/search?q=foo", nil],
     ], client.requests

@@ -12,7 +12,7 @@ module Load
           end
 
           def call
-            client.request(:delete, "/api/todos/completed?user_id=#{user_id}")
+            client.request(:delete, "/api/todos/completed", body: { user_id: user_id })
           end
 
           private
