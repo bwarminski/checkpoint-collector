@@ -1,6 +1,7 @@
 # ABOUTME: Defines the missing-index workload used for the todos benchmark path.
 # ABOUTME: Declares the fixed scale, weighted actions, and load plan for the run.
 require_relative "../../load/lib/load"
+require_relative "invariant_sampler"
 require_relative "actions/close_todo"
 require_relative "actions/create_todo"
 require_relative "actions/delete_completed_todos"
@@ -35,6 +36,17 @@ module Load
 
         def load_plan
           Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil)
+        end
+
+        def invariant_sampler(database_url:, pg:)
+          rows_per_table = scale.rows_per_table
+          Load::Workloads::MissingIndexTodos::InvariantSampler.new(
+            pg:,
+            database_url:,
+            open_floor: (rows_per_table * 0.3).to_i,
+            total_floor: (rows_per_table * 0.8).to_i,
+            total_ceiling: (rows_per_table * 2.0).to_i,
+          )
         end
       end
     end

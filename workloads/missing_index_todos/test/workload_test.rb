@@ -29,6 +29,15 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     assert_instance_of Load::Workloads::MissingIndexTodos::InvariantSampler, sampler
   end
 
+  def test_workload_sampler_applies_rows_per_table_thresholds_to_sample_output
+    workload = Load::Workloads::MissingIndexTodos::Workload.new
+    pg = FakePg.new(open_count: 100, total_count: 1_000_000)
+    sample = workload.invariant_sampler(database_url: "postgres://example.test/checkpoint", pg:).call
+
+    assert_equal true, sample.checks.fetch(0).breach?
+    assert_equal true, sample.checks.fetch(1).breach?
+  end
+
   def test_list_open_todos_gets_open_status_endpoint
     response = Object.new
     client = FakeClient.new(response)
@@ -50,6 +59,46 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     def get(path)
       @paths << path
       @response
+    end
+  end
+
+  class FakePg
+    attr_reader :connection
+
+    def initialize(open_count:, total_count:)
+      @open_count = open_count
+      @total_count = total_count
+      @connection = nil
+    end
+
+    def connect(database_url)
+      @connection = FakePgConnection.new(database_url:, open_count: @open_count, total_count: @total_count)
+    end
+  end
+
+  class FakePgConnection
+    def initialize(database_url:, open_count:, total_count:)
+      @database_url = database_url
+      @open_count = open_count
+      @total_count = total_count
+    end
+
+    def exec(sql)
+      if sql.include?("COUNT(*)") && sql.include?("FROM todos")
+        [{ "count" => @open_count.to_s }]
+      elsif sql.include?("FROM pg_class")
+        [{ "count" => @total_count.to_s }]
+      else
+        []
+      end
+    end
+
+    def transaction
+      yield self
+    end
+
+    def close
+      true
     end
   end
 end

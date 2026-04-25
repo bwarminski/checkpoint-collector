@@ -114,7 +114,7 @@ class RunnerTest < Minitest::Test
     end
   end
 
-  def test_runner_requires_database_url_or_explicit_invariant_sampler_for_continuous_mode
+  def test_runner_requires_workload_provided_invariant_sampler_for_continuous_mode
     error = assert_raises(Load::AdapterClient::AdapterError) do
       Load::Runner.new(
         workload: MetricsWorkload.new,
@@ -130,8 +130,27 @@ class RunnerTest < Minitest::Test
       )
     end
 
-    assert_includes error.message, "DATABASE_URL"
-    assert_includes error.message, "invariant sampler"
+    assert_equal "continuous mode requires the workload to provide an invariant sampler", error.message
+  end
+
+  def test_runner_asks_workload_for_invariant_sampler_in_continuous_mode
+    workload = RecordingSamplerWorkload.new
+
+    Load::Runner.new(
+      workload:,
+      adapter_client: FakeAdapterClient.new,
+      run_record: FakeRunRecord.new,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      mode: :continuous,
+      database_url: "postgres://example.test/checkpoint",
+      pg: :fake_pg,
+    )
+
+    assert_equal ["postgres://example.test/checkpoint", :fake_pg], workload.invariant_sampler_args
   end
 
   def test_soak_mode_runs_until_stop_flag
@@ -519,27 +538,6 @@ class RunnerTest < Minitest::Test
     assert_equal true, sample.breach?
     assert_equal 2, sample.to_warning.fetch(:checks).length
     assert_equal 2, sample.to_record(sampled_at: Time.utc(2026, 4, 25, 0, 0, 0)).fetch(:checks).length
-  end
-
-  def test_invariant_sampler_uses_isolated_pg_connection
-    pg = FakePg.new(
-      open_count: 35_000,
-      total_count: 100_000,
-    )
-    sampler = Load::Runner::InvariantSampler.new(
-      pg:,
-      database_url: "postgres://localhost/checkpoint_collector",
-      open_floor: 30_000,
-      total_floor: 80_000,
-      total_ceiling: 200_000,
-    )
-
-    sample = sampler.call
-
-    refute pg.shared_connection_used?, "sampler must not reuse the workload connection"
-    assert_equal true, pg.connection.closed?
-    assert_includes pg.connection.session_sql, "SET LOCAL pg_stat_statements.track = 'none'"
-    assert_equal true, sample.healthy?
   end
 
   def test_runner_samples_diverse_ids_for_mixed_write_actions
@@ -1625,6 +1623,15 @@ class RunnerTest < Minitest::Test
     end
   end
 
+  class RecordingSamplerWorkload < MetricsWorkload
+    attr_reader :invariant_sampler_args
+
+    def invariant_sampler(database_url:, pg:)
+      @invariant_sampler_args = [database_url, pg]
+      FakeInvariantSampler.new([])
+    end
+  end
+
   class MultiWorkerWorkload < Load::Workload
     def name
       "multi-worker-workload"
@@ -1827,64 +1834,6 @@ class RunnerTest < Minitest::Test
     def join(*)
       @join_calls += 1
       true
-    end
-  end
-
-  class FakePg
-    attr_reader :connection
-
-    def initialize(open_count:, total_count:)
-      @open_count = open_count
-      @total_count = total_count
-      @shared_connection_used = false
-      @connection = nil
-    end
-
-    def connect(database_url)
-      @connection = FakePgConnection.new(database_url:, open_count: @open_count, total_count: @total_count)
-    end
-
-    def shared_connection
-      @shared_connection_used = true
-    end
-
-    def shared_connection_used?
-      @shared_connection_used
-    end
-  end
-
-  class FakePgConnection
-    attr_reader :session_sql
-
-    def initialize(database_url:, open_count:, total_count:)
-      @database_url = database_url
-      @open_count = open_count
-      @total_count = total_count
-      @session_sql = []
-      @closed = false
-    end
-
-    def exec(sql)
-      @session_sql << sql
-      if sql.include?("COUNT(*)") && sql.include?("FROM todos")
-        [{ "count" => @open_count.to_s }]
-      elsif sql.include?("FROM pg_class")
-        [{ "count" => @total_count.to_s }]
-      else
-        []
-      end
-    end
-
-    def transaction
-      yield self
-    end
-
-    def close
-      @closed = true
-    end
-
-    def closed?
-      @closed
     end
   end
 
