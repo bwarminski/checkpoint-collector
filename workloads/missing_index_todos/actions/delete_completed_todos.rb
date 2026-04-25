@@ -18,7 +18,14 @@ module Load
           private
 
           def user_id
-            ctx.fetch(:user_id, 1)
+            ctx.fetch(:user_id) { sample_user_id }
+          end
+
+          def sample_user_id
+            scale = ctx[:scale]
+            return 1 unless scale
+
+            rng.rand(1..scale.rows_per_table)
           end
         end
       end

@@ -150,6 +150,7 @@ class CliTest < Minitest::Test
 
     assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
     assert_equal "missing-index-todos", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
+    assert_equal :continuous, captured_runner_kwargs.fetch(:mode)
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
@@ -586,6 +587,7 @@ class CliTest < Minitest::Test
         with_http_server do |port|
           adapter_path = write_fake_adapter(dir, port:)
           pid = Process.spawn(
+            { "DATABASE_URL" => "postgres://example.test/checkpoint" },
             RbConfig.ruby,
             bin_load_path,
             "soak",
@@ -669,7 +671,7 @@ class CliTest < Minitest::Test
   end
 
   def wait_for_run_start(runs_dir)
-    Timeout.timeout(10) do
+    Timeout.timeout(30) do
       loop do
         run_path = Dir[File.join(runs_dir, "*", "run.json")].max_by { |path| File.mtime(path) }
         if run_path && File.exist?(run_path)

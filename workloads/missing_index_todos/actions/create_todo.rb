@@ -19,9 +19,16 @@ module Load
 
           def payload
             {
-              user_id: ctx.fetch(:user_id, 1),
+              user_id: ctx.fetch(:user_id) { sample_user_id },
               title: ctx.fetch(:title, "load"),
             }
+          end
+
+          def sample_user_id
+            scale = ctx[:scale]
+            return 1 unless scale
+
+            rng.rand(1..scale.rows_per_table)
           end
         end
       end

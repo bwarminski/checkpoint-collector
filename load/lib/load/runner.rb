@@ -77,6 +77,19 @@ module Load
           total_ceiling:,
         }
       end
+
+      def to_record(sampled_at:)
+        {
+          sampled_at:,
+          open_count:,
+          total_count:,
+          open_floor:,
+          total_floor:,
+          total_ceiling:,
+          breach: breach?,
+          breaches:,
+        }
+      end
     end
 
     class InvariantSampler
@@ -93,21 +106,18 @@ module Load
 
       def call
         with_connection do |connection|
-          connection.exec("BEGIN")
-          connection.exec("SET LOCAL pg_stat_statements.track = 'none'")
-          open_count = connection.exec(OPEN_COUNT_SQL).first.fetch("count").to_i
-          total_count = connection.exec(TOTAL_COUNT_SQL).first.fetch("count").to_i
-          connection.exec("COMMIT")
-          InvariantSample.new(
-            open_count:,
-            total_count:,
-            open_floor: @open_floor,
-            total_floor: @total_floor,
-            total_ceiling: @total_ceiling,
-          )
-        rescue StandardError
-          connection.exec("ROLLBACK") rescue nil
-          raise
+          connection.transaction do |txn|
+            txn.exec("SET LOCAL pg_stat_statements.track = 'none'")
+            open_count = txn.exec(OPEN_COUNT_SQL).first.fetch("count").to_i
+            total_count = txn.exec(TOTAL_COUNT_SQL).first.fetch("count").to_i
+            InvariantSample.new(
+              open_count:,
+              total_count:,
+              open_floor: @open_floor,
+              total_floor: @total_floor,
+              total_ceiling: @total_ceiling,
+            )
+          end
         end
       end
 
@@ -223,7 +233,7 @@ module Load
           selector: Load::Selector.new(entries: entries, rng: Random.new(seed + index)),
           buffer: tracking_buffer,
           client: Load::Client.new(base_url: base_url, http: @runtime.http),
-          ctx: { base_url: base_url },
+          ctx: { base_url: base_url, scale: @workload.scale },
           rng: Random.new(seed + index),
           rate_limiter: rate_limiter,
           stop_flag: @runtime.stop_flag,
@@ -320,6 +330,7 @@ module Load
 
     def sample_invariants
       sample = @invariant_sampler.call
+      append_invariant_sample(sample)
       if sample.breach?
         append_warning(sample.to_warning)
         @consecutive_invariant_breaches += 1
@@ -449,6 +460,7 @@ module Load
         outcome: outcome_payload(aborted: false),
         query_ids: [],
         warnings: [],
+        invariant_samples: [],
       }
     end
 
@@ -534,6 +546,15 @@ module Load
         warnings = @state.fetch(:warnings).dup
         warnings << deep_copy(payload)
         @state = deep_merge(@state, warnings:)
+        @run_record.write_run(snapshot_state)
+      end
+    end
+
+    def append_invariant_sample(sample)
+      @state_mutex.synchronize do
+        invariant_samples = @state.fetch(:invariant_samples).dup
+        invariant_samples << deep_copy(sample.to_record(sampled_at: current_time))
+        @state = deep_merge(@state, invariant_samples:)
         @run_record.write_run(snapshot_state)
       end
     end

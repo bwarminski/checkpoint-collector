@@ -118,6 +118,7 @@ module Load
           adapter_bin:,
           stop_flag:,
           verifier:,
+          mode:,
         )
       end
     end
@@ -153,6 +154,8 @@ module Load
     end
 
     def verify_fixture(workload:, verifier:, options:)
+      adapter_client = nil
+      pid = nil
       adapter_client = Load::AdapterClient.new(adapter_bin: options.fetch(:adapter_bin))
       adapter_client.describe
       adapter_client.prepare(app_root: options.fetch(:app_root))

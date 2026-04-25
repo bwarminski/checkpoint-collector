@@ -78,10 +78,10 @@ module Load
       { name: "counts_n_plus_one", ok: true, calls:, users: users_count }
     end
 
-    def verify_search_rewrite
+      def verify_search_rewrite
       plan = @explain_reader.call(SEARCH_SQL)
       reference_plan = @search_reference_reader.call
-      unless search_plan_matches_reference?(actual: plan, reference: reference_plan)
+      unless plan_matches_reference?(actual: plan, reference: reference_plan, keys: SEARCH_PLAN_STABLE_KEYS)
         raise VerificationError, "fixture verification failed for #{SEARCH_PATH}: search explain tree drifted from fixtures/mixed-todo-app/search-explain.json"
       end
 
@@ -104,44 +104,23 @@ module Load
       matches
     end
 
-    def plan_matches_reference?(actual:, reference:)
-      reference.all? do |key, value|
-        actual.key?(key) && values_match_reference?(actual.fetch(key), value)
-      end
-    end
-
-    def search_plan_matches_reference?(actual:, reference:)
-      SEARCH_PLAN_STABLE_KEYS.all? do |key|
+    def plan_matches_reference?(actual:, reference:, keys: reference.keys)
+      keys.all? do |key|
         next true unless reference.key?(key)
 
-        actual.key?(key) && search_plan_values_match_reference?(actual.fetch(key), reference.fetch(key))
+        actual.key?(key) && values_match_reference?(actual.fetch(key), reference.fetch(key), keys:)
       end
     end
 
-    def values_match_reference?(actual, reference)
+    def values_match_reference?(actual, reference, keys:)
       case reference
       when Hash
-        actual.is_a?(Hash) && plan_matches_reference?(actual:, reference:)
+        actual.is_a?(Hash) && plan_matches_reference?(actual:, reference:, keys:)
       when Array
         actual.is_a?(Array) &&
           actual.length >= reference.length &&
           reference.each_with_index.all? do |child_reference, index|
-            values_match_reference?(actual.fetch(index), child_reference)
-          end
-      else
-        actual == reference
-      end
-    end
-
-    def search_plan_values_match_reference?(actual, reference)
-      case reference
-      when Hash
-        actual.is_a?(Hash) && search_plan_matches_reference?(actual:, reference:)
-      when Array
-        actual.is_a?(Array) &&
-          actual.length >= reference.length &&
-          reference.each_with_index.all? do |child_reference, index|
-            search_plan_values_match_reference?(actual.fetch(index), child_reference)
+            values_match_reference?(actual.fetch(index), child_reference, keys:)
           end
       else
         actual == reference

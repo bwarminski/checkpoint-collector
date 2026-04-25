@@ -18,7 +18,14 @@ module Load
           private
 
           def todo_id
-            ctx.fetch(:todo_id, 1)
+            ctx.fetch(:todo_id) { sample_todo_id }
+          end
+
+          def sample_todo_id
+            scale = ctx[:scale]
+            return 1 unless scale
+
+            rng.rand(1..scale.rows_per_table)
           end
         end
       end

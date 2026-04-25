@@ -3,6 +3,9 @@
 require "timeout"
 require "tmpdir"
 require_relative "test_helper"
+require_relative "../../workloads/missing_index_todos/actions/close_todo"
+require_relative "../../workloads/missing_index_todos/actions/create_todo"
+require_relative "../../workloads/missing_index_todos/actions/delete_completed_todos"
 
 class RunnerTest < Minitest::Test
   def test_runner_calls_verifier_after_start_and_readiness_and_before_workers
@@ -356,6 +359,67 @@ class RunnerTest < Minitest::Test
     assert_equal true, pg.connection.closed?
     assert_includes pg.connection.session_sql, "SET LOCAL pg_stat_statements.track = 'none'"
     assert_equal true, sample.healthy?
+  end
+
+  def test_runner_samples_diverse_ids_for_mixed_write_actions
+    run_record = FakeRunRecord.new
+    stop_flag = Load::Runner::InternalStopFlag.new
+    http = RecordingRequestHttp.new(stop_flag:, stop_after: 300)
+    runner = Load::Runner.new(
+      workload: MixedWriteWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: http,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+    )
+
+    exit_code = Timeout.timeout(2.0) { runner.run }
+
+    assert_equal Load::ExitCodes::SUCCESS, exit_code
+    assert_operator http.create_user_ids.uniq.length, :>=, 20
+    assert_operator http.delete_user_ids.uniq.length, :>=, 20
+    assert_operator http.closed_todo_ids.uniq.length, :>=, 20
+  end
+
+  def test_runner_persists_invariant_samples_in_run_record
+    run_record = FakeRunRecord.new
+    stop_flag = Load::Runner::InternalStopFlag.new
+    clock = AdvancingClock.new(Time.utc(2026, 4, 25, 0, 0, 0))
+    sampler = PersistedSamplesInvariantSampler.new(
+      stop_flag:,
+      samples: [
+        Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 20_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      ],
+    )
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: -> { clock.now },
+      sleeper: ->(seconds) { clock.advance_by(seconds); Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+      mode: :continuous,
+      invariant_sampler: sampler,
+      invariant_sample_interval_seconds: 0.001,
+      database_url: nil,
+    )
+
+    exit_code = Timeout.timeout(2.0) { runner.run }
+
+    assert_equal Load::ExitCodes::SUCCESS, exit_code
+    samples = run_record.read_run_json.fetch("invariant_samples")
+    assert_equal 2, samples.length
+    assert_equal false, samples.first.fetch("breach")
+    assert_equal true, samples.last.fetch("breach")
+    assert_equal 1, run_record.read_run_json.fetch("warnings").length
   end
 
   def test_runner_always_stops_adapter_and_writes_outcome
@@ -1588,12 +1652,85 @@ class RunnerTest < Minitest::Test
       end
     end
 
+    def transaction
+      yield self
+    end
+
     def close
       @closed = true
     end
 
     def closed?
       @closed
+    end
+  end
+
+  class RecordingRequestHttp < FakeHttp
+    attr_reader :create_user_ids, :delete_user_ids, :closed_todo_ids
+
+    def initialize(stop_flag:, stop_after:)
+      super(always_refuse: false)
+      @stop_flag = stop_flag
+      @stop_after = stop_after
+      @request_count = 0
+      @create_user_ids = []
+      @delete_user_ids = []
+      @closed_todo_ids = []
+    end
+
+    def request(request)
+      @request_count += 1
+      record_request(request)
+      @stop_flag.trigger(:sigterm) if @request_count >= @stop_after
+      Response.new("200")
+    end
+
+    private
+
+    def record_request(request)
+      case request.path
+      when "/api/todos"
+        @create_user_ids << JSON.parse(request.body).fetch("user_id")
+      when "/api/todos/completed"
+        @delete_user_ids << JSON.parse(request.body).fetch("user_id")
+      when %r{\A/api/todos/(\d+)\z}
+        @closed_todo_ids << Regexp.last_match(1).to_i
+      end
+    end
+  end
+
+  class PersistedSamplesInvariantSampler
+    def initialize(stop_flag:, samples:)
+      @stop_flag = stop_flag
+      @samples = samples.dup
+    end
+
+    def call
+      sample = @samples.shift
+      @stop_flag.trigger(:sigterm) if @samples.empty?
+      sample
+    end
+  end
+
+  class MixedWriteWorkload < Load::Workload
+    def name
+      "mixed-write-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 100, open_fraction: 0.6, seed: 42)
+    end
+
+    def actions
+      [
+        Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::CreateTodo, 1),
+        Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::CloseTodo, 1),
+        Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::DeleteCompletedTodos, 1),
+      ]
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 1, duration_seconds: 10, rate_limit: :unlimited, seed: 42)
     end
   end
 end

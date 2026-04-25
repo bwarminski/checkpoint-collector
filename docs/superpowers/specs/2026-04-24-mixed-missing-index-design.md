@@ -223,7 +223,7 @@ The exact CLI spelling can change during implementation if needed, but the disti
 
 The sampler runs on a **dedicated PG connection** with `SET LOCAL pg_stat_statements.track = 'none'` so the sampler's own queries do not land in `pg_stat_statements` and pollute the §8 dominance attribution.
 
-Each breach sample (any value outside the §6.2 `open_floor` / `total_floor` / `total_ceiling`) emits a warning to the run record. **Three consecutive breach samples** abort the run cleanly with non-zero exit (≈3 minutes at the 60s sampling cadence). A healthy sample resets the consecutive-breach counter to zero — a single bad sample followed by recovery does not abort.
+Each sample is persisted in `run.json` under `invariant_samples`, including the sampled counts, the configured floors/ceiling, whether the sample breached, and the concrete breach messages. Each breach sample also emits a warning to the run record. **Three consecutive breach samples** abort the run cleanly with non-zero exit (≈3 minutes at the 60s sampling cadence). A healthy sample resets the consecutive-breach counter to zero — a single bad sample followed by recovery does not abort.
 
 The premise: the workload has drifted out of the regime the §8 dominance back-check was tuned for, so the agent exercise is no longer valid even if the run is still emitting traffic. Better to abort loudly than soak indefinitely on a degraded fixture.
 
