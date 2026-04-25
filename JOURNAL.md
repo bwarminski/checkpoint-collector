@@ -74,3 +74,5 @@
 - 2026-04-24 Task 1 CLI contract: `Load::CLI` now recognizes `run`, `soak`, and `verify-fixture`; `run` maps to `mode: :finite`, `soak` maps to `mode: :continuous`, and `verify-fixture` forwards `workload_name`, `adapter_bin`, and `app_root` into the injected verifier factory.
 - 2026-04-24 Task 1 note: `Load::ExitCodes` still exposes `SUCCESS`, so the soak test asserts that constant rather than introducing an `OK` alias in an unrelated file.
 - 2026-04-24 Task 1 follow-up: `verify-fixture` now rejects runner-only flags through the shared option parser and defaults to a rescueable `ArgumentError` path instead of `NotImplementedError`.
+- 2026-04-24 mixed missing-index workload: the workload stays named `missing-index-todos`, uses `rows_per_table: 100_000` and `open_fraction: 0.6`, and the default action mix is 68/12/7/7/3/6/3 across list-open, list-recent, create, close, delete-completed, fetch-counts, and search.
+- 2026-04-24 mixed missing-index workload follow-up: `CreateTodo` needed `Load::Client#request` body support so the new action tests can assert a minimal JSON payload without adding separate verb helpers.

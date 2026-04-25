@@ -12,7 +12,7 @@ module Load
           end
 
           def call
-            client.get("/todos/status?status=open")
+            client.get("/api/todos?status=open")
           end
         end
       end

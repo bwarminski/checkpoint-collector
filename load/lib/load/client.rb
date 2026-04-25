@@ -1,5 +1,6 @@
 # ABOUTME: Issues HTTP requests against the application under test.
 # ABOUTME: Wraps Net::HTTP with a base URL and simple request helpers.
+require "json"
 require "net/http"
 require "uri"
 
@@ -50,10 +51,13 @@ module Load
       @connection = nil
     end
 
-    def request(method, path)
+    def request(method, path, body: nil, headers: {})
       uri = uri_for(path)
       request_class = Net::HTTP.const_get(method.to_s.capitalize)
       request = request_class.new(uri)
+      headers.each { |key, value| request[key] = value }
+      request.body = body.is_a?(String) ? body : JSON.generate(body) if body
+      request["Content-Type"] ||= "application/json" if body
 
       if @connection
         @connection.request(request)
