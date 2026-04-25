@@ -111,6 +111,12 @@ What success looks like:
 - `run.json` has a full window with `start_ts` and `end_ts`
 - the oracle passes against the produced run directory
 
+What "oracle" means here:
+
+- the oracle is the workload-specific verifier that judges whether a completed run reproduced the intended pathology
+- it is not the load generator itself; it reads the run artifacts after `bin/load run` finishes
+- for `missing-index-todos`, the oracle checks the target query family's plan shape and ClickHouse evidence, then returns `PASS` or `FAIL`
+
 Sample finite-run artifact:
 
 ```json
