@@ -159,6 +159,63 @@ class RunnerTest < Minitest::Test
     BarrierAction.reset!
   end
 
+  def test_runner_reports_sampler_failure_as_controlled_error
+    run_record = FakeRunRecord.new
+    stop_flag = Load::Runner::InternalStopFlag.new
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+      mode: :continuous,
+      invariant_sampler: RaisingInvariantSampler.new(stop_flag:),
+      invariant_sample_interval_seconds: 0.001,
+      database_url: nil,
+    )
+
+    exit_code = Timeout.timeout(2.0) { runner.run }
+
+    assert_equal Load::ExitCodes::ADAPTER_ERROR, exit_code
+    assert_equal true, run_record.outcome.fetch(:aborted)
+    assert_equal "invariant_sampler_failed", run_record.outcome.fetch(:error_code)
+  end
+
+  def test_runner_records_invariant_breach_before_first_successful_request
+    sampler = FakeInvariantSampler.new(
+      [
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      ],
+    )
+    run_record = FakeRunRecord.new
+    runner = Load::Runner.new(
+      workload: NeverFinishingWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      mode: :continuous,
+      invariant_sampler: sampler,
+      invariant_sample_interval_seconds: 0.001,
+      database_url: nil,
+    )
+
+    exit_code = Timeout.timeout(2.5) { runner.run }
+
+    assert_equal Load::ExitCodes::ADAPTER_ERROR, exit_code
+    assert_equal 0, run_record.outcome.fetch(:requests_total)
+    assert_equal "invariant_breach", run_record.outcome.fetch(:error_code)
+  end
+
   def test_runner_does_not_abort_when_breach_recovers
     stop_flag = Load::Runner::InternalStopFlag.new
     workers_ready = Queue.new
@@ -189,6 +246,42 @@ class RunnerTest < Minitest::Test
     end
   ensure
     BarrierAction.reset!
+  end
+
+  def test_runner_waits_one_interval_before_first_invariant_sample_and_interrupts_shutdown
+    run_record = FakeRunRecord.new
+    stop_flag = Load::Runner::InternalStopFlag.new
+    clock = AdvancingClock.new(Time.utc(2026, 4, 25, 0, 0, 0))
+    sleeper = BlockingInvariantSleeper.new(clock:, blocked_interval: 60.0)
+    sampler = RecordingInvariantSampler.new(clock:)
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: -> { clock.now },
+      sleeper:,
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+      mode: :continuous,
+      invariant_sampler: sampler,
+      invariant_sample_interval_seconds: 60.0,
+      database_url: nil,
+    )
+
+    thread = Thread.new { runner.run }
+    sleeper.wait_until_interval_sleep
+    assert_equal [], sampler.call_times
+
+    stop_flag.trigger(:sigterm)
+
+    assert_equal Load::ExitCodes::SUCCESS, Timeout.timeout(2.0) { thread.value }
+    assert_equal true, run_record.outcome.fetch(:aborted)
+    assert_equal [60.0], sleeper.interval_calls
+  ensure
+    thread&.kill
+    thread&.join
   end
 
   def test_invariant_sampler_uses_isolated_pg_connection
@@ -1266,6 +1359,34 @@ class RunnerTest < Minitest::Test
     end
   end
 
+  class NeverFinishingWorkload < Load::Workload
+    def name
+      "never-finishing-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 42)
+    end
+
+    def actions
+      [Load::ActionEntry.new(NeverFinishingAction, 1)]
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 1, duration_seconds: 0.01, rate_limit: :unlimited, seed: 42)
+    end
+  end
+
+  NeverFinishingAction = Class.new(Load::Action) do
+    def name
+      :never_finishing_action
+    end
+
+    def call
+      Queue.new.pop
+    end
+  end
+
   class FakeInvariantSampler
     def initialize(samples, first_sample_barrier: nil)
       @samples = samples.dup
@@ -1292,6 +1413,57 @@ class RunnerTest < Minitest::Test
 
     def wait_until_drained
       @drained.pop
+    end
+  end
+
+  class RaisingInvariantSampler
+    def initialize(stop_flag:)
+      @stop_flag = stop_flag
+    end
+
+    def call
+      @stop_flag.trigger(:invariant_sampler_failed)
+      raise "sampler blew up"
+    end
+  end
+
+  class RecordingInvariantSampler
+    attr_reader :call_times
+
+    def initialize(clock:)
+      @clock = clock
+      @call_times = []
+    end
+
+    def call
+      @call_times << @clock.now
+      Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000)
+    end
+  end
+
+  class BlockingInvariantSleeper
+    attr_reader :interval_calls
+
+    def initialize(clock:, blocked_interval:)
+      @clock = clock
+      @blocked_interval = blocked_interval
+      @interval_sleep_started = Queue.new
+      @interval_calls = []
+    end
+
+    def call(seconds)
+      if seconds == @blocked_interval
+        @interval_calls << seconds
+        @interval_sleep_started << true
+        Queue.new.pop
+      else
+        @clock.advance_by(seconds)
+        Thread.pass
+      end
+    end
+
+    def wait_until_interval_sleep
+      @interval_sleep_started.pop
     end
   end
 
