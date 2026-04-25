@@ -2,6 +2,7 @@
 # ABOUTME: Covers readiness timeout handling, abort handling, and window pinning.
 require "timeout"
 require "tmpdir"
+require "stringio"
 require_relative "test_helper"
 require_relative "../../workloads/missing_index_todos/actions/close_todo"
 require_relative "../../workloads/missing_index_todos/actions/create_todo"
@@ -188,6 +189,81 @@ class RunnerTest < Minitest::Test
     assert_equal "invariant_breach", payload.dig("outcome", "error_code")
   ensure
     BarrierAction.reset!
+  end
+
+  def test_runner_enforce_policy_aborts_after_three_consecutive_breaches
+    workers_ready = Queue.new
+    BarrierAction.reset!
+    BarrierAction.ready_queue = workers_ready
+    sampler = FakeInvariantSampler.new(
+      [
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      ],
+      first_sample_barrier: workers_ready,
+    )
+
+    run_record = FakeRunRecord.new
+    runner = build_continuous_runner(run_record:, invariant_sampler: sampler, invariant_policy: :enforce)
+
+    assert_equal Load::ExitCodes::ADAPTER_ERROR, Timeout.timeout(2.0) { runner.run }
+
+    payload = run_record.read_run_json
+    warnings = payload.fetch("warnings")
+    assert_equal 3, warnings.length
+    assert_includes warnings.last.fetch("message"), "open_count"
+    assert_equal "invariant_breach", payload.dig("outcome", "error_code")
+  ensure
+    BarrierAction.reset!
+  end
+
+  def test_runner_warn_policy_records_breaches_without_aborting
+    stderr = StringIO.new
+    started = Queue.new
+    release = Queue.new
+    samples = [
+      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+    ]
+    sample_index = 0
+    sampler = Object.new
+    sampler.define_singleton_method(:call) do
+      started << (sample_index += 1)
+      release.pop
+      samples.fetch(sample_index - 1)
+    end
+
+    run_record = FakeRunRecord.new
+    stop_flag = Load::Runner::InternalStopFlag.new
+    runner = build_continuous_runner(
+      run_record:,
+      stop_flag:,
+      invariant_sampler: sampler,
+      invariant_policy: :warn,
+      stderr:,
+    )
+    thread = Thread.new { runner.run }
+
+    3.times do |index|
+      assert_equal index + 1, started.pop
+      stop_flag.trigger(:sigterm) if index == 2
+      release << true
+    end
+    stop_flag.trigger(:sigterm)
+
+    assert_equal Load::ExitCodes::SUCCESS, Timeout.timeout(2.0) { thread.value }
+
+    payload = run_record.read_run_json
+    assert_equal 3, payload.fetch("warnings").length
+    assert_equal 3, payload.fetch("invariant_samples").length
+    assert_equal true, payload.dig("outcome", "aborted")
+    assert_nil payload.dig("outcome", "error_code")
+    assert_equal 3, stderr.string.lines.count { |line| line.start_with?("warning: invariant breach:") }
+  ensure
+    thread&.kill
+    thread&.join
   end
 
   def test_runner_reports_sampler_failure_as_controlled_error
@@ -945,7 +1021,7 @@ class RunnerTest < Minitest::Test
     -> { Time.now.utc }
   end
 
-  def build_continuous_runner(run_record:, stop_flag: Load::Runner::InternalStopFlag.new, invariant_sampler: FakeInvariantSampler.new([]))
+  def build_continuous_runner(run_record:, stop_flag: Load::Runner::InternalStopFlag.new, invariant_sampler: FakeInvariantSampler.new([]), invariant_policy: :enforce, stderr: StringIO.new)
     Load::Runner.new(
       workload: BarrierWorkload.new,
       adapter_client: FakeAdapterClient.new,
@@ -960,6 +1036,8 @@ class RunnerTest < Minitest::Test
       invariant_sampler:,
       invariant_sample_interval_seconds: 0.001,
       database_url: nil,
+      invariant_policy:,
+      stderr:,
     )
   end
 

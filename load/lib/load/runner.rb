@@ -134,7 +134,7 @@ module Load
     class InvariantSamplerFailure < StandardError; end
     class InvariantSamplerShutdown < StandardError; end
 
-    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil, verifier: nil, mode: :finite, invariant_sampler: nil, invariant_sample_interval_seconds: DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS, database_url: ENV["DATABASE_URL"], pg: PG)
+    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil, verifier: nil, mode: :finite, invariant_policy: :enforce, invariant_sampler: nil, invariant_sample_interval_seconds: DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS, database_url: ENV["DATABASE_URL"], pg: PG, stderr: $stderr)
       @workload = workload
       @adapter_client = adapter_client
       @run_record = run_record
@@ -142,6 +142,8 @@ module Load
       @settings = Settings.new(readiness_path, startup_grace_seconds, metrics_interval_seconds, workload_file, app_root, adapter_bin)
       @verifier = verifier
       @mode = mode
+      @stderr = stderr
+      @invariant_policy = invariant_policy
       @invariant_sampler = invariant_sampler || default_invariant_sampler(database_url:, pg:)
       @invariant_sample_interval_seconds = invariant_sample_interval_seconds
       @state_mutex = Mutex.new
@@ -295,6 +297,7 @@ module Load
 
     def start_invariant_thread
       return unless @mode == :continuous
+      return if @invariant_policy == :off
       return unless @invariant_sampler
 
       Thread.new do
@@ -328,16 +331,29 @@ module Load
       end
     end
 
+    # sample -> breach? -> enforce -> ++counter -> >=3? -> trigger_stop
+    #                 -> warn    -> @stderr.puts (no counter)
+    #                 -> off     -> unreachable (thread never started)
+    #      -> !breach  -> counter = 0 (enforce only; harmless elsewhere)
     def sample_invariants
       sample = @invariant_sampler.call
       append_invariant_sample(sample)
-      if sample.breach?
-        append_warning(sample.to_warning)
-        @consecutive_invariant_breaches += 1
-        trigger_stop(:invariant_breach) if @consecutive_invariant_breaches >= 3
-      else
-        @consecutive_invariant_breaches = 0
-      end
+      return reset_invariant_breaches unless sample.breach?
+
+      append_warning(sample.to_warning)
+      emit_invariant_warning(sample) if @invariant_policy == :warn
+      return if @invariant_policy == :warn
+
+      @consecutive_invariant_breaches += 1
+      trigger_stop(:invariant_breach) if @consecutive_invariant_breaches >= 3
+    end
+
+    def reset_invariant_breaches
+      @consecutive_invariant_breaches = 0 if @invariant_policy == :enforce
+    end
+
+    def emit_invariant_warning(sample)
+      @stderr.puts("warning: invariant breach: #{sample.breaches.join('; ')}")
     end
 
     def trigger_stop(reason)
