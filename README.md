@@ -85,6 +85,11 @@ adapter contract, but they answer different questions.
 Use `run` for a finite benchmark window. This is the mode behind
 `make load-smoke`.
 
+Invariant sampling defaults to `enforce` for `run`. In that mode, three
+consecutive breached samples abort the run. Use `--invariants warn` to keep
+sampling and record warnings without stopping the run, or `--invariants off`
+to disable invariant sampling for that run.
+
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
 BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
@@ -148,10 +153,14 @@ Use `soak` for a long-running diagnosis session. It keeps generating traffic
 until you interrupt it or the invariant sampler aborts because the dataset has
 drifted out of the designed regime.
 
+Invariant sampling defaults to `enforce` for `soak` too. `warn` keeps sampling
+and records warnings without stopping the run; `off` disables invariant
+sampling entirely for that run.
+
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
 BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
-bin/load soak --workload missing-index-todos \
+bin/load soak --workload missing-index-todos --invariants warn \
   --adapter adapters/rails/bin/bench-adapter \
   --app-root /home/bjw/db-specialist-demo
 ```
@@ -216,6 +225,9 @@ Sample degraded-soak artifact:
 Use `verify-fixture` when you want the fast pre-flight pathology check without
 running a benchmark window. This is also the gate that `run` and `soak` execute
 before workers start for `missing-index-todos`.
+
+`--invariants` does not apply here. `verify-fixture` uses the shared
+pre-flight verifier path and rejects runner-only flags.
 
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \

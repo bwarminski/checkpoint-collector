@@ -96,3 +96,4 @@
 
 - 2026-04-25 Task 1: moved workload knobs into `Load::Scale#extra`; `Scale` now validates reserved keys and emits only `ROWS_PER_TABLE` plus uppercase extras.
 - 2026-04-25 verification: `load/test/scale_test.rb`, `load/test/adapter_client_test.rb`, `load/test/cli_test.rb`, `load/test/workload_registry_test.rb`, `load/test/runner_test.rb`, and `workloads/missing_index_todos/test/workload_test.rb` all passed under `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby ...`.
+- 2026-04-25 invariant policy docs: `run` and `soak` now document `--invariants enforce|warn|off`, while `verify-fixture` explicitly rejects the flag.
