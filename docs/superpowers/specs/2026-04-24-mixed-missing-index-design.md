@@ -96,6 +96,7 @@ The app exposes these routes:
 
 - `DELETE /api/todos/completed`
   - bulk-deletes completed/non-open todos
+  - bounded per call; see §5.2.1
 
 - `GET /api/todos/counts`
   - returns counts in a way that preserves the count-side N+1 pathology
@@ -103,23 +104,40 @@ The app exposes these routes:
 - `GET /api/todos/search`
   - preserves the old text-search/query-shape pathology associated with the earlier `rewrite_like` fix family
 
+### 5.2.1 Bulk delete must be bounded
+
+The `DELETE /api/todos/completed` endpoint must be bounded per call. Acceptable shapes:
+
+- **per-user scope:** `DELETE FROM todos WHERE user_id = $1 AND status != 'open'` — deletes one user's completed rows; mean batch size ≈ `total_completed / users` and auto-stabilizes (more closed rows produce larger batches).
+- **explicit LIMIT:** delete a fixed N (e.g., 50) of the oldest completed rows per call.
+
+Unbounded `DELETE FROM todos WHERE status != 'open'` is forbidden. A single such call collapses the closed pool and breaks the §6.2 `total_count` invariant for the remainder of the run. The constraint is load-bearing: a future "cleanup" PR that reaches for `Todo.where.not(status: 'open').destroy_all` silently destroys the soak-mode contract.
+
 ### 5.3 Pathology preservation
 
-The new API should preserve three issue classes:
+The new API should preserve three issue classes; each has an explicit protection contract:
 
-1. **Missing index**
+1. **Missing index** (primary, oracle-backed)
    - dominant path: `GET /api/todos?status=open`
    - expected failure mode: seq scan on `todos`
+   - protection: §8 oracle (run-time assertion + dominance margin)
 
-2. **Count-side N+1**
+2. **Count-side N+1** (secondary, smoke-backed)
    - exposed via `GET /api/todos/counts`
-   - expected failure mode: repeated per-user or per-scope count queries instead of one set-based query
+   - expected failure mode: more than one distinct queryid attributable to a single `/counts` call
+   - protection: §8.2 verify-fixture pre-flight smoke
 
-3. **Text-search/query-shape issue**
+3. **Text-search/query-shape issue** (secondary, smoke-backed)
    - exposed via `GET /api/todos/search`
-   - expected failure mode: intentionally poor query shape that is more naturally fixed by rewriting app code than by adding the missing status index
+   - expected failure mode: EXPLAIN tree contains the rewrite_like-family filter shape (intentionally fixable by rewriting app code, not by adding the missing status index)
+   - protection: §8.2 verify-fixture pre-flight smoke
+   - reference: pattern derived from the existing `oracle/rewrite-like` history and stored in the smoke fixture; not reimagined from operator memory.
 
-The exact implementation of the search pathology must be derived from the existing `oracle/rewrite-like` history, not reimagined from scratch.
+### 5.4 Dataset size
+
+The benchmark dataset is sized to keep the seq-scan on `todos.status = 'open'` above ~5ms `mean_exec_time` when warm. Initial target: `ROWS_PER_TABLE = 100000`, `OPEN_FRACTION = 0.6`.
+
+Smaller dataset sizes (e.g., for CI) MUST re-verify the §8 dominance margin at the new scale — the workload is not portable across dataset sizes without re-checking. Smaller seeded datasets also shrink the §6.2 `open_floor` and `total_floor` proportionally.
 
 ## 6. Workload Design
 
@@ -139,18 +157,37 @@ Recommended initial weights:
 
 The key requirement is not the exact percentages. It is that:
 
-- the open-todos path remains the highest-volume query family
+- the open-todos path remains dominant in `pg_stat_statements` (see definition below)
 - the other actions create legitimate query noise
 - the mutation rate does not erase the open-todo distribution too quickly during a long run
+
+**"Dominant" is defined in `pg_stat_statements` terms.** The list-open queryid must hold the largest `total_exec_time` over the run window, by at least 3× the next queryid. Counting by `calls` is not sufficient — a cheap, frequent query can lose to a rare, expensive one when the agent sorts by database time.
+
+The action weights above target this margin at the §5.4 dataset size; they are back-checked against per-action cost estimates and re-verified by the §8 oracle on every run. If the §5.4 dataset size changes, the back-check must be re-run.
 
 ### 6.2 Shared mutable dataset
 
 All actions operate on the same shared dataset. Writes are real and persistent for the duration of the run. This is intentional: the system should look like a live app under background use, not like a frozen benchmark image.
 
-The workload must therefore balance writes against the seeded distribution so that long-running traffic stays useful. In practice:
+**Steady-state invariants.** Soak mode requires two stationary properties:
 
-- inserts must replenish open rows often enough
-- close/delete behavior must not collapse the open set too quickly
+- `open_count ≥ open_floor` (default: `0.3 × ROWS_PER_TABLE`) — keeps the seq-scan returning a bulk result so its `mean_exec_time` stays high.
+- `total_count ∈ [total_floor, total_ceiling]` (default: `[0.8, 2.0] × ROWS_PER_TABLE`) — keeps the *scan cost* stable; a monotonically growing table makes `mean_exec_time` drift over the run, which confuses an agent looking at trends.
+
+Floors are tied to §5.4: smaller seeded datasets shrink the floors proportionally, but the §8 dominance margin must be re-checked at the new scale.
+
+Action weights must satisfy:
+
+- `E[Δopen]/req ≥ 0`
+- `E[Δtotal]/req ≈ 0` (within `±ε`; `ε` set so a 24h soak drifts < 20% of seed size)
+
+With the §6.1 weights and the §5.2.1 delete bound, expected per-request effects are:
+
+- `Δopen  = +0.07 (create) − 0.07 (close)            = 0`
+- `Δtotal = +0.07 (create) − 0.03 × batch (delete)`
+- `       ≈ 0` when `batch_size ≈ 2.3`
+
+The per-user delete shape (§5.2.1) auto-produces `batch_size ≈ total_completed / users`, which self-stabilizes. The fixed-LIMIT shape requires `LIMIT ≈ 2-3` to satisfy the invariant.
 
 ## 7. Execution Modes
 
@@ -180,14 +217,23 @@ The runner interface should model this as a distinct execution mode rather than 
 
 The exact CLI spelling can change during implementation if needed, but the distinction between finite and continuous execution should stay explicit.
 
+**Runtime invariant sampling.** Soak mode samples `open_count` and `total_count` every 60s. `open_count` is a real `SELECT COUNT(*) FROM todos WHERE status='open'`; `total_count` reads `pg_class.reltuples::bigint` for cheap approximate cardinality.
+
+The sampler runs on a **dedicated PG connection** with `SET LOCAL pg_stat_statements.track = 'none'` so the sampler's own queries do not land in `pg_stat_statements` and pollute the §8 dominance attribution.
+
+Each breach sample (any value outside the §6.2 `open_floor` / `total_floor` / `total_ceiling`) emits a warning to the run record. **Three consecutive breach samples** abort the run cleanly with non-zero exit (≈3 minutes at the 60s sampling cadence). A healthy sample resets the consecutive-breach counter to zero — a single bad sample followed by recovery does not abort.
+
+The premise: the workload has drifted out of the regime the §8 dominance back-check was tuned for, so the agent exercise is no longer valid even if the run is still emitting traffic. Better to abort loudly than soak indefinitely on a degraded fixture.
+
 ## 8. Oracle Scope
 
-The oracle remains intentionally narrow in this round.
+The oracle remains intentionally narrow in this round on the *primary* pathology, but adds a dominance-margin assertion and a pre-flight smoke for the secondary pathologies.
 
-It should continue to assert only:
+It should continue to assert:
 
 - the missing-index explain signal
 - the corresponding ClickHouse/query-id signal for that dominant query family
+- **dominance margin:** the missing-index queryid's `total_exec_time` over the run window is ≥3× the next queryid's. This catches silent traffic-shape regressions (a heavier endpoint added, dataset shrunk, counts pathology accidentally fixed) that would invalidate the agent exercise without flipping the EXPLAIN signal.
 
 It should **not** fail the run merely because:
 
@@ -195,7 +241,27 @@ It should **not** fail the run merely because:
 - the text-search issue exists
 - mixed traffic introduces additional noisy query families
 
-Those secondary issues are part of the diagnosis environment, not part of the formal pass/fail gate yet.
+Those secondary issues are part of the diagnosis environment, not part of the formal pass/fail gate yet — but they ARE protected by the §8.2 pre-flight smoke against silent rot.
+
+### 8.1 Where the oracle reads from
+
+Dominance is asserted via ClickHouse `query_intervals` (aggregated from `pg_stat_statements` snapshots), not `pg_stat_statements` directly. This tests the full collector pipeline as a side effect of the oracle and avoids re-implementing aggregation in the runner.
+
+### 8.2 Pre-flight verification (verify-fixture smoke)
+
+A standalone `bin/load verify-fixture` command asserts all three §5.3 pathologies exist on a freshly seeded `db-specialist-demo`. It runs as the **first step of every finite and soak run** (pre-flight gate) and is also runnable manually or from CI.
+
+Assertions, each independent and short-circuit on failure:
+
+1. **Missing-index:** `GET /api/todos?status=open` EXPLAIN tree contains `Seq Scan on todos` with a `status` filter. Reuses the §8 oracle tree-walk.
+2. **Counts N+1:** reset `pg_stat_statements`; issue one `GET /api/todos/counts`; snapshot. The count of distinct queryids attributable to that call must be ≥2. (Conservative floor: real N+1 produces N+ subqueries, but ≥2 catches the degenerate "someone fixed it to one query" case.)
+3. **Search rewrite:** `GET /api/todos/search?q=foo` EXPLAIN tree contains a Seq Scan with a Filter matching the rewrite_like reference pattern stored at `fixtures/mixed-todo-app/search-explain.json`.
+
+A failed assertion aborts the run before traffic starts, with a message naming the rotten pathology and the file/route most likely responsible.
+
+The smoke is also wired into `db-specialist-demo` CI as a required check (see §11), so PRs that erode a pathology fail there before reaching the benchmark.
+
+Pre-flight is preferred over run-time warnings because (a) run-time warnings get ignored once they appear in every run record, and (b) attribution is cleanest with a freshly-reset `pg_stat_statements` and a single isolated request.
 
 ## 9. Agent-Exercise Success Criteria
 
@@ -242,6 +308,7 @@ Verification splits into two levels:
 - preserve the missing `status` index
 - preserve the counts and search pathologies
 - keep the benchmark seeding path compatible with the existing adapter contract
+- wire `bin/load verify-fixture` (§8.2) into demo-app CI as a required check; PRs touching `/api/todos`, `/api/todos/counts`, or `/api/todos/search` MUST pass it before merge
 
 ## 12. Deliberate Decisions
 
@@ -267,9 +334,21 @@ Verification splits into two levels:
 4. **Continuous mode can grow operationally messy**
    - mitigated by keeping it as the same workload shape with a different lifetime, not a separate runner subsystem
 
+5. **Dataset-scale fragility**
+   - small CI datasets can collapse the §8 dominance margin (cheap seq-scan on a small table loses to a more expensive search query)
+   - mitigated by §5.4 dataset pin + §8 dominance assertion (which fails loudly if the margin breaks)
+
+6. **Bulk-delete semantics**
+   - unbounded `DELETE WHERE status != 'open'` collapses the closed pool in one call and breaks the §6.2 `total_count` invariant
+   - mitigated by §5.2.1 forbidding the unbounded shape
+
+7. **Floor breach during soak**
+   - dataset can drift outside the §6.2 steady-state envelope under sustained traffic-shape skew (e.g., user-distribution imbalance)
+   - mitigated by §7.2 invariant sampling + abort
+
 ## 14. Out of Scope Follow-Ups
 
-- Expanding the oracle to assert N+1 or search issues
+- Promoting counts-N+1 or search-rewrite from smoke-only to full oracle (assert exact subquery counts, assert ClickHouse `query_intervals` signal, fail benchmark runs on margin breach). The §8.2 smoke protects existence; promotion to a margin-based oracle is deferred until the agent exercise proves the signal is needed for diagnosis.
 - Adding a second benchmark app
 - Converting the fixture into a full browser-facing TodoMVC frontend
 - Generalizing the mixed workload into a broad scenario library

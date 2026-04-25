@@ -2,6 +2,26 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Revision History
+
+**2026-04-24 — Round 1 plan-eng-review (DO_NOT_SHIP → revised)**
+
+Eight findings folded back into the plan. Each delta is sited in the task it touches; the implementor should treat the revised text as authoritative.
+
+| Finding | Where applied |
+|---|---|
+| F1 — Pre-flight gate must run after `:start`, not before (verifier needs HTTP endpoints) | Task 7 architectural note + revised tests + revised pseudo-impl |
+| F2 — Counts smoke must check call counts ≥ users_count, not just ≥2 distinct queryids | Task 4 demo-app pathology test + Task 6 verifier impl + tests |
+| F3 — Sustained-breach semantics simplified to 3 consecutive sample breaches (≈3 min) | Task 8 alignment note + tests; spec §7.2 updated to match |
+| F4 — Oracle dominance needs a new top-N ClickHouse SQL, not just new test fixtures | Task 9 SQL spec + revised tests + impl + integration with existing oracle |
+| F5 — `Load::CLI#default_runner` must be extended to wire `Load::FixtureVerifier` and accept `mode:` | Task 1 Step 3.5 + non-mocked smoke test |
+| F6 — Soak-mode test replaces `sleep 0.1` with a `Queue` synchronization barrier | Task 8 revised soak tests |
+| F7 — Invariant sampler runs on isolated PG connection with `pg_stat_statements.track = 'none'` | Task 8 sampler isolation note + impl + dedicated test |
+| F8 — `db-specialist-demo` schema must be verified, with migrations added if needed | Task 3 Step 0 |
+| F9 — Workload weights must sum to 100 and be locked exactly in tests | Task 2 weights table + revised test |
+| F10 — Task 3 `index` action: drop dead `"nil"` literal | Task 3 controller pseudo-impl |
+| F12 — Add tuning contingency if dominance margin fails on first real run | Task 12 Step 4 |
+
 **Goal:** Replace the narrow `missing-index-todos` fixture with a richer Todo JSON benchmark app and mixed workload while keeping the missing-index oracle dominant, adding `verify-fixture`, and supporting both finite and soak execution modes.
 
 **Architecture:** Extend `~/db-specialist-demo` into a TodoMVC-shaped JSON API that intentionally preserves three pathologies, then evolve `checkpoint-collector` so `bin/load` can run the mixed workload in both finite and continuous modes. Keep the formal oracle narrow on the missing-index path, but add a pre-flight `verify-fixture` gate and soak-mode invariant sampling so the diagnosis exercise fails loudly when the fixture drifts out of its designed regime.
@@ -163,6 +183,41 @@ def verify_fixture_command
 end
 ```
 
+- [ ] **Step 3.5: Update `default_runner` and add `default_verifier_factory` (production wiring)**
+
+The new `runner_factory` and `verifier_factory` injection points are tested via mocks in Step 1, but `Load::CLI`'s production defaults must also construct real instances. Without this, `bin/load run` and `bin/load verify-fixture` outside tests will not have a verifier wired in.
+
+Update `cli.rb`:
+
+```ruby
+def initialize(argv:, version:, runner_factory: nil, verifier_factory: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
+  @runner_factory = runner_factory || method(:default_runner_factory)
+  @verifier_factory = verifier_factory || method(:default_verifier_factory)
+  ...
+end
+
+def default_runner_factory(workload:, mode:, adapter_bin:, app_root:, ...)
+  ...
+  Load::Runner.new(workload:, adapter_client:, run_record:, mode:, verifier: @verifier_factory.call(workload_name: workload.name, adapter_client:, app_root:), ...)
+end
+
+def default_verifier_factory(workload_name:, adapter_client:, app_root:, **)
+  Load::FixtureVerifier.new(workload_name: workload_name, adapter_client: adapter_client, app_root: app_root)
+end
+```
+
+Add a non-mocked smoke test that exercises `default_runner_factory` end-to-end at the unit level (runner construction succeeds; verifier present; mode propagated):
+
+```ruby
+def test_default_runner_factory_constructs_runner_with_verifier_and_mode
+  cli = Load::CLI.new(argv: ["run", "--workload", "missing-index-todos", "--adapter", "/tmp/adapter", "--app-root", "/tmp/demo"], version: "0.3.0")
+  options = cli.send(:parse_options)
+  runner = cli.send(:default_runner_factory, workload: stub_workload, mode: :finite, **options)
+  refute_nil runner.instance_variable_get(:@verifier)
+  assert_equal :finite, runner.mode
+end
+```
+
 - [ ] **Step 4: Run the CLI tests to verify they pass**
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/cli_test.rb`
@@ -211,7 +266,11 @@ def test_workload_declares_mixed_action_entries
   workload = Load::Workloads::MissingIndexTodos::Workload.new
 
   names = workload.actions.map { |entry| entry.action_class.name.split("::").last }
+  weights = workload.actions.map(&:weight)
+
   assert_equal %w[ListOpenTodos ListRecentTodos CreateTodo CloseTodo DeleteCompletedTodos FetchCounts SearchTodos], names
+  assert_equal [65, 12, 7, 7, 3, 4, 2], weights
+  assert_equal 100, weights.sum, "weights must sum to 100 to match spec §6.1 percentages"
   assert_equal 100_000, workload.scale.rows_per_table
   assert_equal 0.6, workload.scale.open_fraction
 end
@@ -236,16 +295,18 @@ end
 ```ruby
 def actions
   [
-    Load::ActionEntry.new(Actions::ListOpenTodos, 68),
-    Load::ActionEntry.new(Actions::ListRecentTodos, 12),
-    Load::ActionEntry.new(Actions::CreateTodo, 7),
-    Load::ActionEntry.new(Actions::CloseTodo, 7),
-    Load::ActionEntry.new(Actions::DeleteCompletedTodos, 3),
-    Load::ActionEntry.new(Actions::FetchCounts, 6),
-    Load::ActionEntry.new(Actions::SearchTodos, 3)
-  ]
-end
+    Load::ActionEntry.new(Actions::ListOpenTodos, 65),       # 65% — primary pathology, must dominate
+    Load::ActionEntry.new(Actions::ListRecentTodos, 12),     # 12% — paginated indexed read
+    Load::ActionEntry.new(Actions::CreateTodo, 7),           # 7%  — open replenishment
+    Load::ActionEntry.new(Actions::CloseTodo, 7),            # 7%  — open drain (balances create)
+    Load::ActionEntry.new(Actions::DeleteCompletedTodos, 3), # 3%  — bounded per §5.2.1
+    Load::ActionEntry.new(Actions::FetchCounts, 4),          # 4%  — secondary N+1 pathology
+    Load::ActionEntry.new(Actions::SearchTodos, 2)           # 2%  — secondary rewrite_like pathology
+  ]                                                          # ───
+end                                                          # 100
 ```
+
+Weights sum to exactly 100 to match the spec §6.1 percentage framing. The `Load::Selector` normalizes regardless, but locking to 100 keeps the test, the spec, and any future operator-readable run record consistent.
 
 - [ ] **Step 4: Run the workload tests to verify they pass**
 
@@ -263,11 +324,35 @@ git commit -m "feat: define mixed missing-index workload"
 ## Task 3: Extend The Demo App API Without Losing The Broken Schema
 
 **Files:**
+- Inspect: `/home/bjw/db-specialist-demo/db/schema.rb`
+- Create (if needed): `/home/bjw/db-specialist-demo/db/migrate/<timestamp>_extend_todos_for_mixed_workload.rb`
 - Modify: `/home/bjw/db-specialist-demo/config/routes.rb`
 - Modify: `/home/bjw/db-specialist-demo/app/controllers/todos_controller.rb`
 - Modify: `/home/bjw/db-specialist-demo/app/models/todo.rb`
 - Modify: `/home/bjw/db-specialist-demo/app/models/user.rb`
 - Modify: `/home/bjw/db-specialist-demo/test/controllers/todos_controller_test.rb`
+
+- [ ] **Step 0: Verify the existing schema and add migrations only if gaps exist**
+
+Read `/home/bjw/db-specialist-demo/db/schema.rb` and confirm the following invariants hold; if any are missing, add a migration to fix it. The pathology contract requires:
+
+- `users` table exists (id, plus whatever the demo app already uses)
+- `todos` columns: `id`, `user_id` (FK to users), `status` (string), `title` (string), `created_at`
+- index on `todos(user_id)` exists
+- **NO index on `todos(status)`** — this is the primary pathology; if one exists, the migration must drop it (and the migration must be a separate commit so the drop is auditable)
+
+If migrations are needed, capture them as their own commit before the controller work:
+
+```bash
+cd /home/bjw/db-specialist-demo
+bin/rails generate migration ExtendTodosForMixedWorkload
+# edit the migration file
+bin/rails db:migrate
+git add db/migrate db/schema.rb
+git commit -m "chore: align todos schema for mixed workload"
+```
+
+If the schema already matches, log the verification in the implementor notes and proceed.
 
 - [ ] **Step 1: Write failing route/controller tests for the JSON API**
 
@@ -320,7 +405,7 @@ end
 ```ruby
 def index
   scope = Todo.order(created_at: :desc)
-  scope = scope.where(status: params[:status]) unless params[:status].in?(%w[all nil]) || params[:status].blank?
+  scope = scope.where(status: params[:status]) if params[:status].present? && params[:status] != "all"
   scope = scope.page(params[:page]).per(params[:per_page] || 50)
   render json: {items: scope.as_json(only: [:id, :user_id, :title, :status, :created_at])}
 end
@@ -348,6 +433,8 @@ git -C /home/bjw/db-specialist-demo commit -m "feat: add todo benchmark api"
 
 - [ ] **Step 1: Write failing tests that lock the counts and search behavior at the API boundary**
 
+The N+1 pathology test is the load-bearing one for §5.3 — it locks the actual broken behavior, not just the JSON shape. Same for the search query plan.
+
 ```ruby
 test "counts returns per-user totals" do
   get "/api/todos/counts"
@@ -356,11 +443,33 @@ test "counts returns per-user totals" do
   assert body.key?(users(:one).id.to_s)
 end
 
+test "counts issues N+1 against todos (pathology contract)" do
+  ActiveRecord::Base.connection.execute("SELECT pg_stat_statements_reset()")
+  expected_users = User.count
+  get "/api/todos/counts"
+  assert_response :success
+
+  count_subquery_calls = ActiveRecord::Base.connection.exec_query(<<~SQL).rows.flatten.first.to_i
+    SELECT COALESCE(SUM(calls), 0) FROM pg_stat_statements
+    WHERE query LIKE '%FROM "todos"%' AND query LIKE '%user_id%'
+  SQL
+  assert_operator count_subquery_calls, :>=, expected_users,
+    "expected /counts to issue at least one COUNT(*) per user (N+1 pathology); saw #{count_subquery_calls} calls for #{expected_users} users"
+end
+
 test "search returns matching todos" do
   get "/api/todos/search", params: {q: "alpha"}
   assert_response :success
   body = JSON.parse(@response.body)
   assert body.fetch("items").all? { |item| item.fetch("title").include?("alpha") }
+end
+
+test "search uses sequential scan with LIKE filter (rewrite_like pathology contract)" do
+  plan = ActiveRecord::Base.connection.exec_query(
+    "EXPLAIN (FORMAT JSON) SELECT * FROM todos WHERE title LIKE '%foo%' ORDER BY created_at DESC LIMIT 50"
+  ).rows.flatten.first
+  parsed = JSON.parse(plan).first.fetch("Plan")
+  assert_match(/Seq Scan/, parsed.fetch("Node Type") + (parsed["Plans"]&.map { |p| p["Node Type"] }&.join(",") || ""))
 end
 ```
 
@@ -465,6 +574,8 @@ git -C /home/bjw/db-specialist-demo commit -m "feat: retune benchmark seed distr
 
 - [ ] **Step 1: Write failing verifier tests for all three assertions**
 
+The counts check must use **call counts**, not just queryid count. A "fix" that consolidates the N+1 to a single `GROUP BY` query still produces 2 distinct queryids (one for `User.all`, one for the GROUP BY). The smoke must verify call growth proportional to `users_count`.
+
 ```ruby
 def test_verify_fixture_checks_missing_index_counts_and_search
   verifier = Load::FixtureVerifier.new(
@@ -474,7 +585,10 @@ def test_verify_fixture_checks_missing_index_counts_and_search
       open_plan: seq_scan_plan("status"),
       search_plan: search_reference_plan
     ),
-    stats_reader: fake_stats_reader(queryids: ["1", "2"])
+    stats_reader: fake_stats_reader(
+      counts_subquery_calls: 11,   # >= users_count + 1, given fake users_count = 10
+      counts_users_count: 10
+    )
   )
 
   result = verifier.call
@@ -483,10 +597,40 @@ def test_verify_fixture_checks_missing_index_counts_and_search
   assert_equal %w[missing_index counts_n_plus_one search_rewrite], result.fetch(:checks).map { |check| check.fetch(:name) }
 end
 
-def test_verify_fixture_fails_when_counts_collapse_to_one_queryid
-  verifier = Load::FixtureVerifier.new(...stats_reader: fake_stats_reader(queryids: ["1"]))
+def test_verify_fixture_fails_when_counts_consolidates_to_one_query
+  # GROUP BY "fix" produces 2 queryids but only 2 total calls — far below users_count.
+  verifier = Load::FixtureVerifier.new(
+    workload_name: "missing-index-todos",
+    adapter_client: fake_adapter_client,
+    explain_reader: fake_explain_reader(open_plan: seq_scan_plan("status"), search_plan: search_reference_plan),
+    stats_reader: fake_stats_reader(counts_subquery_calls: 2, counts_users_count: 10)
+  )
+
   error = assert_raises(Load::FixtureVerifier::VerificationError) { verifier.call }
   assert_includes error.message, "/api/todos/counts"
+  assert_includes error.message, "10 users"  # the failure must name what it expected
+end
+
+def test_verify_fixture_fails_when_seq_scan_is_replaced_by_index
+  verifier = Load::FixtureVerifier.new(
+    workload_name: "missing-index-todos",
+    adapter_client: fake_adapter_client,
+    explain_reader: fake_explain_reader(open_plan: index_scan_plan("status"), search_plan: search_reference_plan),
+    stats_reader: fake_stats_reader(counts_subquery_calls: 11, counts_users_count: 10)
+  )
+  error = assert_raises(Load::FixtureVerifier::VerificationError) { verifier.call }
+  assert_includes error.message, "Seq Scan"
+end
+
+def test_verify_fixture_fails_when_search_plan_drifts_from_reference
+  verifier = Load::FixtureVerifier.new(
+    workload_name: "missing-index-todos",
+    adapter_client: fake_adapter_client,
+    explain_reader: fake_explain_reader(open_plan: seq_scan_plan("status"), search_plan: trigram_index_plan),
+    stats_reader: fake_stats_reader(counts_subquery_calls: 11, counts_users_count: 10)
+  )
+  error = assert_raises(Load::FixtureVerifier::VerificationError) { verifier.call }
+  assert_includes error.message, "search"
 end
 ```
 
@@ -513,12 +657,26 @@ end
 ```ruby
 def verify_counts_n_plus_one
   adapter_client.reset_stats
-  client.get("/api/todos/counts")
-  queryids = stats_reader.queryids_for_last_request
-  raise VerificationError, "counts pathology missing for /api/todos/counts" unless queryids.length >= 2
-  {name: "counts_n_plus_one", ok: true}
+  response = client.get("/api/todos/counts")
+  users_count = JSON.parse(response.body).keys.length
+  subquery_calls = stats_reader.subquery_calls_for(table: "todos", filter_columns: ["user_id"])
+  unless subquery_calls >= users_count
+    raise VerificationError,
+      "counts pathology missing for /api/todos/counts: expected at least #{users_count} subquery calls (one per user), saw #{subquery_calls}"
+  end
+  {name: "counts_n_plus_one", ok: true, calls: subquery_calls, users: users_count}
 end
 ```
+
+The check uses `users_count` derived from the response body (which is `{user_id => count}`) so it auto-scales with the demo-app dataset. `stats_reader.subquery_calls_for` does:
+
+```sql
+SELECT COALESCE(SUM(calls), 0)
+  FROM pg_stat_statements
+ WHERE query LIKE '%FROM "todos"%' AND query LIKE '%user_id%'
+```
+
+run against the post-call stats snapshot. This catches both the "removed N+1 entirely" failure mode and the "GROUP BY fix" failure mode, because the GROUP BY fix produces a query without `user_id` in the WHERE clause.
 
 - [ ] **Step 4: Run the verifier tests to verify they pass**
 
@@ -540,25 +698,47 @@ git commit -m "feat: add fixture verification preflight"
 - Modify: `load/test/runner_test.rb`
 - Modify: `load/lib/load/cli.rb` if runner args need the verifier instance
 
+**Architectural note (load-bearing):** the verifier issues real HTTP requests against the app-under-test (`GET /api/todos?status=open`, `/counts`, `/search`), so it MUST run **after** `start` returns and the readiness gate passes — otherwise the endpoints don't exist. The gate runs **before** workers begin, so a verifier failure aborts cleanly without any benchmark traffic. The cleanup path still calls `:stop` to shut down the adapter app.
+
+Run order:
+
+```
+describe → prepare → reset_state → start → readiness → verify → workers → stop
+                                            (gate fires here ───┘)
+```
+
 - [ ] **Step 1: Write failing runner tests for pre-flight gating**
 
 ```ruby
-def test_runner_calls_verify_fixture_before_starting_adapter
+def test_runner_calls_verify_fixture_after_start_and_before_workers
   verifier = Minitest::Mock.new
   verifier.expect(:call, {ok: true})
   adapter = fake_adapter_client
+  worker_factory = ->(**kwargs) { @workers_constructed = true; fake_worker }
 
-  runner = build_runner(mode: :finite, adapter_client: adapter, verifier: verifier)
+  runner = build_runner(mode: :finite, adapter_client: adapter, verifier: verifier, worker_factory: worker_factory)
   runner.run
 
   verifier.verify
   assert_equal [:describe, :prepare, :reset_state, :start, :stop], adapter.calls
+  # Verifier was called with the live base_url from start (proves ordering)
+  assert_includes verifier.call_args.last, base_url: adapter.start_response.fetch("base_url")
 end
 
-def test_runner_aborts_before_start_when_verify_fixture_fails
-  runner = build_runner(mode: :finite, verifier: -> { raise Load::FixtureVerifier::VerificationError, "counts pathology missing" })
+def test_runner_aborts_after_start_before_workers_when_verify_fixture_fails
+  workers_constructed = false
+  worker_factory = ->(**kwargs) { workers_constructed = true; fake_worker }
+  failing_verifier = ->(**) { raise Load::FixtureVerifier::VerificationError, "counts pathology missing" }
+  adapter = fake_adapter_client
+
+  runner = build_runner(mode: :finite, adapter_client: adapter, verifier: failing_verifier, worker_factory: worker_factory)
+
   assert_equal Load::ExitCodes::ERROR, runner.run
+  refute workers_constructed, "workers must not be constructed when verify-fixture fails"
+  assert_equal [:describe, :prepare, :reset_state, :start, :stop], adapter.calls,
+    "adapter must still be stopped cleanly after verifier failure"
   refute File.exist?(File.join(runner.run_record.run_dir, "metrics.jsonl"))
+  assert_equal "fixture_verification_failed", runner.run_record.read_run_json.dig("outcome", "error_code")
 end
 ```
 
@@ -573,16 +753,22 @@ Expected: FAIL because the runner does not invoke `verify-fixture` yet.
 ```ruby
 def run
   result = Load::ExitCodes::OK
-  verifier.call
-  boot_adapter
-  ...
+  begin
+    @run_record.write_run(snapshot_state)
+    boot_adapter           # describe → prepare → reset_state → start → readiness
+    verifier.call(base_url: adapter_state.fetch(:base_url))
+    start_workers(adapter_state.fetch(:base_url))
+    result = finish_run
+  rescue Load::FixtureVerifier::VerificationError => error
+    write_state(outcome: outcome_payload(aborted: true, error_code: "fixture_verification_failed", error_message: error.message))
+    result = Load::ExitCodes::ERROR
+  rescue AdapterClient::AdapterError
+    ...
+  ensure
+    result = stop_adapter_safely(result)
+  end
+  result
 end
-```
-
-```ruby
-rescue Load::FixtureVerifier::VerificationError => error
-  write_state(error_code: "fixture_verification_failed", error_message: error.message)
-  result = Load::ExitCodes::ERROR
 ```
 
 - [ ] **Step 4: Run the runner tests to verify they pass**
@@ -606,30 +792,73 @@ git commit -m "feat: gate runs on fixture verification"
 - Modify: `load/test/runner_test.rb`
 - Modify: `load/test/run_record_test.rb`
 
+**Spec alignment note:** the abort threshold is **3 consecutive sample breaches** (≈3 minutes at the 60s sampling cadence). This is a deliberate simplification of spec §7.2's earlier "3 sustained breaches of 5 samples each" wording — the simpler semantics catches dataset drift fast enough for the agent-exercise use case and is easier to test. Spec §7.2 will be updated to match before merge.
+
+**Sampler isolation note:** the invariant sampler runs `SELECT COUNT(*) FROM todos WHERE status='open'` on the same database the workload hits. Without isolation, those samples land in `pg_stat_statements` and inflate the dominance signal that the §8 oracle reads — the sampler's count query has the same shape as the workload's list-open query. The sampler must run on a dedicated PG connection with `SET LOCAL pg_stat_statements.track = 'none'` so the samples are invisible to oracle attribution. Use `pg_class.reltuples::bigint` for the cheap `total_count` approximation; reserve the actual `COUNT(*)` for `open_count` only.
+
 - [ ] **Step 1: Write failing tests for continuous mode and invariant breaches**
+
+The soak-mode test uses an explicit synchronization barrier instead of `sleep` to avoid timing flakes (real `sleep`-based sync was the v0.3.0.0 ship-review failure mode). The breach-abort test exercises the 3-consecutive-sample threshold; a separate test asserts a single breach followed by recovery does not abort.
 
 ```ruby
 def test_soak_mode_runs_until_stop_flag
   stop_flag = Load::Runner::InternalStopFlag.new
-  runner = build_runner(mode: :continuous, stop_flag: stop_flag)
+  workers_ready = Queue.new
+  worker_factory = ->(**kwargs) { FakeWorker.new(on_run: -> { workers_ready << :ready; sleep until stop_flag.call }) }
 
+  runner = build_runner(mode: :continuous, stop_flag: stop_flag, worker_factory: worker_factory)
   thread = Thread.new { runner.run }
-  sleep 0.1
+
+  workers_ready.pop  # blocks until a worker actually started — no sleep, no race
   stop_flag.trigger(:sigterm)
 
   assert_equal Load::ExitCodes::ABORTED, thread.value
+  assert thread.join(2.0), "runner did not exit within 2s of stop signal"
 end
 
-def test_runner_aborts_after_three_sustained_invariant_breaches
+def test_runner_aborts_after_three_consecutive_invariant_breaches
   sampler = fake_sampler([
-    {open_count: 100, total_count: 10_000},
-    {open_count: 100, total_count: 10_000},
-    {open_count: 100, total_count: 10_000}
+    {open_count: 100,    total_count: 10_000},  # below open_floor (default 30k) — breach #1
+    {open_count: 100,    total_count: 10_000},  # breach #2
+    {open_count: 100,    total_count: 10_000}   # breach #3 → abort
   ])
 
   runner = build_runner(mode: :continuous, invariant_sampler: sampler)
   assert_equal Load::ExitCodes::ERROR, runner.run
-  assert_includes runner.run_record.read_run_json.fetch("warnings").last.fetch("message"), "open_count"
+
+  warnings = runner.run_record.read_run_json.fetch("warnings")
+  assert_equal 3, warnings.length
+  assert_includes warnings.last.fetch("message"), "open_count"
+  assert_equal "invariant_breach", runner.run_record.read_run_json.dig("outcome", "error_code")
+end
+
+def test_runner_does_not_abort_when_breach_recovers
+  # breach → recover → healthy: the consecutive-breach counter must reset on recovery.
+  sampler = fake_sampler([
+    {open_count: 100,    total_count: 10_000},  # breach
+    {open_count: 100,    total_count: 10_000},  # breach
+    {open_count: 35_000, total_count: 100_000}, # healthy — counter resets
+    {open_count: 100,    total_count: 10_000},  # breach (only #1 of new run)
+    {open_count: 35_000, total_count: 100_000}  # healthy
+  ])
+  stop_flag = Load::Runner::InternalStopFlag.new
+  runner = build_runner(mode: :continuous, invariant_sampler: sampler, stop_flag: stop_flag)
+  thread = Thread.new { runner.run }
+  # consume the 5 samples then stop cleanly
+  sampler.wait_until_drained
+  stop_flag.trigger(:sigterm)
+
+  assert_equal Load::ExitCodes::ABORTED, thread.value
+  assert_equal 3, runner.run_record.read_run_json.fetch("warnings").length
+end
+
+def test_invariant_sampler_uses_isolated_pg_connection
+  pg_pool = FakePgPool.new
+  sampler = Load::Runner::InvariantSampler.new(pg: pg_pool, ...)
+  sampler.call
+
+  refute pg_pool.shared_connection_used?, "sampler must not reuse the workload's pg_stat_statements-tracked connection"
+  assert_includes pg_pool.last_connection_session_settings, "pg_stat_statements.track = 'none'"
 end
 ```
 
@@ -637,7 +866,7 @@ end
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb && BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/run_record_test.rb`
 
-Expected: FAIL because continuous mode and warning persistence do not exist yet.
+Expected: FAIL because continuous mode, the recovery counter, sampler isolation, and warning persistence do not exist yet.
 
 - [ ] **Step 3: Implement the minimal soak path**
 
@@ -651,11 +880,38 @@ end
 ```ruby
 def sample_invariants
   sample = invariant_sampler.call
-  run_record.append_warning(sample.to_h) if sample.breach?
-  @sustained_breaches += 1 if sample.breach?
-  trigger_stop(:invariant_breach) if @sustained_breaches >= 3
+  if sample.breach?
+    run_record.append_warning(sample.to_h)
+    @consecutive_breaches += 1
+    trigger_stop(:invariant_breach) if @consecutive_breaches >= 3
+  else
+    @consecutive_breaches = 0  # reset on recovery
+  end
 end
 ```
+
+```ruby
+class InvariantSampler
+  def initialize(pg:, database_url:, open_floor:, total_floor:, total_ceiling:)
+    @pg = pg
+    @database_url = database_url
+    @open_floor = open_floor
+    @total_floor = total_floor
+    @total_ceiling = total_ceiling
+  end
+
+  def call
+    @pg.with_isolated_connection(@database_url) do |conn|
+      conn.exec("SET LOCAL pg_stat_statements.track = 'none'")
+      open_count  = conn.exec("SELECT COUNT(*) FROM todos WHERE status = 'open'").first.fetch("count").to_i
+      total_count = conn.exec("SELECT reltuples::bigint AS count FROM pg_class WHERE relname = 'todos'").first.fetch("count").to_i
+      Sample.new(open_count: open_count, total_count: total_count, open_floor: @open_floor, total_floor: @total_floor, total_ceiling: @total_ceiling)
+    end
+  end
+end
+```
+
+`with_isolated_connection` opens a dedicated PG connection (not pooled with the workload) so the `SET LOCAL pg_stat_statements.track = 'none'` scope cannot leak back to the workload session.
 
 - [ ] **Step 4: Run the soak tests to verify they pass**
 
@@ -676,28 +932,71 @@ git commit -m "feat: add soak mode invariant sampling"
 - Modify: `workloads/missing_index_todos/oracle.rb`
 - Modify: `workloads/missing_index_todos/test/oracle_test.rb`
 
+**ClickHouse SQL note:** the existing oracle (`oracle.rb:190-201`) issues a single-row aggregation with `WHERE queryid IN (...)`. The dominance check needs a **second, distinct** ClickHouse query that returns top-N queryids over the run window, no `WHERE queryid IN` constraint, ranked by total exec time. The existing single-row query for the primary's call count is preserved as-is — these are two separate reads of `query_intervals`.
+
+The new SQL (run alongside, not replacing, the existing one):
+
+```sql
+SELECT
+  toString(queryid) AS queryid,
+  toString(sum(total_exec_count)) AS total_calls,
+  toString(round(sum(total_exec_count * avg_exec_time_ms), 1)) AS total_exec_time_ms_estimate
+FROM query_intervals
+WHERE interval_ended_at BETWEEN parseDateTime64BestEffort('<window.start_ts>')
+                            AND parseDateTime64BestEffort('<window.end_ts>') + INTERVAL 90 SECOND
+GROUP BY queryid
+ORDER BY sum(total_exec_count * avg_exec_time_ms) DESC
+LIMIT 10
+FORMAT JSONEachRow
+```
+
+`total_exec_time_ms_estimate = sum(total_exec_count × avg_exec_time_ms)` is the per-queryid total DB time over the window. ClickHouse `query_intervals` exposes `total_exec_count` and `avg_exec_time_ms` per interval but does not store `total_exec_time` directly — the multiplication is the canonical reconstruction.
+
+The dominance check then iterates the top-N rows: the **primary** is the first row whose queryid is in `expected_queryids` (the one(s) captured during reset-state); the **challenger** is the highest-scoring row whose queryid is **not** in `expected_queryids`. Sampler queryids cannot pollute this because Task 8 isolates them on a `pg_stat_statements.track = 'none'` connection (F7).
+
 - [ ] **Step 1: Write failing oracle tests for the `total_exec_time` dominance margin**
 
 ```ruby
 def test_oracle_passes_when_primary_query_dominates_by_three_x
-  oracle = build_oracle(clickhouse_rows: [
-    {"queryid" => "primary", "total_exec_time_ms" => "900.0"},
-    {"queryid" => "other", "total_exec_time_ms" => "250.0"}
-  ])
+  oracle = build_oracle(
+    expected_queryids: ["primary"],
+    clickhouse_topn_rows: [
+      {"queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0"},
+      {"queryid" => "other",   "total_calls" => "5000",  "total_exec_time_ms_estimate" => "250.0"}
+    ]
+  )
 
   result = oracle.call
 
-  assert_includes result.fetch(:messages), /dominance/
+  assert_includes result.fetch(:messages).join("\n"), "dominance"
+  assert_match(/3\.6x/, result.fetch(:messages).join("\n"))
 end
 
 def test_oracle_fails_when_primary_query_loses_dominance_margin
-  oracle = build_oracle(clickhouse_rows: [
-    {"queryid" => "primary", "total_exec_time_ms" => "900.0"},
-    {"queryid" => "other", "total_exec_time_ms" => "400.0"}
-  ])
+  oracle = build_oracle(
+    expected_queryids: ["primary"],
+    clickhouse_topn_rows: [
+      {"queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0"},
+      {"queryid" => "other",   "total_calls" => "5000",  "total_exec_time_ms_estimate" => "400.0"}
+    ]
+  )
 
-  error = assert_raises(RuntimeError) { oracle.call }
+  error = assert_raises(Load::Workloads::MissingIndexTodos::Oracle::Failure) { oracle.call }
   assert_includes error.message, "3x"
+  assert_match(/2\.25x/, error.message)
+end
+
+def test_oracle_dominance_passes_when_no_challenger
+  # Single queryid in pg_stat_statements / clickhouse — primary trivially dominates.
+  oracle = build_oracle(
+    expected_queryids: ["primary"],
+    clickhouse_topn_rows: [
+      {"queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0"}
+    ]
+  )
+
+  result = oracle.call
+  assert_includes result.fetch(:messages).join("\n"), "no challenger"
 end
 ```
 
@@ -705,21 +1004,35 @@ end
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby workloads/missing_index_todos/test/oracle_test.rb`
 
-Expected: FAIL because the oracle does not assert the dominance margin yet.
+Expected: FAIL because the oracle does not issue the top-N query or assert the dominance margin yet.
 
 - [ ] **Step 3: Implement the minimal dominance check**
 
 ```ruby
-def assert_dominance(rows)
-  primary = rows.find { |row| row.fetch("queryid") == expected_queryid }
-  challenger = rows.reject { |row| row.fetch("queryid") == expected_queryid }.max_by { |row| row.fetch("total_exec_time_ms").to_f }
-  return if challenger.nil?
+def assert_dominance(window:, expected_queryids:, clickhouse_url:)
+  rows = @clickhouse_query.call(:topn, window: window, clickhouse_url: clickhouse_url)
+  primary = rows.find { |row| expected_queryids.include?(row.fetch("queryid")) }
+  raise Failure, "FAIL: dominance (primary queryid not present in top-N)" if primary.nil?
 
-  primary_time = primary.fetch("total_exec_time_ms").to_f
-  challenger_time = challenger.fetch("total_exec_time_ms").to_f
-  raise "dominance margin failed: #{primary_time} < 3x #{challenger_time}" unless primary_time >= (challenger_time * 3.0)
+  challenger = rows.find { |row| !expected_queryids.include?(row.fetch("queryid")) }
+  if challenger.nil?
+    @stdout.puts("PASS: dominance (no challenger; primary stands alone)")
+    return
+  end
+
+  primary_time    = primary.fetch("total_exec_time_ms_estimate").to_f
+  challenger_time = challenger.fetch("total_exec_time_ms_estimate").to_f
+  ratio           = primary_time / challenger_time
+
+  if primary_time >= challenger_time * 3.0
+    @stdout.puts("PASS: dominance (#{ratio.round(2)}x over next queryid)")
+  else
+    raise Failure, "FAIL: dominance (#{primary_time}ms / #{challenger_time}ms = #{ratio.round(2)}x; required: ≥3x)"
+  end
 end
 ```
+
+The oracle's existing `wait_for_clickhouse!` path stays in place for the primary's call-threshold check; `assert_dominance` is a separate, additive call sited after it.
 
 - [ ] **Step 4: Run the oracle tests to verify they pass**
 
@@ -914,6 +1227,14 @@ BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby workloads/missing_index_todos/
 ```
 
 Expected: PASS for explain, ClickHouse, and dominance margin.
+
+**If dominance fails on the first real run** (margin < 3×): treat this as a *tuning gap*, not a bug. The likely causes, in order:
+
+1. The dataset is smaller than spec §5.4 targets (`ROWS_PER_TABLE=100000`, `OPEN_FRACTION=0.6`). Inspect run record + `pg_class.reltuples`, re-seed if smaller, re-run.
+2. The `FetchCounts` or `SearchTodos` action is more expensive in the real demo app than the cost-model assumed. Inspect the top-N rows from the dominance query — if a non-primary queryid is unexpectedly high, that's the culprit. Reduce its weight (e.g., counts 4→3, search 2→1) and bump `ListOpenTodos` accordingly while keeping the sum at 100.
+3. The seq-scan is too cheap because `OPEN_FRACTION` produces too few matching rows. Bump `OPEN_FRACTION` toward 0.6 if it's been overridden lower.
+
+After any tuning change, re-run Steps 3-4 to confirm the change holds. Do not claim Task 12 complete with dominance below 3×.
 
 - [ ] **Step 5: Run a soak session and confirm clean stop**
 
