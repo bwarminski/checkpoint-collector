@@ -84,4 +84,18 @@ class ClientTest < Minitest::Test
 
     client.finish
   end
+
+  def test_request_encodes_body_for_delete_requests
+    connection = FakeConnection.new
+    http = FakeHttp.new(connection)
+    client = Load::Client.new(base_url: "http://example.test:3000", http:)
+
+    client.request(:delete, "/api/todos/completed", body: { user_id: 7 })
+
+    request = connection.requests.first
+    assert_instance_of Net::HTTP::Delete, request
+    assert_equal "/api/todos/completed", request.path
+    assert_equal "{\"user_id\":7}", request.body
+    assert_equal "application/json", request["Content-Type"]
+  end
 end
