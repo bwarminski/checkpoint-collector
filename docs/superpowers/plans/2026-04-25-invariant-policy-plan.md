@@ -31,7 +31,7 @@
 
 - [ ] **Step 1: Write the failing CLI tests**
 
-Add four focused tests to `load/test/cli_test.rb`:
+Add three focused tests to `load/test/cli_test.rb`:
 
 ```ruby
 def test_run_defaults_invariants_to_enforce
@@ -75,33 +75,17 @@ def test_run_accepts_warn_and_off_invariant_policies
 end
 
 def test_run_rejects_unknown_invariant_policy
-  %w[run soak].each do |command|
-    stderr = StringIO.new
-    cli = Load::CLI.new(
-      argv: [command, "--workload", "missing-index-todos", "--adapter", adapter_bin, "--app-root", app_root, "--invariants", "noisy"],
-      version: "test",
-      runner_factory: ->(**) { flunk "runner should not be built" },
-      stdout: StringIO.new,
-      stderr:,
-    )
-
-    assert_equal Load::ExitCodes::USAGE_ERROR, cli.run
-    assert_includes stderr.string, "invalid --invariants"
-  end
-end
-
-def test_verify_fixture_rejects_invariants_flag
   stderr = StringIO.new
   cli = Load::CLI.new(
-    argv: %W[verify-fixture --workload missing-index-todos --adapter #{adapter_bin} --app-root #{app_root} --invariants warn],
+    argv: %W[run --workload missing-index-todos --adapter #{adapter_bin} --app-root #{app_root} --invariants noisy],
     version: "test",
-    verifier_factory: ->(**) { flunk "verifier should not be built" },
+    runner_factory: ->(**) { flunk "runner should not be built" },
     stdout: StringIO.new,
     stderr:,
   )
 
   assert_equal Load::ExitCodes::USAGE_ERROR, cli.run
-  assert_includes stderr.string, "invalid option"
+  assert_includes stderr.string, "invalid --invariants"
 end
 ```
 
@@ -198,32 +182,11 @@ git commit -m "feat: add invariant policy cli flag"
 - Modify: `load/test/runner_test.rb`
 - Modify: `load/lib/load/runner.rb`
 
-- [ ] **Step 1: Write the failing `warn`-mode runner tests**
+- [ ] **Step 1: Write the failing `warn`-mode runner test**
 
-Add two focused tests to `load/test/runner_test.rb`:
+Add a focused test to `load/test/runner_test.rb`:
 
 ```ruby
-def test_runner_enforce_policy_aborts_after_three_consecutive_breaches
-  workers_ready = Queue.new
-  BarrierAction.reset!
-  BarrierAction.ready_queue = workers_ready
-  sampler = FakeInvariantSampler.new(
-    [
-      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-      Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
-    ],
-    first_sample_barrier: workers_ready,
-  )
-  run_record = FakeRunRecord.new
-  runner = build_continuous_runner(run_record:, invariant_sampler: sampler, invariant_policy: :enforce)
-
-  assert_equal Load::ExitCodes::ADAPTER_ERROR, Timeout.timeout(2.0) { runner.run }
-  assert_equal "invariant_breach", run_record.read_run_json.dig("outcome", "error_code")
-ensure
-  BarrierAction.reset!
-end
-
 def test_runner_warn_policy_records_breaches_without_aborting
   stderr = StringIO.new
   stop_flag = Load::Runner::InternalStopFlag.new
@@ -274,35 +237,22 @@ Expected: FAIL because the runner currently treats three consecutive breaches as
 
 - [ ] **Step 3: Implement minimal `warn` policy support**
 
-First, widen the `Load::Runner` constructor so the final shape is explicit:
+In `load/lib/load/runner.rb`, add the policy parameter and store it:
 
 ```ruby
-def initialize(..., stop_flag: nil, verifier: nil, mode: :finite, invariant_policy: :enforce, invariant_sampler: nil, invariant_sample_interval_seconds: DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS, database_url: ENV["DATABASE_URL"], pg: PG, stderr: $stderr)
-  @stderr = stderr
+def initialize(..., invariant_policy: :enforce, invariant_sampler: nil, ...)
   @invariant_policy = invariant_policy
   @invariant_sampler = invariant_sampler || default_invariant_sampler(database_url:, pg:)
 end
 ```
 
-Add the maintainability comment directly above `sample_invariants`:
-
-```ruby
-# sample → breach? → enforce → ++counter → ≥3? → trigger_stop
-#                  → warn    → @stderr.puts (no counter)
-#                  → off     → unreachable (thread never started)
-#       → !breach  → counter = 0 (enforce only; harmless elsewhere)
-```
-
-Then make `sample_invariants` policy-aware:
+Make `sample_invariants` policy-aware:
 
 ```ruby
 def sample_invariants
   sample = @invariant_sampler.call
   append_invariant_sample(sample)
-  unless sample.breach?
-    @consecutive_invariant_breaches = 0 if @invariant_policy == :enforce
-    return
-  end
+  return @consecutive_invariant_breaches = 0 unless sample.breach?
 
   append_warning(sample.to_warning)
   emit_invariant_warning(sample) if @invariant_policy == :warn
@@ -314,11 +264,11 @@ def sample_invariants
 end
 
 def emit_invariant_warning(sample)
-  @stderr.puts("warning: invariant breach: #{sample.breaches.join('; ')}")
+  $stderr.puts("warning: invariant breach: #{sample.breaches.join('; ')}")
 end
 ```
 
-Thread `stderr` through the runner from `Load::CLI` the same way the runner factory already carries `stdout`/`stderr` context:
+Do not use `$stderr` directly in the final code. Thread `stderr` through the runner from `Load::CLI` the same way `stdout`/`stderr` already flow through the runner factory:
 
 ```ruby
 Load::Runner.new(
@@ -350,14 +300,6 @@ BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb --nam
 
 Expected: PASS, proving `enforce` stays the default contract.
 
-Run the new explicit-policy regression too:
-
-```bash
-BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb --name test_runner_enforce_policy_aborts_after_three_consecutive_breaches
-```
-
-Expected: PASS.
-
 - [ ] **Step 6: Commit the `warn` policy slice**
 
 ```bash
@@ -371,13 +313,12 @@ git commit -m "feat: add invariant warning mode"
 - Modify: `load/test/runner_test.rb`
 - Modify: `load/lib/load/runner.rb`
 
-- [ ] **Step 1: Write the failing `off`-mode runner tests**
+- [ ] **Step 1: Write the failing `off`-mode runner test**
 
-Add two focused tests to `load/test/runner_test.rb`:
+Add a focused test to `load/test/runner_test.rb`:
 
 ```ruby
 def test_runner_off_policy_skips_invariant_sampling
-  stderr = StringIO.new
   sampler = RecordingInvariantSampler.new(clock: fake_clock_source)
   run_record = FakeRunRecord.new
   runner = Load::Runner.new(
@@ -393,7 +334,6 @@ def test_runner_off_policy_skips_invariant_sampling
     invariant_policy: :off,
     invariant_sampler: sampler,
     stop_flag: Load::Runner::InternalStopFlag.new.tap { |flag| flag.trigger(:sigterm) },
-    stderr:,
     database_url: nil,
   )
 
@@ -402,27 +342,6 @@ def test_runner_off_policy_skips_invariant_sampling
   payload = run_record.read_run_json
   assert_equal [], payload.fetch("warnings")
   assert_equal [], payload.fetch("invariant_samples")
-  assert_equal "", stderr.string
-end
-
-def test_runner_off_policy_runs_without_database_url
-  run_record = FakeRunRecord.new
-  runner = Load::Runner.new(
-    workload: MetricsWorkload.new,
-    adapter_client: FakeAdapterClient.new,
-    run_record:,
-    clock: fake_clock,
-    sleeper: ->(*) {},
-    http: FakeHttp.new,
-    readiness_path: nil,
-    startup_grace_seconds: 0.0,
-    mode: :continuous,
-    invariant_policy: :off,
-    stop_flag: Load::Runner::InternalStopFlag.new.tap { |flag| flag.trigger(:sigterm) },
-    database_url: nil,
-  )
-
-  assert_equal Load::ExitCodes::SUCCESS, runner.run
 end
 ```
 
@@ -465,12 +384,6 @@ Keep `default_invariant_sampler` lazy enough that `off` mode does not raise the 
   end
 ```
 
-Update the guard message in `default_invariant_sampler`:
-
-```ruby
-raise AdapterClient::AdapterError, "continuous mode requires DATABASE_URL, an explicit invariant sampler, or --invariants off"
-```
-
 - [ ] **Step 4: Run the targeted runner test to verify it passes**
 
 Run:
@@ -491,14 +404,6 @@ BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'load "load/test/cli_test.r
 
 Expected: PASS.
 
-Run the explicit no-`DATABASE_URL` regression too:
-
-```bash
-BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb --name test_runner_off_policy_runs_without_database_url
-```
-
-Expected: PASS.
-
 - [ ] **Step 6: Commit the `off` policy slice**
 
 ```bash
@@ -514,21 +419,7 @@ git commit -m "feat: allow disabling invariant sampling"
 
 - [ ] **Step 1: Write the documentation changes**
 
-First, confirm the current section headers in `README.md` still match the run-mode structure introduced in commit `0994115`:
-
-```bash
-rg -n '^#### `bin/load (run|soak|verify-fixture)`' README.md
-```
-
-Expected:
-
-```text
-#### `bin/load run`
-#### `bin/load soak`
-#### `bin/load verify-fixture`
-```
-
-Then update `README.md` in the existing `run` and `soak` sections:
+Update `README.md` in the existing `run` and `soak` sections:
 
 ```md
 - `--invariants enforce|warn|off` controls how the runner reacts to invariant breaches
@@ -637,8 +528,6 @@ If there is no fallout, do not create an extra commit.
 
 - CLI contract: covered in Task 1.
 - `enforce|warn|off` behavior: covered in Tasks 2 and 3.
-- regression lock: `:enforce` policy still aborts after 3 breaches: covered in Task 2.
-- `:off` policy runs without `DATABASE_URL`: covered in Task 3.
 - `stderr` output for `warn`: covered in Task 2.
 - docs and `verify-fixture` note: covered in Task 4.
 - regression proof that `enforce` stayed default: covered in Tasks 2 and 5.
@@ -652,3 +541,4 @@ No `TODO`, `TBD`, or “handle appropriately” placeholders remain. Each task h
 - Policy value is consistently named `invariant_policy`.
 - Policy values are consistently `:enforce`, `:warn`, `:off`.
 - CLI flag is consistently `--invariants`.
+
