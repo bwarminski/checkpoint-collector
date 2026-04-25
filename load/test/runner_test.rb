@@ -62,6 +62,7 @@ class RunnerTest < Minitest::Test
       stop_flag:,
       verifier:,
       mode: :continuous,
+      invariant_sampler: FakeInvariantSampler.new([]),
     )
 
     exit_code = runner.run
@@ -107,6 +108,26 @@ class RunnerTest < Minitest::Test
       payload = JSON.parse(File.read(run_record.run_path))
       assert_equal "fixture_verification_failed", payload.dig("outcome", "error_code")
     end
+  end
+
+  def test_runner_requires_database_url_or_explicit_invariant_sampler_for_continuous_mode
+    error = assert_raises(Load::AdapterClient::AdapterError) do
+      Load::Runner.new(
+        workload: MetricsWorkload.new,
+        adapter_client: FakeAdapterClient.new,
+        run_record: FakeRunRecord.new,
+        clock: fake_clock,
+        sleeper: ->(*) { Thread.pass },
+        http: FakeHttp.new,
+        readiness_path: nil,
+        startup_grace_seconds: 0.0,
+        mode: :continuous,
+        database_url: nil,
+      )
+    end
+
+    assert_includes error.message, "DATABASE_URL"
+    assert_includes error.message, "invariant sampler"
   end
 
   def test_soak_mode_runs_until_stop_flag
@@ -282,6 +303,29 @@ class RunnerTest < Minitest::Test
   ensure
     thread&.kill
     thread&.join
+  end
+
+  def test_stop_invariant_thread_ignores_thread_error_when_thread_exits_during_shutdown
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record: FakeRunRecord.new,
+      clock: fake_clock,
+      sleeper: ->(*) {},
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      mode: :continuous,
+      invariant_sampler: FakeInvariantSampler.new([]),
+      database_url: nil,
+    )
+    thread = ExitingInvariantThread.new
+
+    runner.send(:mark_invariant_thread_sleeping, true)
+    runner.send(:stop_invariant_thread, thread)
+
+    assert_equal 1, thread.raise_calls
+    assert_equal 1, thread.join_calls
   end
 
   def test_invariant_sampler_uses_isolated_pg_connection
@@ -830,7 +874,7 @@ class RunnerTest < Minitest::Test
     -> { Time.now.utc }
   end
 
-  def build_continuous_runner(run_record:, stop_flag: Load::Runner::InternalStopFlag.new, invariant_sampler: nil)
+  def build_continuous_runner(run_record:, stop_flag: Load::Runner::InternalStopFlag.new, invariant_sampler: FakeInvariantSampler.new([]))
     Load::Runner.new(
       workload: BarrierWorkload.new,
       adapter_client: FakeAdapterClient.new,
@@ -1464,6 +1508,29 @@ class RunnerTest < Minitest::Test
 
     def wait_until_interval_sleep
       @interval_sleep_started.pop
+    end
+  end
+
+  class ExitingInvariantThread
+    attr_reader :raise_calls, :join_calls
+
+    def initialize
+      @raise_calls = 0
+      @join_calls = 0
+    end
+
+    def alive?
+      true
+    end
+
+    def raise(*)
+      @raise_calls += 1
+      Kernel.raise ThreadError, "killed thread"
+    end
+
+    def join(*)
+      @join_calls += 1
+      true
     end
   end
 

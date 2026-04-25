@@ -387,7 +387,13 @@ module Load
       return unless thread
       return if thread == Thread.current
 
-      thread.raise(InvariantSamplerShutdown.new) if invariant_thread_sleeping? && thread.alive?
+      if invariant_thread_sleeping?
+        begin
+          thread.raise(InvariantSamplerShutdown.new)
+        rescue ThreadError
+          nil
+        end
+      end
       thread.join
     end
 
@@ -575,7 +581,9 @@ module Load
 
     def default_invariant_sampler(database_url:, pg:)
       return nil unless @mode == :continuous
-      return nil if database_url.nil? || database_url.empty?
+      if database_url.nil? || database_url.empty?
+        raise AdapterClient::AdapterError, "continuous mode requires DATABASE_URL or an explicit invariant sampler"
+      end
 
       rows_per_table = @workload.scale.rows_per_table
       InvariantSampler.new(
