@@ -51,4 +51,12 @@ class ScaleTest < Minitest::Test
 
     assert_equal "extra cannot contain reserved key: rows_per_table", error.message
   end
+
+  def test_scale_rejects_duplicate_extra_keys_after_normalization
+    error = assert_raises(ArgumentError) do
+      Load::Scale.new(rows_per_table: 10, extra: { open_fraction: 0.6, "OPEN_FRACTION" => 0.2 })
+    end
+
+    assert_equal "extra cannot contain duplicate key after normalization: OPEN_FRACTION", error.message
+  end
 end

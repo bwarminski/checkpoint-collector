@@ -7,6 +7,10 @@ module Load
       bad = extra.keys.find { |key| reserved.include?(key.to_s.downcase) }
       raise ArgumentError, "extra cannot contain reserved key: #{bad}" if bad
 
+      normalized = extra.keys.map { |key| key.to_s.upcase }
+      duplicate = normalized.find { |key| normalized.count(key) > 1 }
+      raise ArgumentError, "extra cannot contain duplicate key after normalization: #{duplicate}" if duplicate
+
       super
     end
 
