@@ -1,6 +1,28 @@
 # Changelog
 
-## [0.3.0.0] — 2026-04-24
+## [0.4.0.0] — 2026-04-25
+
+**Mixed missing-index workload.** Expands the `missing-index-todos` workload from a single-action probe into a seven-action mixed shape, adds a fixture verifier, soak-mode invariant sampling, and a dominance assertion in the oracle so the bad plan stays attributable end-to-end.
+
+### Added
+
+- **Mixed workload actions.** `CreateTodo`, `CloseTodo`, `DeleteCompletedTodos`, `FetchCounts`, `ListRecentTodos`, `SearchTodos` join `ListOpenTodos`. Weights `[68,12,7,7,3,2,3]` keep `GET /api/todos?status=open` dominant on `pg_stat_statements`. Write actions sample `user_id`/`todo_id` per call from the worker RNG against `Workload.scale.rows_per_table`.
+- **`Load::FixtureVerifier`.** Pre-flight check, gated to `missing-index-todos`, that asserts the bad plan's Seq Scan, the `/api/todos/counts` N+1 fan-out, and the search EXPLAIN tree shape against `fixtures/mixed-todo-app/search-explain.json`. Wired into `bin/load run` (finite + continuous) and `bin/load verify-fixture` as a standalone command.
+- **Soak-mode invariant sampling.** `Load::Runner::InvariantSampler` polls `open_count` and `total_count` on a dedicated PG connection (`SET LOCAL pg_stat_statements.track = 'none'`) every 60s. Three consecutive breaches of the open/total floor/ceiling abort the run with `error_code: invariant_breach`; samples land in `run.json#invariant_samples`.
+- **Dominance assertion.** Oracle now ranks ClickHouse `query_intervals` by `total_exec_count * avg_exec_time_ms` and requires the primary queryid to be ≥3× the next challenger.
+- **`bin/load verify-fixture`.** Standalone CLI command that runs adapter `describe → prepare → reset_state → start → readiness → verify → stop`.
+
+### Changed
+
+- **Pre-flight gate ordering.** Runner now executes `probe_readiness → verify_fixture → start_workers`. Soak runs share the gate.
+- **Reset-state queryid fingerprint.** Adapter's `reset_state` warms the bad plan with the full ORDER BY/LIMIT/OFFSET shape so `pg_stat_statements` resolves a stable queryid the oracle can reuse on lookup fallback.
+- **Search EXPLAIN comparison.** Verifier matches against a stable subset of plan keys (`Node Type`, `Relation Name`, `Sort Key`, `Filter`, `Plans`) so volatile costs/widths don't flap.
+
+### Fixed
+
+- **Stop-reason coalescing.** `InternalStopFlag#trigger` preserves the first reason so a SIGTERM during a breach window doesn't mask `:invariant_breach`.
+
+
 
 **Load runner MVP.** Replaces the fixture harness with a generic Ruby load runner, a narrow Rails bench adapter, and one concrete `missing-index-todos` workload that reproduces the Seq-Scan pathology through normal app traffic.
 
