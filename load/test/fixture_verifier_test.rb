@@ -22,7 +22,7 @@ class FixtureVerifierTest < Minitest::Test
 
   def test_verifier_checks_missing_index_counts_and_search
     client = FakeClient.new(
-      "/api/todos/counts" => FakeResponse.new("200", JSON.generate({ "1" => 7, "2" => 3 })),
+      "/api/todos/counts" => FakeResponse.new("200", JSON.generate(counts_body_for_users(10))),
     )
     explain_sqls = []
     stats_reset_calls = 0
@@ -37,7 +37,7 @@ class FixtureVerifierTest < Minitest::Test
         sql.include?("status = 'open'") ? missing_index_plan : search_reference_plan
       end,
       stats_reset: -> { stats_reset_calls += 1 },
-      distinct_queryids_reader: -> { ["users-query", "counts-query"] },
+      counts_calls_reader: -> { 11 },
       search_reference_reader: -> { search_reference_plan },
     )
 
@@ -47,7 +47,8 @@ class FixtureVerifierTest < Minitest::Test
     assert_equal %w[missing_index counts_n_plus_one search_rewrite], result.fetch(:checks).map { |check| check.fetch(:name) }
     assert_equal 1, stats_reset_calls
     assert_equal ["/api/todos/counts"], client.requests
-    assert_equal 2, result.fetch(:checks).fetch(1).fetch(:distinct_queryids)
+    assert_equal 11, result.fetch(:checks).fetch(1).fetch(:calls)
+    assert_equal 10, result.fetch(:checks).fetch(1).fetch(:users)
     assert_equal 2, explain_sqls.length
     assert_includes explain_sqls.first, "status = 'open'"
     assert_includes explain_sqls.last, "title LIKE '%foo%'"
@@ -68,15 +69,15 @@ class FixtureVerifierTest < Minitest::Test
     assert_includes error.message, "/api/todos"
   end
 
-  def test_verifier_fails_when_counts_path_has_fewer_than_two_distinct_queryids
-    verifier = build_verifier(distinct_queryids_reader: -> { ["counts-query"] })
+  def test_verifier_fails_when_counts_path_does_not_scale_with_users_count
+    verifier = build_verifier(counts_calls_reader: -> { 2 }, counts_body: counts_body_for_users(10))
 
     error = assert_raises(Load::FixtureVerifier::VerificationError) do
       verifier.call(base_url: "http://app.test")
     end
 
     assert_includes error.message, "/api/todos/counts"
-    assert_includes error.message, "distinct queryids"
+    assert_includes error.message, "10 users"
   end
 
   def test_verifier_fails_when_search_plan_drifts_from_reference
@@ -96,21 +97,27 @@ class FixtureVerifierTest < Minitest::Test
 
   private
 
-  def build_verifier(explain_reader: nil, distinct_queryids_reader: nil)
+  def build_verifier(explain_reader: nil, counts_calls_reader: nil, counts_body: counts_body_for_users(2))
     Load::FixtureVerifier.new(
       workload_name: "missing-index-todos",
-      client_factory: ->(*) { counts_client },
+      client_factory: ->(*) { counts_client(counts_body:) },
       explain_reader: explain_reader || lambda { |sql| sql.include?("status = 'open'") ? missing_index_plan : search_reference_plan },
       stats_reset: -> {},
-      distinct_queryids_reader: distinct_queryids_reader || -> { ["users-query", "counts-query"] },
+      counts_calls_reader: counts_calls_reader || -> { 3 },
       search_reference_reader: -> { search_reference_plan },
     )
   end
 
-  def counts_client
+  def counts_client(counts_body:)
     FakeClient.new(
-      "/api/todos/counts" => FakeResponse.new("200", JSON.generate({ "1" => 7, "2" => 3 })),
+      "/api/todos/counts" => FakeResponse.new("200", JSON.generate(counts_body)),
     )
+  end
+
+  def counts_body_for_users(users_count)
+    (1..users_count).each_with_object({}) do |user_id, counts|
+      counts[user_id.to_s] = user_id
+    end
   end
 
   def missing_index_plan(node_type: "Seq Scan", filter: %(("todos"."status" = 'open'::text)))

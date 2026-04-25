@@ -254,7 +254,7 @@ A standalone `bin/load verify-fixture` command asserts all three §5.3 pathologi
 Assertions, each independent and short-circuit on failure:
 
 1. **Missing-index:** `GET /api/todos?status=open` EXPLAIN tree contains `Seq Scan on todos` with a `status` filter. Reuses the §8 oracle tree-walk.
-2. **Counts N+1:** reset `pg_stat_statements`; issue one `GET /api/todos/counts`; snapshot. The count of distinct queryids attributable to that call must be ≥2. (Conservative floor: real N+1 produces N+ subqueries, but ≥2 catches the degenerate "someone fixed it to one query" case.)
+2. **Counts N+1:** reset `pg_stat_statements`; issue one `GET /api/todos/counts`; derive `users_count` from the response body; snapshot. The summed `calls` attributable to the per-user `COUNT(*)` query family must be at least `users_count`. This catches both "someone removed the N+1 entirely" and the subtler consolidation-to-`GROUP BY` case that still leaves multiple queryids but no longer issues one count query per user.
 3. **Search rewrite:** `GET /api/todos/search?q=foo` EXPLAIN tree contains a Seq Scan with a Filter matching the rewrite_like reference pattern stored at `fixtures/mixed-todo-app/search-explain.json`.
 
 A failed assertion aborts the run before traffic starts, with a message naming the rotten pathology and the file/route most likely responsible.

@@ -13,14 +13,15 @@ module Load
     SEARCH_PATH = "/api/todos/search?q=foo".freeze
     MISSING_INDEX_SQL = "EXPLAIN (FORMAT JSON) SELECT * FROM todos WHERE status = 'open'".freeze
     SEARCH_SQL = "EXPLAIN (FORMAT JSON) SELECT * FROM todos WHERE title LIKE '%foo%' ORDER BY created_at DESC LIMIT 50".freeze
-    COUNTS_QUERYIDS_SQL = <<~SQL.freeze
-      SELECT DISTINCT queryid::text AS queryid
+    COUNTS_CALLS_SQL = <<~SQL.freeze
+      SELECT COALESCE(SUM(calls), 0)::bigint AS calls
       FROM pg_stat_statements
-      WHERE query LIKE '%FROM "users"%'
-         OR (query LIKE '%FROM "todos"%' AND query LIKE '%COUNT(%' AND query LIKE '%"todos"."user_id"%')
+      WHERE query LIKE '%FROM "todos"%'
+        AND query LIKE '%COUNT(%'
+        AND query LIKE '%"todos"."user_id"%'
     SQL
 
-    def initialize(workload_name:, adapter_bin: nil, app_root: nil, stdout: $stdout, stderr: $stderr, client_factory: nil, explain_reader: nil, stats_reset: nil, distinct_queryids_reader: nil, search_reference_reader: nil, database_url: ENV["DATABASE_URL"], pg: PG)
+    def initialize(workload_name:, adapter_bin: nil, app_root: nil, stdout: $stdout, stderr: $stderr, client_factory: nil, explain_reader: nil, stats_reset: nil, counts_calls_reader: nil, search_reference_reader: nil, database_url: ENV["DATABASE_URL"], pg: PG)
       @workload_name = workload_name
       @adapter_bin = adapter_bin
       @app_root = app_root
@@ -29,7 +30,7 @@ module Load
       @client_factory = client_factory || ->(base_url) { Load::Client.new(base_url:) }
       @explain_reader = explain_reader || build_explain_reader(database_url:, pg:)
       @stats_reset = stats_reset || build_stats_reset(database_url:, pg:)
-      @distinct_queryids_reader = distinct_queryids_reader || build_distinct_queryids_reader(database_url:, pg:)
+      @counts_calls_reader = counts_calls_reader || build_counts_calls_reader(database_url:, pg:)
       @search_reference_reader = search_reference_reader || -> { JSON.parse(File.read(search_reference_path)).fetch(0).fetch("Plan") }
     end
 
@@ -66,14 +67,14 @@ module Load
       @stats_reset.call
       response = @client_factory.call(base_url).get(COUNTS_PATH)
       ensure_success!(response, COUNTS_PATH)
-      JSON.parse(response.body.to_s)
+      users_count = JSON.parse(response.body.to_s).length
 
-      queryids = Array(@distinct_queryids_reader.call).map(&:to_s).reject(&:empty?).uniq
-      if queryids.length < 2
-        raise VerificationError, "fixture verification failed for #{COUNTS_PATH}: expected at least 2 distinct queryids after one request, saw #{queryids.length}"
+      calls = @counts_calls_reader.call.to_i
+      if calls < users_count
+        raise VerificationError, "fixture verification failed for #{COUNTS_PATH}: expected at least #{users_count} count calls for #{users_count} users, saw #{calls}"
       end
 
-      { name: "counts_n_plus_one", ok: true, distinct_queryids: queryids.length }
+      { name: "counts_n_plus_one", ok: true, calls:, users: users_count }
     end
 
     def verify_search_rewrite
@@ -142,11 +143,11 @@ module Load
       end
     end
 
-    def build_distinct_queryids_reader(database_url:, pg:)
+    def build_counts_calls_reader(database_url:, pg:)
       ensure_database_url!(database_url)
       lambda do
         with_connection(database_url:, pg:) do |connection|
-          connection.exec(COUNTS_QUERYIDS_SQL).map { |row| row.fetch("queryid") }
+          connection.exec(COUNTS_CALLS_SQL).first.fetch("calls")
         end
       end
     end
