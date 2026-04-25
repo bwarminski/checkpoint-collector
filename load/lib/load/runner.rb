@@ -46,12 +46,14 @@ module Load
       end
     end
 
-    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil)
+    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil, verifier: nil, mode: :finite)
       @workload = workload
       @adapter_client = adapter_client
       @run_record = run_record
       @runtime = Runtime.new(clock, sleeper, http, stop_flag || InternalStopFlag.new)
       @settings = Settings.new(readiness_path, startup_grace_seconds, metrics_interval_seconds, workload_file, app_root, adapter_bin)
+      @verifier = verifier
+      @mode = mode
       @state_mutex = Mutex.new
       @tracking_buffers = []
       @state = initial_state
@@ -78,9 +80,13 @@ module Load
         write_state(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
 
         probe_readiness(start_response.fetch("base_url"))
+        verify_fixture(base_url: start_response.fetch("base_url"))
         start_workers(start_response.fetch("base_url"))
 
         result = finish_run
+      rescue Load::FixtureVerifier::VerificationError => error
+        write_state(outcome: outcome_payload(aborted: true, error_code: "fixture_verification_failed").merge(error_message: error.message))
+        result = Load::ExitCodes::ADAPTER_ERROR
       rescue AdapterClient::AdapterError
         write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
         result = Load::ExitCodes::ADAPTER_ERROR
@@ -95,6 +101,13 @@ module Load
     end
 
     private
+
+    def verify_fixture(base_url:)
+      return unless @mode == :finite
+      return unless @verifier
+
+      @verifier.call(base_url:)
+    end
 
     def probe_readiness(base_url)
       write_state(

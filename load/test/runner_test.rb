@@ -5,6 +5,77 @@ require "tmpdir"
 require_relative "test_helper"
 
 class RunnerTest < Minitest::Test
+  def test_runner_calls_verifier_after_start_and_readiness_and_before_workers
+    call_order = []
+    stop_flag = StopFlag.new
+    VerifierOrderAction.reset!
+    VerifierOrderAction.call_order = call_order
+    VerifierOrderAction.stop_flag = stop_flag
+    adapter = FakeAdapterClient.new(call_order:)
+    verifier_calls = []
+    verifier = lambda do |base_url:|
+      call_order << :verify
+      verifier_calls << base_url
+      { ok: true }
+    end
+    runner = Load::Runner.new(
+      workload: VerifierOrderWorkload.new,
+      adapter_client: adapter,
+      run_record: FakeRunRecord.new,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: ReadinessLoggingHttp.new(call_order:),
+      startup_grace_seconds: 0.1,
+      stop_flag:,
+      verifier:,
+      mode: :finite,
+    )
+
+    exit_code = runner.run
+
+    assert_equal 0, exit_code
+    assert_equal ["http://127.0.0.1:3999"], verifier_calls
+    assert_equal [:describe, :prepare, :reset_state, :start, :readiness, :verify, :worker, :stop], call_order
+  end
+
+  def test_runner_aborts_before_workers_when_verifier_fails
+    stop_flag = StopFlag.new
+    call_order = []
+    VerifierOrderAction.reset!
+    VerifierOrderAction.call_order = call_order
+    VerifierOrderAction.stop_flag = stop_flag
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: File.join(dir, "run"))
+      adapter = FakeAdapterClient.new(call_order:)
+      verifier = lambda do |base_url:|
+        call_order << :verify
+        raise Load::FixtureVerifier::VerificationError, "counts pathology missing for #{base_url}"
+      end
+      runner = Load::Runner.new(
+        workload: VerifierOrderWorkload.new,
+        adapter_client: adapter,
+        run_record:,
+        clock: fake_clock,
+        sleeper: ->(*) { Thread.pass },
+        http: ReadinessLoggingHttp.new(call_order:),
+        startup_grace_seconds: 0.1,
+        stop_flag:,
+        verifier:,
+        mode: :finite,
+      )
+
+      exit_code = runner.run
+
+      assert_equal Load::ExitCodes::ADAPTER_ERROR, exit_code
+      assert_equal [:describe, :prepare, :reset_state, :start, :readiness, :verify, :stop], call_order
+      assert_equal 1, adapter.stop_calls
+      refute File.exist?(run_record.metrics_path)
+
+      payload = JSON.parse(File.read(run_record.run_path))
+      assert_equal "fixture_verification_failed", payload.dig("outcome", "error_code")
+    end
+  end
+
   def test_runner_always_stops_adapter_and_writes_outcome
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new
@@ -572,7 +643,7 @@ class RunnerTest < Minitest::Test
   class FakeAdapterClient
     attr_reader :stop_calls, :describe_calls, :adapter_bin, :reset_state_workloads
 
-    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, prepare_error: nil, reset_state_response: {}, adapter_bin: nil, stop_error: nil)
+    def initialize(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }, describe_response: { "name" => "fake-adapter", "framework" => "ruby", "runtime" => "test" }, describe_error: nil, prepare_error: nil, reset_state_response: {}, adapter_bin: nil, stop_error: nil, call_order: nil)
       @start_response = start_response
       @describe_response = describe_response
       @describe_error = describe_error
@@ -580,12 +651,14 @@ class RunnerTest < Minitest::Test
       @reset_state_response = reset_state_response
       @adapter_bin = adapter_bin
       @stop_error = stop_error
+      @call_order = call_order
       @stop_calls = 0
       @describe_calls = 0
       @reset_state_workloads = []
     end
 
     def describe
+      @call_order << :describe if @call_order
       @describe_calls += 1
       raise @describe_error if @describe_error
 
@@ -593,21 +666,25 @@ class RunnerTest < Minitest::Test
     end
 
     def prepare(app_root:)
+      @call_order << :prepare if @call_order
       raise @prepare_error if @prepare_error
 
       true
     end
 
     def reset_state(app_root:, workload:, scale:)
+      @call_order << :reset_state if @call_order
       @reset_state_workloads << workload
       @reset_state_response
     end
 
     def start(app_root:)
+      @call_order << :start if @call_order
       @start_response
     end
 
     def stop(pid:)
+      @call_order << :stop if @call_order
       @stop_calls += 1
       raise @stop_error if @stop_error
 
@@ -684,6 +761,18 @@ class RunnerTest < Minitest::Test
     end
   end
 
+  class ReadinessLoggingHttp < FakeHttp
+    def initialize(call_order:)
+      super(always_refuse: false)
+      @call_order = call_order
+    end
+
+    def request(*)
+      @call_order << :readiness
+      super
+    end
+  end
+
   class LateSuccessHttp
     Response = Struct.new(:code)
 
@@ -756,6 +845,38 @@ class RunnerTest < Minitest::Test
 
     def load_plan
       Load::LoadPlan.new(workers: 1, duration_seconds: 1.0, rate_limit: :unlimited, seed: 42)
+    end
+  end
+
+  class VerifierOrderWorkload < FakeWorkload
+    def actions
+      [Load::ActionEntry.new(VerifierOrderAction, 1)]
+    end
+  end
+
+  class VerifierOrderAction
+    Response = Struct.new(:code)
+
+    class << self
+      attr_accessor :call_order, :stop_flag
+    end
+
+    def self.reset!
+      @call_order = nil
+      @stop_flag = nil
+    end
+
+    def initialize(rng:, ctx:, client:)
+    end
+
+    def name
+      :verifier_order
+    end
+
+    def call
+      self.class.call_order << :worker
+      self.class.stop_flag.trigger(:request_seen)
+      Response.new("200")
     end
   end
 
