@@ -1465,7 +1465,7 @@ class RunnerTest < Minitest::Test
     end
 
     def scale
-      Load::Scale.new(rows_per_table: 100_000, extra: { open_fraction: 0.6 }, seed: 42)
+      Load::Scale.new(rows_per_table: 100_000, seed: 42)
     end
 
     def actions
@@ -1890,7 +1890,7 @@ class RunnerTest < Minitest::Test
     end
 
     def scale
-      Load::Scale.new(rows_per_table: 100, extra: { open_fraction: 0.6 }, seed: 42)
+      Load::Scale.new(rows_per_table: 100, seed: 42)
     end
 
     def actions

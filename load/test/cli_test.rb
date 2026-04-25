@@ -868,9 +868,9 @@ class CliTest < Minitest::Test
                 "#{name}"
               end
 
-    def scale
-      Load::Scale.new(rows_per_table: 1, seed: 42)
-    end
+              def scale
+                Load::Scale.new(rows_per_table: 1, seed: 42)
+              end
 
               def actions
                 [Load::ActionEntry.new(Action, 1)]
@@ -878,6 +878,16 @@ class CliTest < Minitest::Test
 
               def load_plan
                 Load::LoadPlan.new(workers: 1, duration_seconds: 60, rate_limit: :unlimited, seed: 42)
+              end
+
+              def invariant_sampler(database_url:, pg:)
+                Sampler.new
+              end
+            end
+
+            class Sampler
+              def call
+                Load::Runner::InvariantSample.new([])
               end
             end
 
