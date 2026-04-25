@@ -13,12 +13,12 @@ class ScaleTest < Minitest::Test
     scale = Load::Scale.new(rows_per_table: 10, seed: 7, extra: { open_fraction: 0.6, batch_size: 25 })
 
     assert_equal(
-      {
-        "ROWS_PER_TABLE" => "10",
-        "OPEN_FRACTION" => 0.6,
-        "BATCH_SIZE" => 25,
-      },
-      scale.env_pairs,
+      [
+        ["ROWS_PER_TABLE", "10"],
+        ["OPEN_FRACTION", 0.6],
+        ["BATCH_SIZE", 25],
+      ],
+      scale.env_pairs.to_a,
     )
   end
 
@@ -34,6 +34,14 @@ class ScaleTest < Minitest::Test
     end
 
     assert_equal "extra cannot contain reserved key: seed", error.message
+  end
+
+  def test_scale_rejects_extra_seed_key_case_insensitively
+    error = assert_raises(ArgumentError) do
+      Load::Scale.new(rows_per_table: 10, extra: { "Seed" => 99 })
+    end
+
+    assert_equal "extra cannot contain reserved key: Seed", error.message
   end
 
   def test_scale_rejects_extra_rows_per_table_key

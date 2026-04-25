@@ -3,8 +3,8 @@
 module Load
   Scale = Data.define(:rows_per_table, :seed, :extra) do
     def initialize(rows_per_table:, seed: 42, extra: {})
-      reserved = %i[seed rows_per_table SEED ROWS_PER_TABLE]
-      bad = extra.keys.find { |key| reserved.include?(key.to_sym) }
+      reserved = %w[seed rows_per_table]
+      bad = extra.keys.find { |key| reserved.include?(key.to_s.downcase) }
       raise ArgumentError, "extra cannot contain reserved key: #{bad}" if bad
 
       super
