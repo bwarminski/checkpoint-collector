@@ -88,44 +88,6 @@ module Load
       end
     end
 
-    class InvariantSampler
-      OPEN_COUNT_SQL = "SELECT COUNT(*) AS count FROM todos WHERE status = 'open'".freeze
-      TOTAL_COUNT_SQL = "SELECT reltuples::bigint AS count FROM pg_class WHERE relname = 'todos'".freeze
-
-      def initialize(pg:, database_url:, open_floor:, total_floor:, total_ceiling:)
-        @pg = pg
-        @database_url = database_url
-        @open_floor = open_floor
-        @total_floor = total_floor
-        @total_ceiling = total_ceiling
-      end
-
-      def call
-        with_connection do |connection|
-          connection.transaction do |txn|
-            txn.exec("SET LOCAL pg_stat_statements.track = 'none'")
-            open_count = txn.exec(OPEN_COUNT_SQL).first.fetch("count").to_i
-            total_count = txn.exec(TOTAL_COUNT_SQL).first.fetch("count").to_i
-            InvariantSample.new(
-              [
-                InvariantCheck.new("open_count", open_count, @open_floor, nil),
-                InvariantCheck.new("total_count", total_count, @total_floor, @total_ceiling),
-              ],
-            )
-          end
-        end
-      end
-
-      private
-
-      def with_connection
-        connection = @pg.connect(@database_url)
-        yield connection
-      ensure
-        connection&.close
-      end
-    end
-
     class InvariantSamplerFailure < StandardError; end
     class InvariantSamplerShutdown < StandardError; end
 
@@ -142,7 +104,10 @@ module Load
       @invariant_sampler = if @invariant_policy == :off
         invariant_sampler
       else
-        invariant_sampler || default_invariant_sampler(database_url:, pg:)
+        invariant_sampler || @workload.invariant_sampler(database_url:, pg:)
+      end
+      if @mode == :continuous && @invariant_policy != :off && @invariant_sampler.nil?
+        raise AdapterClient::AdapterError, "continuous mode requires the workload to provide an invariant sampler"
       end
       @invariant_sample_interval_seconds = invariant_sample_interval_seconds
       @state_mutex = Mutex.new
@@ -613,22 +578,6 @@ module Load
       else
         value
       end
-    end
-
-    def default_invariant_sampler(database_url:, pg:)
-      return nil unless @mode == :continuous
-      if database_url.nil? || database_url.empty?
-        raise AdapterClient::AdapterError, "continuous mode requires DATABASE_URL, an explicit invariant sampler, or --invariants off"
-      end
-
-      rows_per_table = @workload.scale.rows_per_table
-      InvariantSampler.new(
-        pg:,
-        database_url:,
-        open_floor: (rows_per_table * 0.3).to_i,
-        total_floor: (rows_per_table * 0.8).to_i,
-        total_ceiling: (rows_per_table * 2.0).to_i,
-      )
     end
 
     class InternalStopFlag
