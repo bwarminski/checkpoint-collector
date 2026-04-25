@@ -144,7 +144,11 @@ module Load
       @mode = mode
       @stderr = stderr
       @invariant_policy = invariant_policy
-      @invariant_sampler = invariant_sampler || default_invariant_sampler(database_url:, pg:)
+      @invariant_sampler = if @invariant_policy == :off
+        invariant_sampler
+      else
+        invariant_sampler || default_invariant_sampler(database_url:, pg:)
+      end
       @invariant_sample_interval_seconds = invariant_sample_interval_seconds
       @state_mutex = Mutex.new
       @tracking_buffers = []
@@ -619,7 +623,7 @@ module Load
     def default_invariant_sampler(database_url:, pg:)
       return nil unless @mode == :continuous
       if database_url.nil? || database_url.empty?
-        raise AdapterClient::AdapterError, "continuous mode requires DATABASE_URL or an explicit invariant sampler"
+        raise AdapterClient::AdapterError, "continuous mode requires DATABASE_URL, an explicit invariant sampler, or --invariants off"
       end
 
       rows_per_table = @workload.scale.rows_per_table

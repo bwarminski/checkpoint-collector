@@ -266,6 +266,62 @@ class RunnerTest < Minitest::Test
     thread&.join
   end
 
+  def test_runner_off_policy_skips_invariant_sampling
+    stderr = StringIO.new
+    sampler_calls = 0
+    sampler = Object.new
+    sampler.define_singleton_method(:call) do
+      sampler_calls += 1
+      raise "off policy must not sample invariants"
+    end
+
+    run_record = FakeRunRecord.new
+    stop_flag = Load::Runner::InternalStopFlag.new
+    runner = build_continuous_runner(
+      run_record:,
+      stop_flag:,
+      invariant_sampler: sampler,
+      invariant_policy: :off,
+      stderr:,
+    )
+    thread = Thread.new { runner.run }
+
+    sleep 0.05
+    stop_flag.trigger(:sigterm)
+
+    assert_equal Load::ExitCodes::SUCCESS, Timeout.timeout(2.0) { thread.value }
+    assert_equal 0, sampler_calls
+    assert_equal [], run_record.read_run_json.fetch("warnings")
+    assert_equal [], run_record.read_run_json.fetch("invariant_samples")
+    assert_equal "", stderr.string
+  ensure
+    thread&.kill
+    thread&.join
+  end
+
+  def test_runner_off_policy_runs_without_database_url
+    run_record = FakeRunRecord.new
+    stop_flag = Load::Runner::InternalStopFlag.new
+    runner = build_continuous_runner(
+      run_record:,
+      stop_flag:,
+      invariant_sampler: nil,
+      invariant_policy: :off,
+      database_url: nil,
+    )
+    thread = Thread.new { runner.run }
+
+    sleep 0.05
+    stop_flag.trigger(:sigterm)
+
+    assert_equal Load::ExitCodes::SUCCESS, Timeout.timeout(2.0) { thread.value }
+    assert_equal [], run_record.read_run_json.fetch("warnings")
+    assert_equal [], run_record.read_run_json.fetch("invariant_samples")
+  ensure
+    thread&.kill
+    thread&.join
+  end
+
   def test_runner_reports_sampler_failure_as_controlled_error
     run_record = FakeRunRecord.new
     stop_flag = Load::Runner::InternalStopFlag.new
@@ -1021,7 +1077,8 @@ class RunnerTest < Minitest::Test
     -> { Time.now.utc }
   end
 
-  def build_continuous_runner(run_record:, stop_flag: Load::Runner::InternalStopFlag.new, invariant_sampler: FakeInvariantSampler.new([]), invariant_policy: :enforce, stderr: StringIO.new)
+  def build_continuous_runner(run_record:, stop_flag: Load::Runner::InternalStopFlag.new, invariant_sampler: :default_sampler, invariant_policy: :enforce, stderr: StringIO.new, database_url: nil)
+    invariant_sampler = FakeInvariantSampler.new([]) if invariant_sampler == :default_sampler
     Load::Runner.new(
       workload: BarrierWorkload.new,
       adapter_client: FakeAdapterClient.new,
@@ -1035,7 +1092,7 @@ class RunnerTest < Minitest::Test
       mode: :continuous,
       invariant_sampler:,
       invariant_sample_interval_seconds: 0.001,
-      database_url: nil,
+      database_url:,
       invariant_policy:,
       stderr:,
     )

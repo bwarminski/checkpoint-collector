@@ -508,6 +508,9 @@ class CliTest < Minitest::Test
 
     assert status.success?
     assert_includes stdout, "Usage: bin/load"
+    assert_includes stdout, "bin/load run|soak"
+    assert_includes stdout, "bin/load verify-fixture"
+    refute_match(/verify-fixture.*\[--invariants/, stdout)
     assert_equal "", stderr
   end
 
