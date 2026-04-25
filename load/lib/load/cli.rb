@@ -1,10 +1,12 @@
 # ABOUTME: Parses the load runner CLI and resolves named workloads.
 # ABOUTME: Keeps command handling separate from runner orchestration.
 require "optparse"
+require "net/http"
 require "tmpdir"
 
 module Load
   class CLI
+    VerifierError = Class.new(StandardError)
     USAGE = "Usage: bin/load run|soak|verify-fixture --workload NAME --adapter PATH --app-root PATH [--readiness-path /up|none] [--startup-grace-seconds 15] [--metrics-interval-seconds 5]".freeze
 
     def initialize(argv:, version:, runner_factory: nil, verifier_factory: nil, stop_flag: nil, stdout: $stdout, stderr: $stderr)
@@ -40,6 +42,9 @@ module Load
     rescue Load::FixtureVerifier::VerificationError => error
       @stderr.puts(error.message)
       Load::ExitCodes::ADAPTER_ERROR
+    rescue VerifierError, Load::AdapterClient::AdapterError, Load::ReadinessGate::Timeout => error
+      @stderr.puts(error.message)
+      Load::ExitCodes::ADAPTER_ERROR
     rescue OptionParser::ParseError, ArgumentError => error
       @stderr.puts(error.message)
       usage_error
@@ -71,7 +76,8 @@ module Load
 
     def verify_fixture_command
       options = parse_shared_options
-      verifier = @verifier_factory.call(
+      workload = load_workload(options.fetch(:workload))
+      verifier = build_verifier(
         workload_name: options.fetch(:workload),
         adapter_bin: options.fetch(:adapter_bin),
         app_root: options.fetch(:app_root),
@@ -80,7 +86,7 @@ module Load
       )
       raise ArgumentError, "unknown workload: #{options.fetch(:workload)}" unless verifier
 
-      verifier.call
+      verify_fixture(workload:, verifier:, options:)
     end
 
     def default_runner_factory
@@ -90,7 +96,7 @@ module Load
         adapter_client = Load::AdapterClient.new(adapter_bin:, run_record:)
         verifier = nil
         if fixture_verification_required?(workload_name: workload.name, mode:)
-          verifier = @verifier_factory.call(
+          verifier = build_verifier(
             workload_name: workload.name,
             adapter_bin:,
             app_root:,
@@ -130,6 +136,46 @@ module Load
           pg: PG,
         )
       end
+    end
+
+    def build_verifier(workload_name:, adapter_bin:, app_root:, stdout:, stderr:)
+      @verifier_factory.call(
+        workload_name:,
+        adapter_bin:,
+        app_root:,
+        stdout:,
+        stderr:,
+      )
+    rescue Load::FixtureVerifier::VerificationError
+      raise
+    rescue StandardError => error
+      raise VerifierError, error.message
+    end
+
+    def verify_fixture(workload:, verifier:, options:)
+      adapter_client = Load::AdapterClient.new(adapter_bin: options.fetch(:adapter_bin))
+      adapter_client.describe
+      adapter_client.prepare(app_root: options.fetch(:app_root))
+      adapter_client.reset_state(app_root: options.fetch(:app_root), workload: workload.name, scale: workload.scale)
+      start_response = adapter_client.start(app_root: options.fetch(:app_root))
+      base_url = start_response.fetch("base_url")
+      pid = start_response.fetch("pid")
+      Load::ReadinessGate.new(
+        base_url:,
+        readiness_path: "/up",
+        startup_grace_seconds: 15.0,
+        clock: -> { Time.now.utc },
+        sleeper: ->(seconds) { sleep(seconds) },
+        http: Net::HTTP,
+      ).call
+      verifier.call(base_url:)
+      Load::ExitCodes::SUCCESS
+    rescue Load::FixtureVerifier::VerificationError
+      raise
+    rescue StandardError => error
+      raise VerifierError, error.message
+    ensure
+      adapter_client&.stop(pid:) if pid
     end
 
     def parse_shared_options

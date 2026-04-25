@@ -37,6 +37,7 @@ class CliTest < Minitest::Test
   def setup
     Load::WorkloadRegistry.clear
     Load::WorkloadRegistry.register("fixture-workload", FixtureWorkload)
+    Load::WorkloadRegistry.register("missing-index-todos", MissingIndexTodosWorkload)
   end
 
   def teardown
@@ -190,32 +191,39 @@ class CliTest < Minitest::Test
   end
 
   def test_cli_runs_verify_fixture_command
-    verifier_calls = []
-    verifier = Object.new
-    verifier.define_singleton_method(:call) { 0 }
+    Dir.mktmpdir do |dir|
+      with_http_server do |port|
+        adapter_path = write_fake_adapter(dir, port:)
+        verifier_calls = []
+        verifier = Object.new
+        verifier.define_singleton_method(:call) do |base_url:|
+          verifier_calls << base_url
+          Load::ExitCodes::SUCCESS
+        end
 
-    cli = Load::CLI.new(
-      argv: [
-        "verify-fixture",
-        "--workload",
-        "missing-index-todos",
-        "--adapter",
-        "adapters/rails/bin/bench-adapter",
-        "--app-root",
-        "/tmp/demo",
-      ],
-      version: "0.3.0",
-      verifier_factory: ->(**kwargs) do
-        verifier_calls << kwargs
-        verifier
-      end,
-      stdout: StringIO.new,
-      stderr: StringIO.new,
-    )
+        cli = Load::CLI.new(
+          argv: [
+            "verify-fixture",
+            "--workload",
+            "missing-index-todos",
+            "--adapter",
+            adapter_path,
+            "--app-root",
+            dir,
+          ],
+          version: "0.3.0",
+          verifier_factory: ->(**kwargs) do
+            assert_equal "missing-index-todos", kwargs.fetch(:workload_name)
+            verifier
+          end,
+          stdout: StringIO.new,
+          stderr: StringIO.new,
+        )
 
-    assert_equal 0, cli.run
-    assert_equal 1, verifier_calls.length
-    assert_equal "missing-index-todos", verifier_calls.first.fetch(:workload_name)
+        assert_equal Load::ExitCodes::SUCCESS, cli.run
+        assert_equal ["http://127.0.0.1:#{port}"], verifier_calls
+      end
+    end
   end
 
   def test_cli_runs_verify_fixture_command_with_runner_only_flag_rejected
@@ -244,7 +252,7 @@ class CliTest < Minitest::Test
     assert_includes stderr.string, "Usage: bin/load"
   end
 
-  def test_cli_runs_verify_fixture_command_without_factory_exits_usage_error
+  def test_cli_runs_verify_fixture_command_without_factory_treating_setup_failures_as_adapter_errors
     stdout = StringIO.new
     stderr = StringIO.new
 
@@ -259,42 +267,82 @@ class CliTest < Minitest::Test
         "/tmp/demo",
       ],
       version: "0.3.0",
-      stdout:,
-      stderr:,
-    )
-
-    assert_equal Load::ExitCodes::USAGE_ERROR, cli.run
-    assert_includes stderr.string, "verify-fixture"
-    assert_includes stderr.string, "Usage: bin/load"
-  end
-
-  def test_cli_runs_verify_fixture_command_without_treating_verification_failure_as_usage_error
-    stdout = StringIO.new
-    stderr = StringIO.new
-    verifier = Object.new
-    verifier.define_singleton_method(:call) do
-      raise Load::FixtureVerifier::VerificationError, "fixture verification failed for /api/todos/counts: expected at least 2 count calls"
-    end
-
-    cli = Load::CLI.new(
-      argv: [
-        "verify-fixture",
-        "--workload",
-        "missing-index-todos",
-        "--adapter",
-        "adapters/rails/bin/bench-adapter",
-        "--app-root",
-        "/tmp/demo",
-      ],
-      version: "0.3.0",
-      verifier_factory: ->(**) { verifier },
       stdout:,
       stderr:,
     )
 
     assert_equal Load::ExitCodes::ADAPTER_ERROR, cli.run
-    assert_includes stderr.string, "fixture verification failed for /api/todos/counts"
+    assert_includes stderr.string, "missing DATABASE_URL for fixture verification"
     refute_includes stderr.string, "Usage: bin/load"
+  end
+
+  def test_cli_runs_verify_fixture_command_without_treating_verification_failure_as_usage_error
+    Dir.mktmpdir do |dir|
+      with_http_server do |port|
+        stdout = StringIO.new
+        stderr = StringIO.new
+        verifier = Object.new
+        verifier.define_singleton_method(:call) do |base_url:|
+          raise "missing base_url" if base_url.nil?
+          raise Load::FixtureVerifier::VerificationError, "fixture verification failed for /api/todos/counts: expected at least 2 count calls"
+        end
+
+        cli = Load::CLI.new(
+          argv: [
+            "verify-fixture",
+            "--workload",
+            "missing-index-todos",
+            "--adapter",
+            write_fake_adapter(dir, port:),
+            "--app-root",
+            dir,
+          ],
+          version: "0.3.0",
+          verifier_factory: ->(**) { verifier },
+          stdout:,
+          stderr:,
+        )
+
+        assert_equal Load::ExitCodes::ADAPTER_ERROR, cli.run
+        assert_includes stderr.string, "fixture verification failed for /api/todos/counts"
+        refute_includes stderr.string, "Usage: bin/load"
+      end
+    end
+  end
+
+  def test_cli_verify_fixture_starts_adapter_probes_readiness_calls_verifier_and_stops_adapter
+    Dir.mktmpdir do |dir|
+      with_http_server do |port|
+        adapter_log_path = File.join(dir, "adapter.log")
+        adapter_path = write_fake_adapter(dir, port:, log_path: adapter_log_path)
+        verifier_calls = []
+        verifier = Object.new
+        verifier.define_singleton_method(:call) do |base_url:|
+          verifier_calls << base_url
+          Load::ExitCodes::SUCCESS
+        end
+
+        status = Load::CLI.new(
+          argv: [
+            "verify-fixture",
+            "--workload",
+            "missing-index-todos",
+            "--adapter",
+            adapter_path,
+            "--app-root",
+            dir,
+          ],
+          version: "0.3.0",
+          verifier_factory: ->(**) { verifier },
+          stdout: StringIO.new,
+          stderr: StringIO.new,
+        ).run
+
+        assert_equal Load::ExitCodes::SUCCESS, status
+        assert_equal ["http://127.0.0.1:#{port}"], verifier_calls
+        assert_equal ["describe", "prepare", "reset-state", "start", "stop"], File.readlines(adapter_log_path, chomp: true)
+      end
+    end
   end
 
   def test_cli_runs_soak_command
@@ -397,6 +445,56 @@ class CliTest < Minitest::Test
       refute status.success?
       refute_includes stderr, "Usage: bin/load"
       assert_includes stderr, "/nonexistent-adapter"
+    end
+  end
+
+  def test_bin_load_verify_fixture_with_missing_database_url_exits_adapter_error_without_usage
+    stdout, stderr, status = capture_bin_load_with_env(
+      { "DATABASE_URL" => nil },
+      "verify-fixture",
+      "--workload",
+      "missing-index-todos",
+      "--adapter",
+      "/nonexistent-adapter",
+      "--app-root",
+      "/tmp/demo",
+    )
+
+    refute status.success?
+    assert_equal Load::ExitCodes::ADAPTER_ERROR, status.exitstatus
+    assert_equal "", stdout
+    assert_includes stderr, "missing DATABASE_URL for fixture verification"
+    refute_includes stderr, "Usage: bin/load"
+  end
+
+  def test_bin_load_soak_missing_index_todos_exercises_real_verifier_wiring
+    Dir.mktmpdir do |dir|
+      with_http_server do |port|
+        adapter_path = write_fake_adapter(dir, port:)
+
+        stdout, stderr, status = Timeout.timeout(5) do
+          capture_bin_load_with_env(
+            { "DATABASE_URL" => nil },
+            "soak",
+            "--workload",
+            "missing-index-todos",
+            "--adapter",
+            adapter_path,
+            "--app-root",
+            dir,
+            "--readiness-path",
+            "none",
+            "--startup-grace-seconds",
+            "0",
+          )
+        end
+
+        refute status.success?
+        assert_equal Load::ExitCodes::ADAPTER_ERROR, status.exitstatus
+        assert_equal "", stdout
+        assert_includes stderr, "missing DATABASE_URL for fixture verification"
+        refute_includes stderr, "Usage: bin/load"
+      end
     end
   end
 
@@ -525,6 +623,10 @@ class CliTest < Minitest::Test
     Open3.capture3(RbConfig.ruby, bin_load_path, *argv)
   end
 
+  def capture_bin_load_with_env(env, *argv)
+    Open3.capture3(env, RbConfig.ruby, bin_load_path, *argv)
+  end
+
   def bin_load_path
     @bin_load_path ||= File.expand_path("../../bin/load", __dir__)
   end
@@ -533,7 +635,7 @@ class CliTest < Minitest::Test
     @version_path ||= File.expand_path("../../VERSION", __dir__)
   end
 
-  def write_fake_adapter(dir, port: 3999)
+  def write_fake_adapter(dir, port: 3999, log_path: nil)
     path = File.join(dir, "fake-adapter")
     File.write(path, <<~RUBY)
       #!/usr/bin/env ruby
@@ -556,6 +658,8 @@ class CliTest < Minitest::Test
       else
         {"ok" => false, "command" => command, "error" => {"code" => "unknown", "message" => "unknown", "details" => {}}}
       end
+
+      File.open("#{log_path}", "a") { |file| file.puts(command) } if #{!log_path.nil?}
 
       puts(JSON.generate(payload))
       exit(payload.fetch("ok") ? 0 : 1)
