@@ -22,22 +22,56 @@ module Load
         AND query LIKE '%"todos"."user_id"%'
     SQL
 
-    def initialize(workload_name:, adapter_bin: nil, app_root: nil, stdout: $stdout, stderr: $stderr, client_factory: nil, explain_reader: nil, stats_reset: nil, counts_calls_reader: nil, search_reference_reader: nil, database_url: ENV["DATABASE_URL"], pg: PG)
-      @workload_name = workload_name
-      @adapter_bin = adapter_bin
-      @app_root = app_root
-      @stdout = stdout
-      @stderr = stderr
+    def self.build_explain_reader(database_url:, pg:)
+      ensure_database_url!(database_url)
+      lambda do |sql|
+        with_connection(database_url:, pg:) do |connection|
+          rows = connection.exec(sql)
+          JSON.parse(rows.first.fetch("QUERY PLAN")).fetch(0).fetch("Plan")
+        end
+      end
+    end
+
+    def self.build_stats_reset(database_url:, pg:)
+      ensure_database_url!(database_url)
+      lambda do
+        with_connection(database_url:, pg:) do |connection|
+          connection.exec("SELECT pg_stat_statements_reset()")
+        end
+      end
+    end
+
+    def self.build_counts_calls_reader(database_url:, pg:)
+      ensure_database_url!(database_url)
+      lambda do
+        with_connection(database_url:, pg:) do |connection|
+          connection.exec(COUNTS_CALLS_SQL).first.fetch("calls")
+        end
+      end
+    end
+
+    def self.with_connection(database_url:, pg:)
+      connection = pg.connect(database_url)
+      yield connection
+    ensure
+      connection&.close
+    end
+
+    def self.ensure_database_url!(database_url)
+      return database_url unless database_url.nil? || database_url.empty?
+
+      raise ArgumentError, "missing DATABASE_URL for fixture verification"
+    end
+
+    def initialize(client_factory: nil, explain_reader: nil, stats_reset: nil, counts_calls_reader: nil, search_reference_reader: nil, database_url: ENV["DATABASE_URL"], pg: PG)
       @client_factory = client_factory || ->(base_url) { Load::Client.new(base_url:) }
-      @explain_reader = explain_reader || build_explain_reader(database_url:, pg:)
-      @stats_reset = stats_reset || build_stats_reset(database_url:, pg:)
-      @counts_calls_reader = counts_calls_reader || build_counts_calls_reader(database_url:, pg:)
+      @explain_reader = explain_reader || self.class.build_explain_reader(database_url:, pg:)
+      @stats_reset = stats_reset || self.class.build_stats_reset(database_url:, pg:)
+      @counts_calls_reader = counts_calls_reader || self.class.build_counts_calls_reader(database_url:, pg:)
       @search_reference_reader = search_reference_reader || -> { JSON.parse(File.read(search_reference_path)).fetch(0).fetch("Plan") }
     end
 
     def call(base_url:)
-      raise ArgumentError, "unknown workload: #{@workload_name}" unless @workload_name == "missing-index-todos"
-
       {
         ok: true,
         checks: [
@@ -125,47 +159,6 @@ module Load
       else
         actual == reference
       end
-    end
-
-    def build_explain_reader(database_url:, pg:)
-      ensure_database_url!(database_url)
-      lambda do |sql|
-        with_connection(database_url:, pg:) do |connection|
-          rows = connection.exec(sql)
-          JSON.parse(rows.first.fetch("QUERY PLAN")).fetch(0).fetch("Plan")
-        end
-      end
-    end
-
-    def build_stats_reset(database_url:, pg:)
-      ensure_database_url!(database_url)
-      lambda do
-        with_connection(database_url:, pg:) do |connection|
-          connection.exec("SELECT pg_stat_statements_reset()")
-        end
-      end
-    end
-
-    def build_counts_calls_reader(database_url:, pg:)
-      ensure_database_url!(database_url)
-      lambda do
-        with_connection(database_url:, pg:) do |connection|
-          connection.exec(COUNTS_CALLS_SQL).first.fetch("calls")
-        end
-      end
-    end
-
-    def with_connection(database_url:, pg:)
-      connection = pg.connect(database_url)
-      yield connection
-    ensure
-      connection&.close
-    end
-
-    def ensure_database_url!(database_url)
-      return database_url unless database_url.nil? || database_url.empty?
-
-      raise ArgumentError, "missing DATABASE_URL for fixture verification"
     end
 
     def search_reference_path

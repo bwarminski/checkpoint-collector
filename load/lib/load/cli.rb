@@ -82,7 +82,7 @@ module Load
       options = parse_shared_options
       workload = load_workload(options.fetch(:workload))
       verifier = build_verifier(
-        workload_name: options.fetch(:workload),
+        workload:,
         adapter_bin: options.fetch(:adapter_bin),
         app_root: options.fetch(:app_root),
         stdout: @stdout,
@@ -98,16 +98,13 @@ module Load
         run_dir = File.join(runs_dir, "#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}-#{workload.name}")
         run_record = Load::RunRecord.new(run_dir:)
         adapter_client = Load::AdapterClient.new(adapter_bin:, run_record:)
-        verifier = nil
-        if fixture_verification_required?(workload_name: workload.name, mode:)
-          verifier = build_verifier(
-            workload_name: workload.name,
-            adapter_bin:,
-            app_root:,
-            stdout:,
-            stderr:,
-          )
-        end
+        verifier = build_verifier(
+          workload:,
+          adapter_bin:,
+          app_root:,
+          stdout:,
+          stderr:,
+        )
         Load::Runner.new(
           workload:,
           adapter_client:,
@@ -130,29 +127,23 @@ module Load
     end
 
     def default_verifier_factory
-      lambda do |workload_name:, adapter_bin:, app_root:, stdout:, stderr:|
-        next unless workload_name == "missing-index-todos"
-
-        Load::FixtureVerifier.new(
-          workload_name:,
-          adapter_bin:,
-          app_root:,
-          stdout:,
-          stderr:,
-          database_url: ENV["DATABASE_URL"],
-          pg: PG,
-        )
+      lambda do |workload:, adapter_bin:, app_root:, stdout:, stderr:|
+        workload.verifier(database_url: ENV["DATABASE_URL"], pg: PG)
       end
     end
 
-    def build_verifier(workload_name:, adapter_bin:, app_root:, stdout:, stderr:)
-      @verifier_factory.call(
-        workload_name:,
+    def build_verifier(workload:, adapter_bin:, app_root:, stdout:, stderr:)
+      verifier = @verifier_factory.call(
+        workload:,
         adapter_bin:,
         app_root:,
         stdout:,
         stderr:,
       )
+      return nil if verifier.nil?
+      return verifier if verifier.respond_to?(:call)
+
+      raise VerifierError, "verifier must respond to call"
     rescue Load::FixtureVerifier::VerificationError
       raise
     rescue StandardError => error
@@ -263,10 +254,6 @@ module Load
     def usage_error
       @stderr.puts(USAGE)
       Load::ExitCodes::USAGE_ERROR
-    end
-
-    def fixture_verification_required?(workload_name:, mode:)
-      workload_name == "missing-index-todos" && %i[finite continuous].include?(mode)
     end
 
     def workload_path(name)

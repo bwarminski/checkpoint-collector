@@ -57,7 +57,6 @@ class FixtureVerifierTest < Minitest::Test
     explain_sqls = []
     stats_reset_calls = 0
     verifier = Load::FixtureVerifier.new(
-      workload_name: "missing-index-todos",
       client_factory: lambda do |base_url|
         assert_equal "http://app.test", base_url
         client
@@ -88,7 +87,6 @@ class FixtureVerifierTest < Minitest::Test
     connection = FakePgConnection.new([{ "calls" => "7" }])
     pg = FakePg.new(connection)
     verifier = Load::FixtureVerifier.new(
-      workload_name: "missing-index-todos",
       client_factory: ->(base_url) do
         assert_equal "http://app.test", base_url
         counts_client(counts_body: counts_body_for_users(7))
@@ -166,7 +164,6 @@ class FixtureVerifierTest < Minitest::Test
 
   def build_verifier(explain_reader: nil, counts_calls_reader: nil, counts_body: counts_body_for_users(2))
     Load::FixtureVerifier.new(
-      workload_name: "missing-index-todos",
       client_factory: ->(*) { counts_client(counts_body:) },
       explain_reader: explain_reader || lambda { |sql| sql.include?("status = 'open'") ? missing_index_plan : search_reference_plan },
       stats_reset: -> {},

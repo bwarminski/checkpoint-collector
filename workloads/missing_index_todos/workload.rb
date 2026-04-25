@@ -48,6 +48,14 @@ module Load
             total_ceiling: (rows_per_table * 2.0).to_i,
           )
         end
+
+        def verifier(database_url:, pg:)
+          Load::FixtureVerifier.new(
+            explain_reader: Load::FixtureVerifier.build_explain_reader(database_url:, pg:),
+            stats_reset: Load::FixtureVerifier.build_stats_reset(database_url:, pg:),
+            counts_calls_reader: Load::FixtureVerifier.build_counts_calls_reader(database_url:, pg:),
+          )
+        end
       end
     end
   end

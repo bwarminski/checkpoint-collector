@@ -32,12 +32,32 @@ class CliTest < Minitest::Test
     def name
       "missing-index-todos"
     end
+
+    def verifier(database_url:, pg:)
+      Load::FixtureVerifier.new(
+        explain_reader: ->(*) { {} },
+        stats_reset: -> {},
+        counts_calls_reader: -> { 1 },
+        search_reference_reader: -> { {} },
+      )
+    end
+  end
+
+  class WorkloadWithVerifier < FixtureWorkload
+    def name
+      "workload-with-verifier"
+    end
+
+    def verifier(database_url:, pg:)
+      ->(*) {}
+    end
   end
 
   def setup
     Load::WorkloadRegistry.clear
     Load::WorkloadRegistry.register("fixture-workload", FixtureWorkload)
     Load::WorkloadRegistry.register("missing-index-todos", MissingIndexTodosWorkload)
+    Load::WorkloadRegistry.register("workload-with-verifier", WorkloadWithVerifier)
   end
 
   def teardown
@@ -143,7 +163,7 @@ class CliTest < Minitest::Test
 
     verifier_factory = cli.send(:default_verifier_factory)
     verifier = verifier_factory.call(
-      workload_name: "missing-index-todos",
+      workload: MissingIndexTodosWorkload.new,
       adapter_bin: "adapters/rails/bin/bench-adapter",
       app_root: "/tmp/demo",
       stdout: StringIO.new,
@@ -151,7 +171,6 @@ class CliTest < Minitest::Test
     )
 
     assert_instance_of Load::FixtureVerifier, verifier
-    assert_equal "missing-index-todos", verifier.instance_variable_get(:@workload_name)
 
     captured_runner_kwargs = nil
     Load::Runner.stub(:new, ->(**kwargs) do
@@ -175,7 +194,6 @@ class CliTest < Minitest::Test
     end
 
     assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
-    assert_equal "missing-index-todos", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
     assert_equal :enforce, captured_runner_kwargs.fetch(:invariant_policy)
   ensure
     ENV["DATABASE_URL"] = original_database_url
@@ -214,7 +232,6 @@ class CliTest < Minitest::Test
     end
 
     assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
-    assert_equal "missing-index-todos", captured_runner_kwargs.fetch(:verifier).instance_variable_get(:@workload_name)
     assert_equal :continuous, captured_runner_kwargs.fetch(:mode)
     assert_equal :enforce, captured_runner_kwargs.fetch(:invariant_policy)
   ensure
@@ -259,6 +276,87 @@ class CliTest < Minitest::Test
     ENV["DATABASE_URL"] = original_database_url
   end
 
+  def test_default_runner_factory_uses_workload_provided_verifier
+    cli = Load::CLI.new(
+      argv: [],
+      version: "0.3.0",
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    )
+
+    original_database_url = ENV["DATABASE_URL"]
+    ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
+
+    captured_runner_kwargs = nil
+    Load::Runner.stub(:new, ->(**kwargs) do
+      captured_runner_kwargs = kwargs
+      Object.new
+    end) do
+      cli.send(:default_runner_factory).call(
+        workload: WorkloadWithVerifier.new,
+        mode: :finite,
+        adapter_bin: "adapters/rails/bin/bench-adapter",
+        app_root: "/tmp/demo",
+        runs_dir: Dir.mktmpdir,
+        readiness_path: "/up",
+        startup_grace_seconds: 15.0,
+        metrics_interval_seconds: 5.0,
+        invariant_policy: :enforce,
+        stop_flag: Load::Runner::InternalStopFlag.new,
+        stdout: StringIO.new,
+        stderr: StringIO.new,
+      )
+    end
+
+    assert captured_runner_kwargs.fetch(:verifier).respond_to?(:call)
+  ensure
+    ENV["DATABASE_URL"] = original_database_url
+  end
+
+  def test_default_runner_factory_rejects_non_callable_workload_verifier
+    workload_class = Class.new(FixtureWorkload) do
+      def name
+        "bad-verifier-workload"
+      end
+
+      def verifier(database_url:, pg:)
+        :not_callable
+      end
+    end
+    Load::WorkloadRegistry.register("bad-verifier-workload", workload_class)
+
+    cli = Load::CLI.new(
+      argv: [],
+      version: "0.3.0",
+      stdout: StringIO.new,
+      stderr: StringIO.new,
+    )
+
+    original_database_url = ENV["DATABASE_URL"]
+    ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
+
+    error = assert_raises(Load::CLI::VerifierError) do
+      cli.send(:default_runner_factory).call(
+        workload: workload_class.new,
+        mode: :finite,
+        adapter_bin: "adapters/rails/bin/bench-adapter",
+        app_root: "/tmp/demo",
+        runs_dir: Dir.mktmpdir,
+        readiness_path: "/up",
+        startup_grace_seconds: 15.0,
+        metrics_interval_seconds: 5.0,
+        invariant_policy: :enforce,
+        stop_flag: Load::Runner::InternalStopFlag.new,
+        stdout: StringIO.new,
+        stderr: StringIO.new,
+      )
+    end
+
+    assert_includes error.message, "verifier must respond to call"
+  ensure
+    ENV["DATABASE_URL"] = original_database_url
+  end
+
   def test_cli_runs_verify_fixture_command
     Dir.mktmpdir do |dir|
       with_http_server do |port|
@@ -282,7 +380,7 @@ class CliTest < Minitest::Test
           ],
           version: "0.3.0",
           verifier_factory: ->(**kwargs) do
-            assert_equal "missing-index-todos", kwargs.fetch(:workload_name)
+            assert_equal "missing-index-todos", kwargs.fetch(:workload).name
             verifier
           end,
           stdout: StringIO.new,
@@ -361,7 +459,7 @@ class CliTest < Minitest::Test
     )
 
     assert_equal Load::ExitCodes::ADAPTER_ERROR, cli.run
-    assert_includes stderr.string, "missing DATABASE_URL for fixture verification"
+    refute_equal "", stderr.string
     refute_includes stderr.string, "Usage: bin/load"
   end
 

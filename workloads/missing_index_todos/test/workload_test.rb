@@ -29,6 +29,13 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     assert_instance_of Load::Workloads::MissingIndexTodos::InvariantSampler, sampler
   end
 
+  def test_workload_builds_a_missing_index_fixture_verifier
+    workload = Load::Workloads::MissingIndexTodos::Workload.new
+    verifier = workload.verifier(database_url: "postgres://example.test/checkpoint", pg: Object.new)
+
+    assert_instance_of Load::FixtureVerifier, verifier
+  end
+
   def test_workload_sampler_applies_rows_per_table_thresholds_to_sample_output
     workload = Load::Workloads::MissingIndexTodos::Workload.new
     pg = FakePg.new(open_count: 100, total_count: 1_000_000)

@@ -12,6 +12,7 @@ module Load
     DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS = 60.0
     Runtime = Data.define(:clock, :sleeper, :http, :stop_flag)
     Settings = Data.define(:readiness_path, :startup_grace_seconds, :metrics_interval_seconds, :workload_file, :app_root, :adapter_bin)
+    InvariantState = Struct.new(:policy, :sampler, :interval_seconds, :consecutive_breaches, :thread_sleeping, :failure, keyword_init: true)
 
     MetricsSink = Data.define(:run_record) do
       def <<(line)
@@ -100,23 +101,26 @@ module Load
       @verifier = verifier
       @mode = mode
       @stderr = stderr
-      @invariant_policy = invariant_policy
-      @invariant_sampler = if @invariant_policy == :off
+      sampler = if invariant_policy == :off
         invariant_sampler
       else
         invariant_sampler || @workload.invariant_sampler(database_url:, pg:)
       end
-      if @mode == :continuous && @invariant_policy != :off && @invariant_sampler.nil?
+      if @mode == :continuous && invariant_policy != :off && sampler.nil?
         raise AdapterClient::AdapterError, "continuous mode requires the workload to provide an invariant sampler"
       end
-      @invariant_sample_interval_seconds = invariant_sample_interval_seconds
+      @invariants = InvariantState.new(
+        policy: invariant_policy,
+        sampler: sampler,
+        interval_seconds: invariant_sample_interval_seconds,
+        consecutive_breaches: 0,
+        thread_sleeping: false,
+        failure: nil,
+      )
       @state_mutex = Mutex.new
       @tracking_buffers = []
       @state = initial_state
       @window_started = false
-      @consecutive_invariant_breaches = 0
-      @invariant_thread_sleeping = false
-      @invariant_failure = nil
     end
 
     def run
@@ -190,9 +194,6 @@ module Load
       rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @runtime.clock, sleeper: @runtime.sleeper)
       entries = @workload.actions
       seed = plan.seed.nil? ? @workload.scale.seed : plan.seed
-      threads = []
-      invariant_thread = nil
-
       workers = Array.new(plan.workers) do |index|
         Load::Worker.new(
           worker_id: index + 1,
@@ -261,8 +262,8 @@ module Load
 
     def start_invariant_thread
       return unless @mode == :continuous
-      return if @invariant_policy == :off
-      return unless @invariant_sampler
+      return if @invariants.policy == :off
+      return unless @invariants.sampler
 
       Thread.new do
         begin
@@ -272,7 +273,7 @@ module Load
             begin
               Thread.handle_interrupt(InvariantSamplerShutdown => :immediate) do
                 mark_invariant_thread_sleeping(true)
-                @runtime.sleeper.call(@invariant_sample_interval_seconds)
+                @runtime.sleeper.call(@invariants.interval_seconds)
               end
             rescue StopIteration, InvariantSamplerShutdown
               break
@@ -300,20 +301,20 @@ module Load
     #                 -> off     -> unreachable (thread never started)
     #      -> !breach  -> counter = 0 (enforce only; harmless elsewhere)
     def sample_invariants
-      sample = @invariant_sampler.call
+      sample = @invariants.sampler.call
       append_invariant_sample(sample)
       return reset_invariant_breaches unless sample.breach?
 
       append_warning(sample.to_warning)
-      emit_invariant_warning(sample) if @invariant_policy == :warn
-      return if @invariant_policy == :warn
+      emit_invariant_warning(sample) if @invariants.policy == :warn
+      return if @invariants.policy == :warn
 
-      @consecutive_invariant_breaches += 1
-      trigger_stop(:invariant_breach) if @consecutive_invariant_breaches >= 3
+      @invariants.consecutive_breaches += 1
+      trigger_stop(:invariant_breach) if @invariants.consecutive_breaches >= 3
     end
 
     def reset_invariant_breaches
-      @consecutive_invariant_breaches = 0 if @invariant_policy == :enforce
+      @invariants.consecutive_breaches = 0 if @invariants.policy == :enforce
     end
 
     def emit_invariant_warning(sample)
@@ -472,26 +473,26 @@ module Load
 
     def mark_invariant_thread_sleeping(value)
       @state_mutex.synchronize do
-        @invariant_thread_sleeping = value
+        @invariants.thread_sleeping = value
       end
     end
 
     def invariant_thread_sleeping?
       @state_mutex.synchronize do
-        @invariant_thread_sleeping
+        @invariants.thread_sleeping
       end
     end
 
     def record_invariant_failure(error)
       @state_mutex.synchronize do
-        @invariant_failure ||= error
+        @invariants.failure ||= error
       end
     end
 
     def raise_invariant_failure_if_present
       failure = @state_mutex.synchronize do
-        error = @invariant_failure
-        @invariant_failure = nil
+        error = @invariants.failure
+        @invariants.failure = nil
         error
       end
       return unless failure

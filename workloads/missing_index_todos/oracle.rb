@@ -16,10 +16,6 @@ module Load
         INDEX_SCAN_NODE_TYPES = ["Index Scan", "Index Only Scan", "Bitmap Index Scan"].freeze
         CLICKHOUSE_TOPN_LIMIT = 10
         EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'"
-        QUERY_TEXT_CANDIDATES = [
-          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $2 OFFSET $3),
-          %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = 'open' ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT 50 OFFSET 0),
-        ].freeze
 
         class Failure < StandardError
         end
@@ -49,7 +45,7 @@ module Load
 
         def call(run_dir:, database_url:, clickhouse_url:, timeout_seconds: 30)
           run_record = load_run_record(run_dir)
-          queryids = extract_queryids(run_record, database_url)
+          queryids = extract_queryids(run_record)
           plan = explain_todos_scan(database_url)
           clickhouse = wait_for_clickhouse!(
             window: run_record.fetch("window"),
@@ -101,25 +97,11 @@ module Load
           raise Failure, "FAIL: missing run record at #{path}"
         end
 
-        def extract_queryids(run_record, database_url)
-          candidates = [
-            run_record["query_ids"],
-            run_record["queryids"],
-            run_record.dig("oracle", "query_ids"),
-            run_record.dig("oracle", "queryids"),
-            run_record.dig("workload", "query_ids"),
-            run_record.dig("workload", "queryids"),
-            run_record.dig("workload", "oracle", "query_ids"),
-            run_record.dig("workload", "oracle", "queryids"),
-          ].compact
-
-          queryids = Array(candidates.first).map(&:to_s).reject(&:empty?).uniq
+        def extract_queryids(run_record)
+          queryids = Array(run_record["query_ids"]).map(&:to_s).reject(&:empty?).uniq
           return queryids unless queryids.empty?
 
-          queryids = lookup_queryids(database_url)
-          raise Failure, "FAIL: run record is missing query_ids and pg_stat_statements had no matching queryids" if queryids.empty?
-
-          queryids
+          raise Failure, "FAIL: run record is missing query_ids"
         end
 
         def explain_todos_scan(database_url)
@@ -137,20 +119,6 @@ module Load
           return seq_scan if seq_scan
 
           raise Failure, "FAIL: explain (expected Seq Scan, got #{todos_nodes.first.fetch("Node Type")})"
-        ensure
-          connection&.close
-        end
-
-        def lookup_queryids(database_url)
-          connection = @pg.connect(database_url)
-          queryids = QUERY_TEXT_CANDIDATES.flat_map do |query_text|
-            connection.exec_params(
-              "SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = $1",
-              [query_text],
-            ).map { |row| row.fetch("queryid") }
-          end
-
-          queryids.uniq
         ensure
           connection&.close
         end
@@ -210,7 +178,7 @@ module Load
 
         def query_clickhouse(window:, queryids:, clickhouse_url:)
           uri = URI.parse(clickhouse_url)
-          uri.path = "/" if uri.path.nil? || uri.path.empty?
+          uri.path = "/" if uri.path.to_s.empty?
           uri.query = URI.encode_www_form(query: "#{build_clickhouse_sql(window:, queryids:)} FORMAT JSONEachRow")
           response = Net::HTTP.get_response(uri)
           raise Failure, "FAIL: clickhouse (query failed: #{response.code} #{response.body})" if response.code.to_i >= 400
@@ -221,7 +189,7 @@ module Load
 
         def query_clickhouse_topn(window:, clickhouse_url:)
           uri = URI.parse(clickhouse_url)
-          uri.path = "/" if uri.path.nil? || uri.path.empty?
+          uri.path = "/" if uri.path.to_s.empty?
           uri.query = URI.encode_www_form(query: "#{build_clickhouse_topn_sql(window:)} FORMAT JSONEachRow")
           response = Net::HTTP.get_response(uri)
           raise Failure, "FAIL: clickhouse (query failed: #{response.code} #{response.body})" if response.code.to_i >= 400

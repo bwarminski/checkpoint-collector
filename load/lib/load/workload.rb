@@ -21,5 +21,9 @@ module Load
     def invariant_sampler(database_url:, pg:)
       nil
     end
+
+    def verifier(database_url:, pg:)
+      nil
+    end
   end
 end

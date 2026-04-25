@@ -441,6 +441,13 @@ class RunnerTest < Minitest::Test
   def test_runner_waits_one_interval_before_first_invariant_sample_and_interrupts_shutdown
     run_record = FakeRunRecord.new
     stop_flag = Load::Runner::InternalStopFlag.new
+    seed_recorded = Queue.new
+    SeedRecordingAction.reset!
+    SeedRecordingAction.stop_flag = Object.new.tap do |signal|
+      signal.define_singleton_method(:trigger) do |reason|
+        seed_recorded << reason
+      end
+    end
     clock = AdvancingClock.new(Time.utc(2026, 4, 25, 0, 0, 0))
     sleeper = BlockingInvariantSleeper.new(clock:, blocked_interval: 60.0)
     sampler = RecordingInvariantSampler.new(clock:)
@@ -463,6 +470,7 @@ class RunnerTest < Minitest::Test
     thread = Thread.new { runner.run }
     sleeper.wait_until_interval_sleep
     assert_equal [], sampler.call_times
+    assert_equal :seed_recorded, Timeout.timeout(2.0) { seed_recorded.pop }
 
     stop_flag.trigger(:sigterm)
 
@@ -470,6 +478,7 @@ class RunnerTest < Minitest::Test
     assert_equal true, run_record.outcome.fetch(:aborted)
     assert_equal [60.0], sleeper.interval_calls
   ensure
+    SeedRecordingAction.reset!
     thread&.kill
     thread&.join
   end
