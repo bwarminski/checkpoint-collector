@@ -20,6 +20,36 @@ class FixtureVerifierTest < Minitest::Test
     end
   end
 
+  class FakePgConnection
+    attr_reader :executed_sqls
+
+    def initialize(result)
+      @result = result
+      @executed_sqls = []
+    end
+
+    def exec(sql)
+      @executed_sqls << sql
+      @result
+    end
+
+    def close
+    end
+  end
+
+  class FakePg
+    def initialize(connection)
+      @connection = connection
+    end
+
+    def connect(database_url)
+      @database_url = database_url
+      @connection
+    end
+
+    attr_reader :database_url
+  end
+
   def test_verifier_checks_missing_index_counts_and_search
     client = FakeClient.new(
       "/api/todos/counts" => FakeResponse.new("200", JSON.generate(counts_body_for_users(10))),
@@ -52,6 +82,31 @@ class FixtureVerifierTest < Minitest::Test
     assert_equal 2, explain_sqls.length
     assert_includes explain_sqls.first, "status = 'open'"
     assert_includes explain_sqls.last, "title LIKE '%foo%'"
+  end
+
+  def test_verifier_uses_default_counts_calls_reader
+    connection = FakePgConnection.new([{ "calls" => "7" }])
+    pg = FakePg.new(connection)
+    verifier = Load::FixtureVerifier.new(
+      workload_name: "missing-index-todos",
+      client_factory: ->(base_url) do
+        assert_equal "http://app.test", base_url
+        counts_client(counts_body: counts_body_for_users(7))
+      end,
+      explain_reader: lambda do |sql|
+        sql.include?("status = 'open'") ? missing_index_plan : search_reference_plan
+      end,
+      stats_reset: -> {},
+      search_reference_reader: -> { search_reference_plan },
+      database_url: "postgres://db.test",
+      pg: pg,
+    )
+
+    result = verifier.call(base_url: "http://app.test")
+
+    assert_equal [Load::FixtureVerifier::COUNTS_CALLS_SQL], connection.executed_sqls
+    assert_equal "postgres://db.test", pg.database_url
+    assert_equal 7, result.fetch(:checks).fetch(1).fetch(:calls)
   end
 
   def test_verifier_fails_when_missing_index_plan_loses_seq_scan
