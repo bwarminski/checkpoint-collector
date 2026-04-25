@@ -109,6 +109,109 @@ class RunnerTest < Minitest::Test
     end
   end
 
+  def test_soak_mode_runs_until_stop_flag
+    stop_flag = Load::Runner::InternalStopFlag.new
+    workers_ready = Queue.new
+    BarrierAction.reset!
+    BarrierAction.ready_queue = workers_ready
+
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: File.join(dir, "run"))
+      runner = build_continuous_runner(run_record:, stop_flag:)
+      thread = Thread.new { runner.run }
+
+      workers_ready.pop
+      stop_flag.trigger(:sigterm)
+
+      assert_equal Load::ExitCodes::SUCCESS, Timeout.timeout(2.0) { thread.value }
+      assert_equal true, run_record.read_run_json.dig("outcome", "aborted")
+    end
+  ensure
+    BarrierAction.reset!
+  end
+
+  def test_runner_aborts_after_three_consecutive_invariant_breaches
+    workers_ready = Queue.new
+    BarrierAction.reset!
+    BarrierAction.ready_queue = workers_ready
+    sampler = FakeInvariantSampler.new(
+      [
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      ],
+      first_sample_barrier: workers_ready,
+    )
+
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: File.join(dir, "run"))
+      runner = build_continuous_runner(run_record:, invariant_sampler: sampler)
+
+      assert_equal Load::ExitCodes::ADAPTER_ERROR, Timeout.timeout(2.0) { runner.run }
+
+      payload = run_record.read_run_json
+      warnings = payload.fetch("warnings")
+      assert_equal 3, warnings.length
+      assert_includes warnings.last.fetch("message"), "open_count"
+      assert_equal "invariant_breach", payload.dig("outcome", "error_code")
+    end
+  ensure
+    BarrierAction.reset!
+  end
+
+  def test_runner_does_not_abort_when_breach_recovers
+    stop_flag = Load::Runner::InternalStopFlag.new
+    workers_ready = Queue.new
+    BarrierAction.reset!
+    BarrierAction.ready_queue = workers_ready
+    sampler = FakeInvariantSampler.new(
+      [
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 100, total_count: 10_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+        Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000),
+      ],
+      first_sample_barrier: workers_ready,
+    )
+
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: File.join(dir, "run"))
+      runner = build_continuous_runner(run_record:, stop_flag:, invariant_sampler: sampler)
+      thread = Thread.new { runner.run }
+
+      sampler.wait_until_drained
+      stop_flag.trigger(:sigterm)
+
+      assert_equal Load::ExitCodes::SUCCESS, Timeout.timeout(2.0) { thread.value }
+      assert_equal 3, run_record.read_run_json.fetch("warnings").length
+      assert_nil run_record.read_run_json.dig("outcome", "error_code")
+    end
+  ensure
+    BarrierAction.reset!
+  end
+
+  def test_invariant_sampler_uses_isolated_pg_connection
+    pg = FakePg.new(
+      open_count: 35_000,
+      total_count: 100_000,
+    )
+    sampler = Load::Runner::InvariantSampler.new(
+      pg:,
+      database_url: "postgres://localhost/checkpoint_collector",
+      open_floor: 30_000,
+      total_floor: 80_000,
+      total_ceiling: 200_000,
+    )
+
+    sample = sampler.call
+
+    refute pg.shared_connection_used?, "sampler must not reuse the workload connection"
+    assert_equal true, pg.connection.closed?
+    assert_includes pg.connection.session_sql, "SET LOCAL pg_stat_statements.track = 'none'"
+    assert_equal true, sample.healthy?
+  end
+
   def test_runner_always_stops_adapter_and_writes_outcome
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new
@@ -634,6 +737,24 @@ class RunnerTest < Minitest::Test
     -> { Time.now.utc }
   end
 
+  def build_continuous_runner(run_record:, stop_flag: Load::Runner::InternalStopFlag.new, invariant_sampler: nil)
+    Load::Runner.new(
+      workload: BarrierWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record:,
+      clock: fake_clock,
+      sleeper: ->(*) { Thread.pass },
+      http: FakeHttp.new,
+      readiness_path: nil,
+      startup_grace_seconds: 0.0,
+      stop_flag:,
+      mode: :continuous,
+      invariant_sampler:,
+      invariant_sample_interval_seconds: 0.001,
+      database_url: nil,
+    )
+  end
+
   def build_runner_with_delayed_first_success(delay_ms:, run_record:)
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
     Load::Runner.new(
@@ -670,6 +791,10 @@ class RunnerTest < Minitest::Test
 
     def append_metrics(payload)
       @metrics_lines << payload
+    end
+
+    def read_run_json
+      JSON.parse(JSON.generate(@payload))
     end
   end
 
@@ -913,6 +1038,57 @@ class RunnerTest < Minitest::Test
     end
   end
 
+  class BarrierWorkload < Load::Workload
+    def name
+      "barrier-workload"
+    end
+
+    def scale
+      Load::Scale.new(rows_per_table: 100_000, open_fraction: 0.6, seed: 42)
+    end
+
+    def actions
+      [Load::ActionEntry.new(BarrierAction, 1)]
+    end
+
+    def load_plan
+      Load::LoadPlan.new(workers: 1, duration_seconds: 1.0, rate_limit: :unlimited, seed: 42)
+    end
+  end
+
+  BarrierAction = Class.new(Load::Action) do
+    BarrierResponse = Struct.new(:code)
+
+    @ready_queue = nil
+    @signaled = false
+
+    class << self
+      attr_accessor :ready_queue
+
+      def reset!
+        @ready_queue = nil
+        @signaled = false
+      end
+
+      def signal_once
+        return unless @ready_queue
+        return if @signaled
+
+        @signaled = true
+        @ready_queue << :ready
+      end
+    end
+
+    def name
+      :barrier_action
+    end
+
+    def call
+      self.class.signal_once
+      BarrierResponse.new("200")
+    end
+  end
+
   class DelayedWorkload < Load::Workload
     def initialize(delay_ms:)
       @delay_ms = delay_ms
@@ -1087,6 +1263,89 @@ class RunnerTest < Minitest::Test
 
     def load_plan
       Load::LoadPlan.new(workers: 1, duration_seconds: 0.01, rate_limit: :unlimited, seed: 42)
+    end
+  end
+
+  class FakeInvariantSampler
+    def initialize(samples, first_sample_barrier: nil)
+      @samples = samples.dup
+      @first_sample_barrier = first_sample_barrier
+      @first_sample = true
+      @drained = Queue.new
+      @mutex = Mutex.new
+    end
+
+    def call
+      barrier = nil
+      sample = nil
+
+      @mutex.synchronize do
+        barrier = @first_sample_barrier if @first_sample
+        @first_sample = false
+        sample = @samples.shift || Load::Runner::InvariantSample.new(open_count: 35_000, total_count: 100_000, open_floor: 30_000, total_floor: 80_000, total_ceiling: 200_000)
+        @drained << true if @samples.empty?
+      end
+
+      barrier&.pop
+      sample
+    end
+
+    def wait_until_drained
+      @drained.pop
+    end
+  end
+
+  class FakePg
+    attr_reader :connection
+
+    def initialize(open_count:, total_count:)
+      @open_count = open_count
+      @total_count = total_count
+      @shared_connection_used = false
+      @connection = nil
+    end
+
+    def connect(database_url)
+      @connection = FakePgConnection.new(database_url:, open_count: @open_count, total_count: @total_count)
+    end
+
+    def shared_connection
+      @shared_connection_used = true
+    end
+
+    def shared_connection_used?
+      @shared_connection_used
+    end
+  end
+
+  class FakePgConnection
+    attr_reader :session_sql
+
+    def initialize(database_url:, open_count:, total_count:)
+      @database_url = database_url
+      @open_count = open_count
+      @total_count = total_count
+      @session_sql = []
+      @closed = false
+    end
+
+    def exec(sql)
+      @session_sql << sql
+      if sql.include?("COUNT(*)") && sql.include?("FROM todos")
+        [{ "count" => @open_count.to_s }]
+      elsif sql.include?("FROM pg_class")
+        [{ "count" => @total_count.to_s }]
+      else
+        []
+      end
+    end
+
+    def close
+      @closed = true
+    end
+
+    def closed?
+      @closed
     end
   end
 end

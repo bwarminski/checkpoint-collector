@@ -1,12 +1,15 @@
 # ABOUTME: Orchestrates adapter lifecycle, readiness probing, and worker execution.
 # ABOUTME: Writes run state as workers report the first successful response.
 require "net/http"
+require "pg"
 require "thread"
 require "time"
 
 module Load
   class Runner
     WORKER_DRAIN_TIMEOUT_SECONDS = 1.0
+    CONTINUOUS_POLL_SECONDS = 0.1
+    DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS = 60.0
     Runtime = Data.define(:clock, :sleeper, :http, :stop_flag)
     Settings = Data.define(:readiness_path, :startup_grace_seconds, :metrics_interval_seconds, :workload_file, :app_root, :adapter_bin)
 
@@ -46,7 +49,79 @@ module Load
       end
     end
 
-    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil, verifier: nil, mode: :finite)
+    InvariantSample = Data.define(:open_count, :total_count, :open_floor, :total_floor, :total_ceiling) do
+      def breaches
+        [].tap do |messages|
+          messages << "open_count #{open_count} is below open_floor #{open_floor}" if open_count < open_floor
+          messages << "total_count #{total_count} is below total_floor #{total_floor}" if total_count < total_floor
+          messages << "total_count #{total_count} is above total_ceiling #{total_ceiling}" if total_count > total_ceiling
+        end
+      end
+
+      def breach?
+        !breaches.empty?
+      end
+
+      def healthy?
+        !breach?
+      end
+
+      def to_warning
+        {
+          type: "invariant_breach",
+          message: breaches.join("; "),
+          open_count:,
+          total_count:,
+          open_floor:,
+          total_floor:,
+          total_ceiling:,
+        }
+      end
+    end
+
+    class InvariantSampler
+      OPEN_COUNT_SQL = "SELECT COUNT(*) AS count FROM todos WHERE status = 'open'".freeze
+      TOTAL_COUNT_SQL = "SELECT reltuples::bigint AS count FROM pg_class WHERE relname = 'todos'".freeze
+
+      def initialize(pg:, database_url:, open_floor:, total_floor:, total_ceiling:)
+        @pg = pg
+        @database_url = database_url
+        @open_floor = open_floor
+        @total_floor = total_floor
+        @total_ceiling = total_ceiling
+      end
+
+      def call
+        with_connection do |connection|
+          connection.exec("BEGIN")
+          connection.exec("SET LOCAL pg_stat_statements.track = 'none'")
+          open_count = connection.exec(OPEN_COUNT_SQL).first.fetch("count").to_i
+          total_count = connection.exec(TOTAL_COUNT_SQL).first.fetch("count").to_i
+          connection.exec("COMMIT")
+          InvariantSample.new(
+            open_count:,
+            total_count:,
+            open_floor: @open_floor,
+            total_floor: @total_floor,
+            total_ceiling: @total_ceiling,
+          )
+        rescue StandardError
+          connection.exec("ROLLBACK") rescue nil
+          raise
+        end
+      end
+
+      private
+
+      def with_connection
+        connection = @pg.connect(@database_url)
+        yield connection
+      ensure
+        connection&.close
+      end
+    end
+
+    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil, verifier: nil, mode: :finite, invariant_sampler: nil, invariant_sample_interval_seconds: DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS, database_url: ENV["DATABASE_URL"], pg: PG)
       @workload = workload
       @adapter_client = adapter_client
       @run_record = run_record
@@ -54,10 +129,13 @@ module Load
       @settings = Settings.new(readiness_path, startup_grace_seconds, metrics_interval_seconds, workload_file, app_root, adapter_bin)
       @verifier = verifier
       @mode = mode
+      @invariant_sampler = invariant_sampler || default_invariant_sampler(database_url:, pg:)
+      @invariant_sample_interval_seconds = invariant_sample_interval_seconds
       @state_mutex = Mutex.new
       @tracking_buffers = []
       @state = initial_state
       @window_started = false
+      @consecutive_invariant_breaches = 0
     end
 
     def run
@@ -128,6 +206,8 @@ module Load
       rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @runtime.clock, sleeper: @runtime.sleeper)
       entries = @workload.actions
       seed = plan.seed.nil? ? @workload.scale.seed : plan.seed
+      threads = []
+      invariant_thread = nil
 
       workers = Array.new(plan.workers) do |index|
         Load::Worker.new(
@@ -151,9 +231,20 @@ module Load
       )
       reporter.start
       threads = workers.map { |worker| Thread.new { worker.run } }
-      wait_for_window_end(plan.duration_seconds)
+      invariant_thread = start_invariant_thread
+      execute_window(plan.duration_seconds)
+    ensure
+      invariant_thread&.join
       drain_workers(threads)
       reporter.stop
+    end
+
+    def execute_window(duration_seconds)
+      if @mode == :continuous
+        wait_for_stop_signal
+      else
+        wait_for_window_end(duration_seconds)
+      end
     end
 
     def wait_for_window_end(duration_seconds)
@@ -176,6 +267,44 @@ module Load
       end
     end
 
+    def wait_for_stop_signal
+      until @runtime.stop_flag.call
+        Thread.pass
+        @runtime.sleeper.call(CONTINUOUS_POLL_SECONDS)
+      end
+    end
+
+    def start_invariant_thread
+      return unless @mode == :continuous
+      return unless @invariant_sampler
+
+      Thread.new do
+        until @runtime.stop_flag.call
+          sample_invariants
+          break if @runtime.stop_flag.call
+
+          @runtime.sleeper.call(@invariant_sample_interval_seconds)
+        end
+      end
+    end
+
+    def sample_invariants
+      sample = @invariant_sampler.call
+      if sample.breach?
+        append_warning(sample.to_warning)
+        @consecutive_invariant_breaches += 1
+        trigger_stop(:invariant_breach) if @consecutive_invariant_breaches >= 3
+      else
+        @consecutive_invariant_breaches = 0
+      end
+    end
+
+    def trigger_stop(reason)
+      return unless @runtime.stop_flag.respond_to?(:trigger)
+
+      @runtime.stop_flag.trigger(reason)
+    end
+
     def drain_workers(threads)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + WORKER_DRAIN_TIMEOUT_SECONDS
 
@@ -192,18 +321,36 @@ module Load
     def finish_run
       write_state(window: { end_ts: current_time })
       if @window_started
-        write_state(outcome: outcome_payload(aborted: stop_aborted?))
-        return Load::ExitCodes::SUCCESS
+        write_state(outcome: final_outcome)
+        return final_exit_code
       end
 
       write_state(outcome: outcome_payload(aborted: true, error_code: "no_successful_requests"))
       Load::ExitCodes::NO_SUCCESSFUL_REQUESTS
     end
 
-    def stop_aborted?
-      return false unless @runtime.stop_flag.respond_to?(:reason)
+    def final_outcome
+      if stop_reason == :invariant_breach
+        outcome_payload(aborted: true, error_code: "invariant_breach")
+      else
+        outcome_payload(aborted: stop_aborted?)
+      end
+    end
 
-      %i[sigint sigterm].include?(@runtime.stop_flag.reason)
+    def final_exit_code
+      return Load::ExitCodes::ADAPTER_ERROR if stop_reason == :invariant_breach
+
+      Load::ExitCodes::SUCCESS
+    end
+
+    def stop_aborted?
+      %i[sigint sigterm].include?(stop_reason)
+    end
+
+    def stop_reason
+      return nil unless @runtime.stop_flag.respond_to?(:reason)
+
+      @runtime.stop_flag.reason
     end
 
     def tracking_buffer
@@ -211,15 +358,13 @@ module Load
     end
 
     def pin_window_start
-      snapshot = nil
       @state_mutex.synchronize do
         return if @window_started
 
         @window_started = true
         @state = deep_merge(@state, window: { start_ts: current_time })
-        snapshot = snapshot_state
+        @run_record.write_run(snapshot_state)
       end
-      @run_record.write_run(snapshot)
     end
 
     def current_time
@@ -259,6 +404,7 @@ module Load
         },
         outcome: outcome_payload(aborted: false),
         query_ids: [],
+        warnings: [],
       }
     end
 
@@ -304,12 +450,19 @@ module Load
     end
 
     def write_state(fragment)
-      snapshot = nil
       @state_mutex.synchronize do
         @state = deep_merge(@state, fragment)
-        snapshot = snapshot_state
+        @run_record.write_run(snapshot_state)
       end
-      @run_record.write_run(snapshot)
+    end
+
+    def append_warning(payload)
+      @state_mutex.synchronize do
+        warnings = @state.fetch(:warnings).dup
+        warnings << deep_copy(payload)
+        @state = deep_merge(@state, warnings:)
+        @run_record.write_run(snapshot_state)
+      end
     end
 
     def register_tracking_buffer(buffer)
@@ -351,6 +504,20 @@ module Load
       else
         value
       end
+    end
+
+    def default_invariant_sampler(database_url:, pg:)
+      return nil unless @mode == :continuous
+      return nil if database_url.nil? || database_url.empty?
+
+      rows_per_table = @workload.scale.rows_per_table
+      InvariantSampler.new(
+        pg:,
+        database_url:,
+        open_floor: (rows_per_table * 0.3).to_i,
+        total_floor: (rows_per_table * 0.8).to_i,
+        total_ceiling: (rows_per_table * 2.0).to_i,
+      )
     end
 
     class InternalStopFlag

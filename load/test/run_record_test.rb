@@ -34,6 +34,27 @@ class RunRecordTest < Minitest::Test
     end
   end
 
+  def test_read_run_json_returns_persisted_warnings
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: dir)
+
+      run_record.write_run(
+        run_id: "abc123",
+        warnings: [
+          {
+            type: "invariant_breach",
+            message: "open_count 100 is below open_floor 30000",
+          },
+        ],
+      )
+
+      payload = run_record.read_run_json
+
+      assert_equal "abc123", payload.fetch("run_id")
+      assert_equal "invariant_breach", payload.fetch("warnings").first.fetch("type")
+    end
+  end
+
   def test_write_run_never_exposes_partial_json_to_concurrent_readers
     Dir.mktmpdir do |dir|
       run_record = Load::RunRecord.new(run_dir: dir)
