@@ -41,6 +41,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
         clickhouse_calls << { window:, queryids:, clickhouse_url: }
         { "total_exec_count" => "600", "mean_exec_time_ms" => "42.3" }
       end,
+      clickhouse_topn_query: ->(**) { [{ "queryid" => "111", "total_exec_time_ms_estimate" => "900.0" }] },
       sleeper: ->(*) {},
     )
 
@@ -86,6 +87,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
         observed_queryids = queryids
         { "total_exec_count" => "600", "mean_exec_time_ms" => "42.3" }
       end,
+      clickhouse_topn_query: ->(**) { [{ "queryid" => "111", "total_exec_time_ms_estimate" => "900.0" }] },
       sleeper: ->(*) {},
     )
 
@@ -176,6 +178,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
     oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
       pg: FakePg.new(explain_rows),
       clickhouse_query: ->(**) { snapshots.shift },
+      clickhouse_topn_query: ->(**) { [{ "queryid" => "111", "total_exec_time_ms_estimate" => "900.0" }] },
       sleeper: ->(seconds) { sleeps << seconds },
     )
 
@@ -187,6 +190,60 @@ class MissingIndexTodosOracleTest < Minitest::Test
 
     assert_equal 550, result.fetch(:clickhouse).fetch("total_exec_count")
     assert_equal [1], sleeps
+  end
+
+  def test_oracle_passes_when_primary_query_dominates_by_at_least_three_x
+    oracle = build_dominance_oracle(
+      clickhouse_topn_rows: [
+        { "queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0" },
+        { "queryid" => "other", "total_calls" => "5000", "total_exec_time_ms_estimate" => "250.0" },
+      ],
+    )
+
+    result = oracle.call(
+      run_dir: write_run_record(query_ids: ["primary"]),
+      database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+      clickhouse_url: "http://clickhouse:8123",
+    )
+
+    assert_includes result.fetch(:dominance).fetch("message"), "dominance"
+    assert_match(/3\.6x/, result.fetch(:dominance).fetch("message"))
+  end
+
+  def test_oracle_fails_when_primary_is_below_three_x_dominance_margin
+    oracle = build_dominance_oracle(
+      clickhouse_topn_rows: [
+        { "queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0" },
+        { "queryid" => "other", "total_calls" => "5000", "total_exec_time_ms_estimate" => "400.0" },
+      ],
+    )
+
+    error = assert_raises(Load::Workloads::MissingIndexTodos::Oracle::Failure) do
+      oracle.call(
+        run_dir: write_run_record(query_ids: ["primary"]),
+        database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+        clickhouse_url: "http://clickhouse:8123",
+      )
+    end
+
+    assert_includes error.message, "3x"
+    assert_match(/2\.25x/, error.message)
+  end
+
+  def test_oracle_passes_dominance_when_there_is_no_challenger
+    oracle = build_dominance_oracle(
+      clickhouse_topn_rows: [
+        { "queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0" },
+      ],
+    )
+
+    result = oracle.call(
+      run_dir: write_run_record(query_ids: ["primary"]),
+      database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+      clickhouse_url: "http://clickhouse:8123",
+    )
+
+    assert_includes result.fetch(:dominance).fetch("message"), "no challenger"
   end
 
   def test_run_exits_one_and_prints_clear_message_on_clickhouse_timeout
@@ -231,6 +288,35 @@ class MissingIndexTodosOracleTest < Minitest::Test
   end
 
   private
+
+  def build_dominance_oracle(clickhouse_topn_rows:)
+    explain_rows = [
+      {
+        "QUERY PLAN" => JSON.generate(
+          [
+            {
+              "Plan" => {
+                "Node Type" => "Seq Scan",
+                "Relation Name" => "todos",
+              },
+            },
+          ]
+        ),
+      },
+    ]
+
+    Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg: FakePg.new(explain_rows),
+      clickhouse_query: ->(**) { { "total_exec_count" => "600", "mean_exec_time_ms" => "42.3" } },
+      clickhouse_topn_query: lambda do |window:, clickhouse_url:|
+        assert_equal "2026-04-21T00:00:00Z", window.fetch("start_ts")
+        assert_equal "2026-04-21T00:05:00Z", window.fetch("end_ts")
+        assert_equal "http://clickhouse:8123", clickhouse_url
+        clickhouse_topn_rows
+      end,
+      sleeper: ->(*) {},
+    )
+  end
 
   def write_run_record(query_ids: nil)
     dir = Dir.mktmpdir

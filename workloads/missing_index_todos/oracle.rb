@@ -12,7 +12,9 @@ module Load
     module MissingIndexTodos
       class Oracle
         CLICKHOUSE_CALL_THRESHOLD = 500
+        DOMINANCE_RATIO_THRESHOLD = 3.0
         INDEX_SCAN_NODE_TYPES = ["Index Scan", "Index Only Scan", "Bitmap Index Scan"].freeze
+        CLICKHOUSE_TOPN_LIMIT = 10
         EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'"
         QUERY_TEXT_CANDIDATES = [
           %(SELECT "todos".* FROM "todos" WHERE "todos"."status" = $1),
@@ -22,11 +24,12 @@ module Load
         class Failure < StandardError
         end
 
-        def initialize(stdout: $stdout, stderr: $stderr, pg: PG, clickhouse_query: nil, clock: -> { Time.now.utc }, sleeper: ->(seconds) { sleep(seconds) })
+        def initialize(stdout: $stdout, stderr: $stderr, pg: PG, clickhouse_query: nil, clickhouse_topn_query: nil, clock: -> { Time.now.utc }, sleeper: ->(seconds) { sleep(seconds) })
           @stdout = stdout
           @stderr = stderr
           @pg = pg
           @clickhouse_query = clickhouse_query || method(:query_clickhouse)
+          @clickhouse_topn_query = clickhouse_topn_query || method(:query_clickhouse_topn)
           @clock = clock
           @sleeper = sleeper
         end
@@ -37,6 +40,7 @@ module Load
 
           @stdout.puts("PASS: explain (#{result.fetch(:plan).fetch("Node Type")} on todos, plan node confirmed)")
           @stdout.puts("PASS: clickhouse (#{result.fetch(:clickhouse).fetch("total_exec_count")} calls; mean #{result.fetch(:clickhouse).fetch("mean_exec_time_ms")}ms)")
+          @stdout.puts(result.fetch(:dominance).fetch("message"))
           exit 0
         rescue Failure => error
           @stderr.puts(error.message)
@@ -53,10 +57,16 @@ module Load
             clickhouse_url:,
             timeout_seconds:
           )
+          dominance = assert_dominance(
+            window: run_record.fetch("window"),
+            expected_queryids: queryids,
+            clickhouse_url:,
+          )
 
           {
             plan:,
             clickhouse: normalize_clickhouse_snapshot(clickhouse),
+            dominance:,
           }
         end
 
@@ -176,6 +186,28 @@ module Load
           }
         end
 
+        def assert_dominance(window:, expected_queryids:, clickhouse_url:)
+          rows = @clickhouse_topn_query.call(window:, clickhouse_url:)
+          primary = rows.find { |row| expected_queryids.include?(row.fetch("queryid")) }
+          raise Failure, "FAIL: dominance (primary queryid not present in top-N)" if primary.nil?
+
+          challenger = rows.find { |row| !expected_queryids.include?(row.fetch("queryid")) }
+          if challenger.nil?
+            return { "message" => "PASS: dominance (no challenger; primary stands alone)" }
+          end
+
+          primary_time = primary.fetch("total_exec_time_ms_estimate").to_f
+          challenger_time = challenger.fetch("total_exec_time_ms_estimate").to_f
+          ratio = primary_time / challenger_time
+
+          if primary_time >= challenger_time * DOMINANCE_RATIO_THRESHOLD
+            { "message" => "PASS: dominance (#{ratio.round(2)}x over next queryid)" }
+          else
+            raise Failure,
+              "FAIL: dominance (#{primary_time}ms / #{challenger_time}ms = #{ratio.round(2)}x; required: >=3x)"
+          end
+        end
+
         def query_clickhouse(window:, queryids:, clickhouse_url:)
           uri = URI.parse(clickhouse_url)
           uri.path = "/" if uri.path.nil? || uri.path.empty?
@@ -185,6 +217,16 @@ module Load
 
           body = response.body.to_s.each_line.first || "{\"total_exec_count\":\"0\",\"mean_exec_time_ms\":\"0.0\"}"
           JSON.parse(body)
+        end
+
+        def query_clickhouse_topn(window:, clickhouse_url:)
+          uri = URI.parse(clickhouse_url)
+          uri.path = "/" if uri.path.nil? || uri.path.empty?
+          uri.query = URI.encode_www_form(query: "#{build_clickhouse_topn_sql(window:)} FORMAT JSONEachRow")
+          response = Net::HTTP.get_response(uri)
+          raise Failure, "FAIL: clickhouse (query failed: #{response.code} #{response.body})" if response.code.to_i >= 400
+
+          response.body.to_s.each_line.map { |line| JSON.parse(line) }
         end
 
         def build_clickhouse_sql(window:, queryids:)
@@ -197,6 +239,21 @@ module Load
             FROM query_intervals
             WHERE interval_ended_at BETWEEN parseDateTime64BestEffort('#{window.fetch("start_ts")}') AND parseDateTime64BestEffort('#{window.fetch("end_ts")}') + INTERVAL 90 SECOND
               AND queryid IN (#{escaped_queryids})
+          SQL
+        end
+
+        def build_clickhouse_topn_sql(window:)
+          <<~SQL
+            SELECT
+              toString(queryid) AS queryid,
+              toString(sum(total_exec_count)) AS total_calls,
+              toString(round(sum(total_exec_count * avg_exec_time_ms), 1)) AS total_exec_time_ms_estimate
+            FROM query_intervals
+            WHERE interval_ended_at BETWEEN parseDateTime64BestEffort('#{window.fetch("start_ts")}')
+              AND parseDateTime64BestEffort('#{window.fetch("end_ts")}') + INTERVAL 90 SECOND
+            GROUP BY queryid
+            ORDER BY sum(total_exec_count * avg_exec_time_ms) DESC
+            LIMIT #{CLICKHOUSE_TOPN_LIMIT}
           SQL
         end
       end
