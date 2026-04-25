@@ -75,6 +75,186 @@ bin/load run --workload missing-index-todos \
 `docker compose up -d` is already running in this repo and the demo app is
 available for the adapter to prepare, seed, start, and stop during the run.
 
+### Run Modes
+
+`bin/load` has three operator-facing modes. They use the same workload and
+adapter contract, but they answer different questions.
+
+#### `bin/load run`
+
+Use `run` for a finite benchmark window. This is the mode behind
+`make load-smoke`.
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+bin/load run --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+Intent:
+
+- prove the current fixture still reproduces the missing-index path
+- produce one bounded run directory under `runs/`
+- feed the workload-local oracle a stable `run.json` and `query_ids` set
+
+What it writes:
+
+- `run.json`
+- `metrics.jsonl`
+- `adapter-commands.jsonl`
+
+What success looks like:
+
+- the command exits `0`
+- `run.json` has a full window with `start_ts` and `end_ts`
+- the oracle passes against the produced run directory
+
+Sample finite-run artifact:
+
+```json
+{
+  "run_id": "20260425T155137Z-missing-index-todos",
+  "outcome": {
+    "requests_total": 1086,
+    "requests_ok": 1060,
+    "requests_error": 26,
+    "aborted": false
+  },
+  "query_ids": ["-6140164853592117657"],
+  "warnings": [],
+  "invariant_samples": []
+}
+```
+
+Sample oracle output:
+
+```text
+PASS: explain (Seq Scan on todos, plan node confirmed)
+PASS: clickhouse (720 calls; mean 38.1ms)
+PASS: dominance (4.54x over next queryid)
+```
+
+#### `bin/load soak`
+
+Use `soak` for a long-running diagnosis session. It keeps generating traffic
+until you interrupt it or the invariant sampler aborts because the dataset has
+drifted out of the designed regime.
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+bin/load soak --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+Intent:
+
+- keep background traffic flowing for live diagnosis
+- preserve the same mixed query families as `run`
+- record invariant samples so long-running drift is visible in the run record
+
+What it writes:
+
+- `run.json`
+- `metrics.jsonl`
+- `adapter-commands.jsonl`
+- `run.json.invariant_samples`
+
+Healthy soak behavior:
+
+- the command keeps running until you send `SIGINT`/`SIGTERM`
+- `run.json` is updated throughout the run
+- `invariant_samples` stays empty until the first 60s sample lands, then grows
+  one entry per sample
+
+Invariant-breach stop behavior:
+
+- three consecutive breach samples stop the run with non-zero exit
+- `run.json.outcome.error_code` becomes `"invariant_breach"`
+- `warnings` and `invariant_samples` both show the breach trail
+
+Sample degraded-soak artifact:
+
+```json
+{
+  "run_id": "20260425T154248Z-missing-index-todos",
+  "outcome": {
+    "requests_total": 4842,
+    "requests_ok": 4790,
+    "requests_error": 52,
+    "aborted": true,
+    "error_code": "invariant_breach"
+  },
+  "warnings": [
+    {
+      "type": "invariant_breach",
+      "message": "open_count 0 is below open_floor 30000; total_count 0 is below total_floor 80000"
+    }
+  ],
+  "invariant_samples": [
+    {
+      "sampled_at": "2026-04-25 15:44:02 UTC",
+      "open_count": 0,
+      "total_count": 0,
+      "breach": true
+    }
+  ]
+}
+```
+
+#### `bin/load verify-fixture`
+
+Use `verify-fixture` when you want the fast pre-flight pathology check without
+running a benchmark window. This is also the gate that `run` and `soak` execute
+before workers start for `missing-index-todos`.
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+bin/load verify-fixture --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+Intent:
+
+- confirm the app still exposes the three expected pathologies
+- fail early before a benchmark run starts if the fixture has silently rotted
+
+What it does:
+
+- runs adapter `describe`, `prepare`, `reset-state`, `start`, readiness, verify,
+  and `stop`
+- does not create worker traffic
+- does not write a run directory
+
+What success looks like:
+
+- exit `0`
+- no output on success by default
+
+What failure looks like:
+
+- exit `2`
+- stderr explains which fixture contract failed
+
+Representative failure shape:
+
+```text
+fixture verification failed for /api/todos/counts: expected at least 10 count calls for 10 users, saw 2
+```
+
+#### Quick Comparison
+
+| Mode | Runs workers | Writes run dir | Uses oracle later | Uses invariant sampler |
+|---|---|---|---|---|
+| `run` | yes | yes | yes | no |
+| `soak` | yes | yes | usually no, unless you inspect it later | yes |
+| `verify-fixture` | no | no | no | no |
+
 ## Manual Exploration
 
 If `make load-smoke` times out or exits `3`, the fastest way to understand why
