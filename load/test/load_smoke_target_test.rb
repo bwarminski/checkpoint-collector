@@ -17,7 +17,10 @@ class LoadSmokeTargetTest < Minitest::Test
     makefile = File.read(File.expand_path("../../Makefile", __dir__))
 
     assert_includes makefile,
-      ".PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads load-soak-planetscale validate-collector-postgres validate-collector-planetscale"
+      ".PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads test-collector load-soak-planetscale validate-collector-postgres validate-collector-planetscale"
+    assert_includes makefile, "test: test-load test-adapters test-workloads test-collector"
+    assert_includes makefile, "test-collector:"
+    assert_includes makefile, 'Dir["collector/test/*_test.rb"].sort.each'
     assert_includes makefile, "test-adapters-integration: test-adapters-fixture-integration test-adapters-demo-integration"
     assert_includes makefile, "test-adapters-fixture-integration:"
     assert_includes makefile, "test-adapters-demo-integration:"
@@ -77,7 +80,9 @@ class LoadSmokeTargetTest < Minitest::Test
 
     assert_includes readme, "## Before Ship Verification"
     assert_includes readme, "make test"
-    assert_includes readme, "BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir[\"collector/test/*_test.rb\"].sort.each { |path| load path }'"
+    assert_includes readme, "make test-collector"
+    before_ship = readme[/## Before Ship Verification.*?### Docker Compose Collector Modes/m]
+    refute_includes before_ship, 'Dir["collector/test/*_test.rb"].sort.each'
     assert_includes readme, "make test-adapters-integration"
     assert_includes readme, "make validate-collector-postgres"
     assert_includes readme, "make load-smoke"

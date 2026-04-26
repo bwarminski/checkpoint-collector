@@ -1,8 +1,8 @@
 # ABOUTME: Defines local verification and benchmark operator shortcuts.
 # ABOUTME: Keeps destructive load commands explicit about their required environment.
-.PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads load-soak-planetscale validate-collector-postgres validate-collector-planetscale
+.PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads test-collector load-soak-planetscale validate-collector-postgres validate-collector-planetscale
 
-test: test-load test-adapters test-workloads
+test: test-load test-adapters test-workloads test-collector
 
 test-load:
 	BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir["load/test/*_test.rb"].sort.each { |path| load path }'
@@ -20,6 +20,9 @@ test-adapters-integration: test-adapters-fixture-integration test-adapters-demo-
 
 test-workloads:
 	BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir["workloads/missing_index_todos/test/*_test.rb"].sort.each { |path| load path }'
+
+test-collector:
+	BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir["collector/test/*_test.rb"].sort.each { |path| load path }'
 
 load-smoke:
 	DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres bin/load run --workload missing-index-todos --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo

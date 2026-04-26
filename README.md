@@ -17,6 +17,7 @@ make load-smoke
 - `make test-load`
 - `make test-adapters`
 - `make test-workloads`
+- `make test-collector`
 - `make test-adapters-integration` when you want the opt-in Rails integration coverage
 
 Those targets cover the load runner, the Rails adapter, and the
@@ -75,7 +76,6 @@ Run the code-level suites:
 
 ```bash
 make test
-BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir["collector/test/*_test.rb"].sort.each { |path| load path }'
 ```
 
 Run the opt-in Rails adapter integration suite:
