@@ -91,14 +91,18 @@ module Load
       )
       @invariant_monitor = Load::InvariantMonitor.new(
         sampler: sampler,
-        policy: @invariant_config.policy,
-        interval_seconds: @invariant_config.sample_interval_seconds,
+        config: Load::InvariantMonitor::Config.new(
+          policy: @invariant_config.policy,
+          interval_seconds: @invariant_config.sample_interval_seconds,
+        ),
         stop_flag: @runtime.stop_flag,
         sleeper: @runtime.sleeper,
-        on_sample: ->(sample) { @run_state.append_invariant_sample(**sample.to_record(sampled_at: current_time)) },
-        on_warning: ->(warning) { @run_state.append_warning(warning) },
-        on_breach_stop: ->(reason) { trigger_stop(reason) },
-        stderr: @stderr,
+        sink: Load::InvariantMonitor::Sink.new(
+          on_sample: ->(sample) { @run_state.append_invariant_sample(**sample.to_record(sampled_at: current_time)) },
+          on_warning: ->(warning) { @run_state.append_warning(warning) },
+          on_breach_stop: ->(reason) { trigger_stop(reason) },
+          stderr: @stderr,
+        ),
       )
     end
 

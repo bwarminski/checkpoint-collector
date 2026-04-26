@@ -4,18 +4,69 @@ require "stringio"
 require_relative "test_helper"
 
 class InvariantMonitorTest < Minitest::Test
+  def test_enforce_policy_resets_breach_count_after_healthy_sample
+    stops = []
+    monitor = build_monitor(
+      sampler: [
+        breach_sample,
+        breach_sample,
+        healthy_sample,
+        breach_sample,
+        breach_sample,
+        breach_sample,
+      ],
+      policy: :enforce,
+      on_breach_stop: ->(reason) { stops << reason },
+    )
+
+    samples = 6.times.map { monitor.sample_once }
+
+    assert_kind_of Load::Runner::InvariantSample, samples[2]
+    assert_equal healthy_sample.to_h, samples[2].to_h
+    assert_equal [:invariant_breach], stops
+  end
+
+  def test_sample_once_uses_sink_boundaries_for_sample_warning_stderr_and_breach_stop
+    samples = []
+    warnings = []
+    stops = []
+    stderr = StringIO.new
+
+    warn_monitor = build_monitor(
+      sampler: breach_sample,
+      policy: :warn,
+      on_sample: ->(sample) { samples << sample.to_h },
+      on_warning: ->(warning) { warnings << warning },
+      on_breach_stop: ->(reason) { stops << reason },
+      stderr:,
+    )
+
+    enforce_monitor = build_monitor(
+      sampler: [breach_sample, breach_sample, breach_sample],
+      policy: :enforce,
+      on_sample: ->(sample) { samples << sample.to_h },
+      on_warning: ->(warning) { warnings << warning },
+      on_breach_stop: ->(reason) { stops << reason },
+      stderr:,
+    )
+
+    warn_monitor.sample_once
+    3.times { enforce_monitor.sample_once }
+
+    assert_equal 4, samples.length
+    assert_equal 4, warnings.length
+    assert_match(/warning: invariant breach:/, stderr.string)
+    assert_equal [:invariant_breach], stops
+  end
+
   def test_warn_policy_records_warning_without_triggering_stop
     warnings = []
     stops = []
     stderr = StringIO.new
 
-    monitor = Load::InvariantMonitor.new(
+    monitor = build_monitor(
       sampler: -> { breach_sample },
       policy: :warn,
-      interval_seconds: 0.0,
-      stop_flag: Load::Runner::InternalStopFlag.new,
-      sleeper: ->(*) {},
-      on_sample: ->(*) {},
       on_warning: ->(payload) { warnings << payload },
       on_breach_stop: ->(reason) { stops << reason },
       stderr:,
@@ -31,16 +82,10 @@ class InvariantMonitorTest < Minitest::Test
   def test_enforce_policy_triggers_stop_after_three_consecutive_breaches
     stops = []
 
-    monitor = Load::InvariantMonitor.new(
+    monitor = build_monitor(
       sampler: -> { breach_sample },
       policy: :enforce,
-      interval_seconds: 0.0,
-      stop_flag: Load::Runner::InternalStopFlag.new,
-      sleeper: ->(*) {},
-      on_sample: ->(*) {},
-      on_warning: ->(*) {},
       on_breach_stop: ->(reason) { stops << reason },
-      stderr: StringIO.new,
     )
 
     3.times { monitor.sample_once }
@@ -49,16 +94,9 @@ class InvariantMonitorTest < Minitest::Test
   end
 
   def test_off_policy_never_starts
-    monitor = Load::InvariantMonitor.new(
+    monitor = build_monitor(
       sampler: -> { flunk "should not sample" },
       policy: :off,
-      interval_seconds: 0.0,
-      stop_flag: Load::Runner::InternalStopFlag.new,
-      sleeper: ->(*) {},
-      on_sample: ->(*) {},
-      on_warning: ->(*) {},
-      on_breach_stop: ->(*) {},
-      stderr: StringIO.new,
     )
 
     assert_nil monitor.start
@@ -67,16 +105,11 @@ class InvariantMonitorTest < Minitest::Test
   def test_stop_unblocks_sleeping_thread
     blocker = Queue.new
     sleeper_entered = Queue.new
-    monitor = Load::InvariantMonitor.new(
+    monitor = build_monitor(
       sampler: -> { healthy_sample },
       policy: :enforce,
       interval_seconds: 60.0,
-      stop_flag: Load::Runner::InternalStopFlag.new,
       sleeper: ->(*) { sleeper_entered << true; blocker.pop },
-      on_sample: ->(*) {},
-      on_warning: ->(*) {},
-      on_breach_stop: ->(*) {},
-      stderr: StringIO.new,
     )
 
     thread = monitor.start
@@ -89,20 +122,18 @@ class InvariantMonitorTest < Minitest::Test
 
   def test_stop_ignores_thread_error_when_target_thread_exits_during_shutdown
     thread = ExitingThread.new
-    monitor = Load::InvariantMonitor.new(
+    sleeper_entered = Queue.new
+    monitor = build_monitor(
       sampler: -> { healthy_sample },
       policy: :enforce,
       interval_seconds: 60.0,
-      stop_flag: Load::Runner::InternalStopFlag.new,
-      sleeper: ->(*) {},
-      on_sample: ->(*) {},
-      on_warning: ->(*) {},
-      on_breach_stop: ->(*) {},
-      stderr: StringIO.new,
+      sleeper: ->(*) { sleeper_entered << true; sleep },
     )
-    monitor.instance_variable_set(:@sleeping, true)
+    sleeper_thread = monitor.start
+    sleeper_entered.pop
 
     monitor.stop(thread)
+    monitor.stop(sleeper_thread)
 
     assert_equal 1, thread.raise_calls
     assert_equal 1, thread.join_calls
@@ -110,16 +141,10 @@ class InvariantMonitorTest < Minitest::Test
 
   def test_sampler_failure_propagates_and_clears_after_stop_raises
     stops = []
-    monitor = Load::InvariantMonitor.new(
+    monitor = build_monitor(
       sampler: -> { raise "boom" },
       policy: :enforce,
-      interval_seconds: 0.0,
-      stop_flag: Load::Runner::InternalStopFlag.new,
-      sleeper: ->(*) {},
-      on_sample: ->(*) {},
-      on_warning: ->(*) {},
       on_breach_stop: ->(reason) { stops << reason },
-      stderr: StringIO.new,
     )
 
     thread = monitor.start
@@ -131,6 +156,32 @@ class InvariantMonitorTest < Minitest::Test
   end
 
   private
+
+  def build_monitor(sampler:, policy:, interval_seconds: 0.0, sleeper: ->(*) {}, on_sample: ->(*) {}, on_warning: ->(*) {}, on_breach_stop: ->(*) {}, stderr: StringIO.new)
+    sampler_callable =
+      if sampler.respond_to?(:call)
+        sampler
+      else
+        samples = Array(sampler)
+        -> { samples.shift }
+      end
+
+    Load::InvariantMonitor.new(
+      sampler: sampler_callable,
+      config: Load::InvariantMonitor::Config.new(
+        policy:,
+        interval_seconds:,
+      ),
+      stop_flag: Load::Runner::InternalStopFlag.new,
+      sleeper:,
+      sink: Load::InvariantMonitor::Sink.new(
+        on_sample:,
+        on_warning:,
+        on_breach_stop:,
+        stderr:,
+      ),
+    )
+  end
 
   def breach_sample
     Load::Runner::InvariantSample.new(
