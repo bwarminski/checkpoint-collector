@@ -189,6 +189,5 @@ if $PROGRAM_NAME == __FILE__
     postgres_url: ENV.fetch("POSTGRES_URL"),
     clickhouse_url: ENV.fetch("CLICKHOUSE_URL"),
     log_file: ENV.fetch("POSTGRES_LOG_PATH", CollectorRuntime::DEFAULT_LOG_FILE),
-    log_ingestion_enabled: ENV.fetch("COLLECTOR_DISABLE_LOG_INGESTION", nil).nil?
   ).run_forever
 end
