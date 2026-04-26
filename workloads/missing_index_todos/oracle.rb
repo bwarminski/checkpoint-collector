@@ -14,7 +14,8 @@ module Load
         CLICKHOUSE_CALL_THRESHOLD = 500
         DOMINANCE_RATIO_THRESHOLD = 3.0
         USER_ID_INDEX_NAME = "index_todos_on_user_id".freeze
-        EXPECTED_SORT_KEY = ["created_at DESC", "id DESC"].freeze
+        EXPECTED_SORT_KEY = %w[created_at desc id desc].freeze
+        SORT_NODE_TYPES = ["Sort", "Incremental Sort", "Gather Merge"].freeze
         CLICKHOUSE_TOPN_LIMIT = 10
         EXPLAIN_SQL = <<~SQL.freeze
           EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
@@ -130,7 +131,7 @@ module Load
           {
             "Node Type" => access_node.fetch("Node Type"),
             "Index Name" => index_name,
-            "Sort Key" => EXPECTED_SORT_KEY,
+            "Sort Key" => ["created_at DESC", "id DESC"],
             "Filter" => access_node.fetch("Filter", "").to_s,
             "tenant_condition" => tenant_condition,
           }
@@ -138,26 +139,14 @@ module Load
           connection&.close
         end
 
-        def find_missing_index_access_node(node)
+        def find_missing_index_access_node(node, sort_confirmed: false)
           return unless node.is_a?(Hash)
 
-          if node["Node Type"] == "Sort" && node["Sort Key"] == EXPECTED_SORT_KEY
-            return find_todos_relation_node(node)
-          end
+          sort_confirmed ||= sort_matches_expected?(node)
+          return node if sort_confirmed && node["Relation Name"] == "todos"
 
           Array(node["Plans"]).each do |child|
-            match = find_missing_index_access_node(child)
-            return match if match
-          end
-
-          nil
-        end
-
-        def find_todos_relation_node(node)
-          return node if node["Relation Name"] == "todos"
-
-          Array(node["Plans"]).each do |child|
-            match = find_todos_relation_node(child)
+            match = find_missing_index_access_node(child, sort_confirmed:)
             return match if match
           end
 
@@ -189,6 +178,25 @@ module Load
           end
 
           ""
+        end
+
+        def sort_matches_expected?(node)
+          SORT_NODE_TYPES.include?(node["Node Type"]) &&
+            normalize_sort_key(node["Sort Key"]) == EXPECTED_SORT_KEY
+        end
+
+        def normalize_sort_key(sort_key)
+          Array(sort_key).flat_map do |key|
+            normalize_sort_key_entry(key)
+          end
+        end
+
+        def normalize_sort_key_entry(key)
+          normalized = key.to_s.downcase.delete('"')
+          identifier = normalized.scan(/([a-z_]+)\s+desc\b/).flatten.last
+          return [] if identifier.nil? || identifier.empty?
+
+          [identifier, "desc"]
         end
 
         def wait_for_clickhouse!(window:, queryids:, clickhouse_url:, timeout_seconds:)

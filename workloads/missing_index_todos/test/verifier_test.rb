@@ -99,6 +99,18 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     assert_equal "Index Scan", result.fetch(:checks).fetch(0).fetch(:node_type)
   end
 
+  def test_verifier_accepts_gather_merge_with_qualified_sort_keys
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan(sort_node_type: "Gather Merge", sort_keys: ['"todos"."created_at" DESC', '"todos"."id" DESC']) : search_reference_plan
+      end,
+    )
+
+    result = verifier.call(base_url: "http://app.test")
+
+    assert_equal "Bitmap Heap Scan", result.fetch(:checks).fetch(0).fetch(:node_type)
+  end
+
   def test_verifier_uses_default_counts_calls_reader
     connection = FakePgConnection.new([{ "calls" => "7" }])
     pg = FakePg.new(connection)
@@ -230,13 +242,13 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     end
   end
 
-  def missing_index_plan(access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+  def missing_index_plan(sort_node_type: "Sort", sort_keys: ["created_at DESC", "id DESC"], access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
     {
       "Node Type" => "Limit",
       "Plans" => [
         {
-          "Node Type" => "Sort",
-          "Sort Key" => ["created_at DESC", "id DESC"],
+          "Node Type" => sort_node_type,
+          "Sort Key" => sort_keys,
           "Plans" => [missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)],
         },
       ],

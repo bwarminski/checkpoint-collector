@@ -8,7 +8,8 @@ module Load
     module MissingIndexTodos
       class Verifier
         USER_ID_INDEX_NAME = "index_todos_on_user_id".freeze
-        EXPECTED_SORT_KEY = ["created_at DESC", "id DESC"].freeze
+        EXPECTED_SORT_KEY = %w[created_at desc id desc].freeze
+        SORT_NODE_TYPES = ["Sort", "Incremental Sort", "Gather Merge"].freeze
         SEARCH_PLAN_STABLE_KEYS = ["Node Type", "Relation Name", "Sort Key", "Filter", "Plans"].freeze
         COUNTS_PATH = "/api/todos/counts".freeze
         MISSING_INDEX_PATH = "/api/todos?user_id=1&status=open".freeze
@@ -102,7 +103,7 @@ module Load
         def verify_missing_index
           plan = @explain_reader.call(MISSING_INDEX_SQL)
           access_node = find_missing_index_access_node(plan)
-          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected todos access under sort #{EXPECTED_SORT_KEY.join(', ')}" unless access_node
+          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected todos access under sort created_at DESC, id DESC" unless access_node
 
           tenant_condition = access_tenant_condition(access_node)
           raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Index Cond or Recheck Cond to include user_id" unless tenant_condition.include?("user_id")
@@ -146,26 +147,14 @@ module Load
           raise Load::VerificationError, "fixture verification failed for #{path}: expected 2xx response, saw #{response.code}"
         end
 
-        def find_missing_index_access_node(node)
+        def find_missing_index_access_node(node, sort_confirmed: false)
           return unless node.is_a?(Hash)
 
-          if node["Node Type"] == "Sort" && node["Sort Key"] == EXPECTED_SORT_KEY
-            return find_todos_relation_node(node)
-          end
+          sort_confirmed ||= sort_matches_expected?(node)
+          return node if sort_confirmed && node["Relation Name"] == "todos"
 
           Array(node["Plans"]).each do |child|
-            match = find_missing_index_access_node(child)
-            return match if match
-          end
-
-          nil
-        end
-
-        def find_todos_relation_node(node)
-          return node if node["Relation Name"] == "todos"
-
-          Array(node["Plans"]).each do |child|
-            match = find_todos_relation_node(child)
+            match = find_missing_index_access_node(child, sort_confirmed:)
             return match if match
           end
 
@@ -197,6 +186,25 @@ module Load
           end
 
           ""
+        end
+
+        def sort_matches_expected?(node)
+          SORT_NODE_TYPES.include?(node["Node Type"]) &&
+            normalize_sort_key(node["Sort Key"]) == EXPECTED_SORT_KEY
+        end
+
+        def normalize_sort_key(sort_key)
+          Array(sort_key).flat_map do |key|
+            normalize_sort_key_entry(key)
+          end
+        end
+
+        def normalize_sort_key_entry(key)
+          normalized = key.to_s.downcase.delete('"')
+          identifier = normalized.scan(/([a-z_]+)\s+desc\b/).flatten.last
+          return [] if identifier.nil? || identifier.empty?
+
+          [identifier, "desc"]
         end
 
         def plan_matches_reference?(actual:, reference:, keys: reference.keys)

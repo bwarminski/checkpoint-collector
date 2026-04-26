@@ -52,6 +52,29 @@ class MissingIndexTodosOracleTest < Minitest::Test
     assert_equal %(("todos"."user_id" = 1)), result.fetch(:plan).fetch("tenant_condition")
   end
 
+  def test_oracle_accepts_gather_merge_with_qualified_sort_keys
+    result = build_dominance_oracle(
+      explain_rows: [
+        explain_row(
+          plan: missing_index_plan(
+            sort_node_type: "Gather Merge",
+            sort_keys: ['"todos"."created_at" DESC', '"todos"."id" DESC']
+          )
+        ),
+      ],
+      clickhouse_topn_rows: [
+        { "queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0" },
+      ],
+    ).call(
+      run_dir: write_run_record(query_ids: ["primary"]),
+      database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+      clickhouse_url: "http://clickhouse:8123",
+    )
+
+    assert_equal "Bitmap Heap Scan", result.fetch(:plan).fetch("Node Type")
+    assert_equal %(("todos"."user_id" = 1)), result.fetch(:plan).fetch("tenant_condition")
+  end
+
   def test_oracle_fails_when_run_record_lacks_top_level_query_ids
     run_dir = write_run_record
     explain_rows = [
@@ -394,13 +417,13 @@ class MissingIndexTodosOracleTest < Minitest::Test
     }
   end
 
-  def missing_index_plan(access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+  def missing_index_plan(sort_node_type: "Sort", sort_keys: ["created_at DESC", "id DESC"], access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
     {
       "Node Type" => "Limit",
       "Plans" => [
         {
-          "Node Type" => "Sort",
-          "Sort Key" => ["created_at DESC", "id DESC"],
+          "Node Type" => sort_node_type,
+          "Sort Key" => sort_keys,
           "Plans" => [missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)],
         },
       ],
