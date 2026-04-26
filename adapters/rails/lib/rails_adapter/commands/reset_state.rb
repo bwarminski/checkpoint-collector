@@ -23,22 +23,25 @@ module RailsAdapter
         RUBY
       }.freeze
 
-      def initialize(app_root:, seed:, env_pairs:, workload: nil, command_runner: RailsAdapter::CommandRunner.new, template_cache: RailsAdapter::TemplateCache.new, clock: -> { Time.now.to_f })
+      def initialize(app_root:, seed:, env_pairs:, workload: nil, command_runner: RailsAdapter::CommandRunner.new, template_cache: RailsAdapter::TemplateCache.new, reset_strategy: ENV.fetch("BENCH_ADAPTER_RESET_STRATEGY", "local"), clock: -> { Time.now.to_f })
         @app_root = app_root
         @workload = workload
         @seed = seed
         @env_pairs = env_pairs
         @command_runner = command_runner
         @template_cache = template_cache
+        @reset_strategy = reset_strategy
         @clock = clock
       end
 
       def call
-        if @template_cache.template_exists?(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
-          @template_cache.clone_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+        case @reset_strategy
+        when "local"
+          reset_local
+        when "remote"
+          reset_remote
         else
-          build_template
-          @template_cache.build_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+          raise ArgumentError, "unknown reset strategy: #{@reset_strategy}"
         end
 
         ensure_pg_stat_statements
@@ -50,6 +53,36 @@ module RailsAdapter
       end
 
       private
+
+      def reset_local
+        if @template_cache.template_exists?(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+          @template_cache.clone_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+        else
+          build_template
+          @template_cache.build_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+        end
+      end
+
+      def reset_remote
+        schema = @command_runner.capture3(
+          "bin/rails",
+          "db:schema:load",
+          env: rails_env,
+          chdir: @app_root,
+          command_name: "reset-state",
+        )
+        raise "schema load failed" unless schema.success?
+
+        load_dataset = RailsAdapter::Commands::LoadDataset.new(
+          app_root: @app_root,
+          workload: @workload,
+          seed: @seed,
+          env_pairs: @env_pairs,
+          command_runner: @command_runner,
+          clock: @clock,
+        ).call
+        raise "seed failed" unless load_dataset.fetch("ok")
+      end
 
       def build_template
         drop = @command_runner.capture3("bin/rails", "db:drop", env: rails_env, chdir: @app_root, command_name: "reset-state")
