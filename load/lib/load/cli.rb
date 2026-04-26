@@ -61,18 +61,42 @@ module Load
     def run_command(mode:)
       options = parse_run_options
       workload = load_workload(options.fetch(:workload))
-      runner = @runner_factory.call(
-        workload: workload,
-        mode: mode,
+      run_dir = File.join(options.fetch(:runs_dir), "#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}-#{workload.name}")
+      run_record = Load::RunRecord.new(run_dir:)
+      adapter_client = Load::AdapterClient.new(adapter_bin: options.fetch(:adapter_bin), run_record:)
+      verifier = build_verifier(
+        workload:,
         adapter_bin: options.fetch(:adapter_bin),
         app_root: options.fetch(:app_root),
-        runs_dir: options.fetch(:runs_dir),
+        stdout: @stdout,
+        stderr: @stderr,
+      )
+      runtime = Load::Runner::Runtime.new(
+        -> { Time.now.utc },
+        ->(seconds) { sleep(seconds) },
+        Net::HTTP,
+        @stop_flag,
+      )
+      config = Load::Runner::Config.new(
         readiness_path: options.fetch(:readiness_path),
         startup_grace_seconds: options.fetch(:startup_grace_seconds),
         metrics_interval_seconds: options.fetch(:metrics_interval_seconds),
-        invariant_policy: options.fetch(:invariant_policy),
-        stop_flag: @stop_flag,
-        stdout: @stdout,
+        workload_file: workload_path(workload.name),
+        app_root: options.fetch(:app_root),
+        adapter_bin: options.fetch(:adapter_bin),
+        mode: mode,
+        verifier: verifier,
+      )
+      invariant_config = Load::Runner::InvariantConfig.new(
+        policy: options.fetch(:invariant_policy),
+      )
+      runner = @runner_factory.call(
+        workload: workload,
+        adapter_client: adapter_client,
+        run_record: run_record,
+        runtime: runtime,
+        config: config,
+        invariant_config: invariant_config,
         stderr: @stderr,
       )
       runner.run
@@ -94,36 +118,7 @@ module Load
     end
 
     def default_runner_factory
-      lambda do |workload:, adapter_bin:, app_root:, runs_dir:, readiness_path:, startup_grace_seconds:, metrics_interval_seconds:, invariant_policy:, stop_flag:, stdout:, stderr:, mode:|
-        run_dir = File.join(runs_dir, "#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}-#{workload.name}")
-        run_record = Load::RunRecord.new(run_dir:)
-        adapter_client = Load::AdapterClient.new(adapter_bin:, run_record:)
-        verifier = build_verifier(
-          workload:,
-          adapter_bin:,
-          app_root:,
-          stdout:,
-          stderr:,
-        )
-        Load::Runner.new(
-          workload:,
-          adapter_client:,
-          run_record:,
-          clock: -> { Time.now.utc },
-          sleeper: ->(seconds) { sleep(seconds) },
-          readiness_path:,
-          startup_grace_seconds:,
-          metrics_interval_seconds:,
-          workload_file: workload_path(workload.name),
-          app_root:,
-          adapter_bin:,
-          stop_flag:,
-          verifier:,
-          mode:,
-          invariant_policy:,
-          stderr:,
-        )
-      end
+      ->(**kwargs) { Load::Runner.new(**kwargs) }
     end
 
     def default_verifier_factory

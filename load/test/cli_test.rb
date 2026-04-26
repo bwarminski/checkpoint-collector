@@ -80,11 +80,11 @@ class CliTest < Minitest::Test
 
     assert_equal 0, status
     assert_equal 1, factory.calls.length
-    assert_equal :finite, factory.calls.first.fetch(:mode)
     assert_equal "fixture-workload", factory.calls.first.fetch(:workload).name
-    assert_equal "fake-adapter", factory.calls.first.fetch(:adapter_bin)
-    assert_equal "/tmp/demo", factory.calls.first.fetch(:app_root)
-    assert_equal 5.0, factory.calls.first.fetch(:metrics_interval_seconds)
+    assert_equal "fake-adapter", factory.calls.first.fetch(:adapter_client).adapter_bin
+    assert_equal "/tmp/demo", factory.calls.first.fetch(:config).app_root
+    assert_equal :finite, factory.calls.first.fetch(:config).mode
+    assert_equal 5.0, factory.calls.first.fetch(:config).metrics_interval_seconds
     assert_equal 1, factory.runners.first.run_calls
   end
 
@@ -103,7 +103,7 @@ class CliTest < Minitest::Test
     )
 
     assert_equal 0, status
-    assert_equal :enforce, factory.calls.first.fetch(:invariant_policy)
+    assert_equal :enforce, factory.calls.first.fetch(:invariant_config).policy
   end
 
   def test_run_accepts_warn_and_off_invariant_policies
@@ -124,7 +124,7 @@ class CliTest < Minitest::Test
       )
 
       assert_equal 0, status
-      assert_equal policy, factory.calls.first.fetch(:invariant_policy)
+      assert_equal policy, factory.calls.first.fetch(:invariant_config).policy
     end
   end
 
@@ -150,165 +150,94 @@ class CliTest < Minitest::Test
     end
   end
 
-  def test_default_runner_factory_builds_a_fixture_verifier_for_finite_runs
-    cli = Load::CLI.new(
-      argv: [],
-      version: "0.3.0",
-      stdout: StringIO.new,
-      stderr: StringIO.new,
-    )
-
+  def test_run_command_builds_a_fixture_verifier_for_finite_runs
+    factory = FakeRunnerFactory.new(exit_code: 0)
     original_database_url = ENV["DATABASE_URL"]
     ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
 
-    verifier_factory = cli.send(:default_verifier_factory)
-    verifier = verifier_factory.call(
-      workload: MissingIndexTodosWorkload.new,
-      adapter_bin: "adapters/rails/bin/bench-adapter",
-      app_root: "/tmp/demo",
-      stdout: StringIO.new,
-      stderr: StringIO.new,
+    status = run_bin_load(
+      "run",
+      "--workload",
+      "missing-index-todos",
+      "--adapter",
+      "adapters/rails/bin/bench-adapter",
+      "--app-root",
+      "/tmp/demo",
+      runner_factory: factory,
     )
 
-    assert_instance_of Load::FixtureVerifier, verifier
-
-    captured_runner_kwargs = nil
-    Load::Runner.stub(:new, ->(**kwargs) do
-      captured_runner_kwargs = kwargs
-      Object.new
-    end) do
-      cli.send(:default_runner_factory).call(
-        workload: MissingIndexTodosWorkload.new,
-        mode: :finite,
-        adapter_bin: "adapters/rails/bin/bench-adapter",
-        app_root: "/tmp/demo",
-        runs_dir: Dir.mktmpdir,
-        readiness_path: "/up",
-        startup_grace_seconds: 15.0,
-        metrics_interval_seconds: 5.0,
-        invariant_policy: :enforce,
-        stop_flag: Load::Runner::InternalStopFlag.new,
-        stdout: StringIO.new,
-        stderr: StringIO.new,
-      )
-    end
-
-    assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
-    assert_equal :enforce, captured_runner_kwargs.fetch(:invariant_policy)
+    assert_equal 0, status
+    assert_instance_of Load::FixtureVerifier, factory.calls.first.fetch(:config).verifier
+    assert_equal :enforce, factory.calls.first.fetch(:invariant_config).policy
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
 
-  def test_default_runner_factory_builds_a_fixture_verifier_for_missing_index_todos_soak_runs
-    cli = Load::CLI.new(
-      argv: [],
-      version: "0.3.0",
-      stdout: StringIO.new,
-      stderr: StringIO.new,
-    )
-
+  def test_run_command_builds_a_fixture_verifier_for_missing_index_todos_soak_runs
+    factory = FakeRunnerFactory.new(exit_code: 0)
     original_database_url = ENV["DATABASE_URL"]
     ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
 
-    captured_runner_kwargs = nil
-    Load::Runner.stub(:new, ->(**kwargs) do
-      captured_runner_kwargs = kwargs
-      Object.new
-    end) do
-      cli.send(:default_runner_factory).call(
-        workload: MissingIndexTodosWorkload.new,
-        mode: :continuous,
-        adapter_bin: "adapters/rails/bin/bench-adapter",
-        app_root: "/tmp/demo",
-        runs_dir: Dir.mktmpdir,
-        readiness_path: "/up",
-        startup_grace_seconds: 15.0,
-        metrics_interval_seconds: 5.0,
-        invariant_policy: :enforce,
-        stop_flag: Load::Runner::InternalStopFlag.new,
-        stdout: StringIO.new,
-        stderr: StringIO.new,
-      )
-    end
+    status = run_bin_load(
+      "soak",
+      "--workload",
+      "missing-index-todos",
+      "--adapter",
+      "adapters/rails/bin/bench-adapter",
+      "--app-root",
+      "/tmp/demo",
+      runner_factory: factory,
+    )
 
-    assert_instance_of Load::FixtureVerifier, captured_runner_kwargs.fetch(:verifier)
-    assert_equal :continuous, captured_runner_kwargs.fetch(:mode)
-    assert_equal :enforce, captured_runner_kwargs.fetch(:invariant_policy)
+    assert_equal 0, status
+    assert_instance_of Load::FixtureVerifier, factory.calls.first.fetch(:config).verifier
+    assert_equal :continuous, factory.calls.first.fetch(:config).mode
+    assert_equal :enforce, factory.calls.first.fetch(:invariant_config).policy
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
 
-  def test_default_runner_factory_skips_fixture_verifier_for_unrelated_workloads
-    cli = Load::CLI.new(
-      argv: [],
-      version: "0.3.0",
-      stdout: StringIO.new,
-      stderr: StringIO.new,
-    )
-
+  def test_run_command_skips_fixture_verifier_for_unrelated_workloads
+    factory = FakeRunnerFactory.new(exit_code: 0)
     original_database_url = ENV["DATABASE_URL"]
     ENV.delete("DATABASE_URL")
 
-    captured_runner_kwargs = nil
-    Load::Runner.stub(:new, ->(**kwargs) do
-      captured_runner_kwargs = kwargs
-      Object.new
-    end) do
-      cli.send(:default_runner_factory).call(
-        workload: FixtureWorkload.new,
-        mode: :finite,
-        adapter_bin: "adapters/rails/bin/bench-adapter",
-        app_root: "/tmp/demo",
-        runs_dir: Dir.mktmpdir,
-        readiness_path: "/up",
-        startup_grace_seconds: 15.0,
-        metrics_interval_seconds: 5.0,
-        invariant_policy: :enforce,
-        stop_flag: Load::Runner::InternalStopFlag.new,
-        stdout: StringIO.new,
-        stderr: StringIO.new,
-      )
-    end
+    status = run_bin_load(
+      "run",
+      "--workload",
+      "fixture-workload",
+      "--adapter",
+      "adapters/rails/bin/bench-adapter",
+      "--app-root",
+      "/tmp/demo",
+      runner_factory: factory,
+    )
 
-    assert_nil captured_runner_kwargs.fetch(:verifier)
-    assert_equal :enforce, captured_runner_kwargs.fetch(:invariant_policy)
+    assert_equal 0, status
+    assert_nil factory.calls.first.fetch(:config).verifier
+    assert_equal :enforce, factory.calls.first.fetch(:invariant_config).policy
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
 
-  def test_default_runner_factory_uses_workload_provided_verifier
-    cli = Load::CLI.new(
-      argv: [],
-      version: "0.3.0",
-      stdout: StringIO.new,
-      stderr: StringIO.new,
-    )
-
+  def test_run_command_uses_workload_provided_verifier
+    factory = FakeRunnerFactory.new(exit_code: 0)
     original_database_url = ENV["DATABASE_URL"]
     ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
 
-    captured_runner_kwargs = nil
-    Load::Runner.stub(:new, ->(**kwargs) do
-      captured_runner_kwargs = kwargs
-      Object.new
-    end) do
-      cli.send(:default_runner_factory).call(
-        workload: WorkloadWithVerifier.new,
-        mode: :finite,
-        adapter_bin: "adapters/rails/bin/bench-adapter",
-        app_root: "/tmp/demo",
-        runs_dir: Dir.mktmpdir,
-        readiness_path: "/up",
-        startup_grace_seconds: 15.0,
-        metrics_interval_seconds: 5.0,
-        invariant_policy: :enforce,
-        stop_flag: Load::Runner::InternalStopFlag.new,
-        stdout: StringIO.new,
-        stderr: StringIO.new,
-      )
-    end
+    status = run_bin_load(
+      "run",
+      "--workload",
+      "workload-with-verifier",
+      "--adapter",
+      "adapters/rails/bin/bench-adapter",
+      "--app-root",
+      "/tmp/demo",
+      runner_factory: factory,
+    )
 
-    assert captured_runner_kwargs.fetch(:verifier).respond_to?(:call)
+    assert_equal 0, status
+    assert factory.calls.first.fetch(:config).verifier.respond_to?(:call)
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
@@ -325,36 +254,53 @@ class CliTest < Minitest::Test
     end
     Load::WorkloadRegistry.register("bad-verifier-workload", workload_class)
 
+    original_database_url = ENV["DATABASE_URL"]
+    ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
+
+    stdout = StringIO.new
+    stderr = StringIO.new
     cli = Load::CLI.new(
-      argv: [],
+      argv: [
+        "run",
+        "--workload",
+        "bad-verifier-workload",
+        "--adapter",
+        "adapters/rails/bin/bench-adapter",
+        "--app-root",
+        "/tmp/demo",
+      ],
       version: "0.3.0",
+      stdout: stdout,
+      stderr: stderr,
+    )
+
+    assert_equal Load::ExitCodes::ADAPTER_ERROR, cli.run
+    assert_equal "", stdout.string
+    assert_includes stderr.string, "verifier must respond to call"
+  ensure
+    ENV["DATABASE_URL"] = original_database_url
+  end
+
+  def test_default_runner_factory_builds_grouped_runner_dependencies
+    calls = []
+    runner_factory = lambda do |**kwargs|
+      calls << kwargs
+      Struct.new(:run).new(Load::ExitCodes::SUCCESS)
+    end
+    cli = Load::CLI.new(
+      argv: ["run", "--workload", "missing-index-todos", "--adapter", "adapters/rails/bin/bench-adapter", "--app-root", "/tmp/demo"],
+      version: "test",
+      runner_factory:,
       stdout: StringIO.new,
       stderr: StringIO.new,
     )
 
-    original_database_url = ENV["DATABASE_URL"]
-    ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
+    cli.run
 
-    error = assert_raises(Load::CLI::VerifierError) do
-      cli.send(:default_runner_factory).call(
-        workload: workload_class.new,
-        mode: :finite,
-        adapter_bin: "adapters/rails/bin/bench-adapter",
-        app_root: "/tmp/demo",
-        runs_dir: Dir.mktmpdir,
-        readiness_path: "/up",
-        startup_grace_seconds: 15.0,
-        metrics_interval_seconds: 5.0,
-        invariant_policy: :enforce,
-        stop_flag: Load::Runner::InternalStopFlag.new,
-        stdout: StringIO.new,
-        stderr: StringIO.new,
-      )
-    end
-
-    assert_includes error.message, "verifier must respond to call"
-  ensure
-    ENV["DATABASE_URL"] = original_database_url
+    kwargs = calls.fetch(0)
+    assert_instance_of Load::Runner::Runtime, kwargs.fetch(:runtime)
+    assert_instance_of Load::Runner::Config, kwargs.fetch(:config)
+    assert_instance_of Load::Runner::InvariantConfig, kwargs.fetch(:invariant_config)
   end
 
   def test_cli_runs_verify_fixture_command
@@ -591,7 +537,7 @@ class CliTest < Minitest::Test
 
     assert_equal Load::ExitCodes::SUCCESS, cli.run
     assert_equal 1, runner_calls.length
-    assert_equal :continuous, runner_calls.first.fetch(:mode)
+    assert_equal :continuous, runner_calls.first.fetch(:config).mode
   end
 
   def test_run_command_passes_metrics_interval_override
@@ -611,7 +557,7 @@ class CliTest < Minitest::Test
     )
 
     assert_equal 0, status
-    assert_equal 2.5, factory.calls.first.fetch(:metrics_interval_seconds)
+    assert_equal 2.5, factory.calls.first.fetch(:config).metrics_interval_seconds
   end
 
   def test_run_command_normalizes_none_readiness_path_to_nil
@@ -631,7 +577,7 @@ class CliTest < Minitest::Test
     )
 
     assert_equal 0, status
-    assert_nil factory.calls.first.fetch(:readiness_path)
+    assert_nil factory.calls.first.fetch(:config).readiness_path
   end
 
   def test_bin_load_help_prints_usage_and_exits_zero

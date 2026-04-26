@@ -120,37 +120,79 @@ class RunnerTest < Minitest::Test
         workload: MetricsWorkload.new,
         adapter_client: FakeAdapterClient.new,
         run_record: FakeRunRecord.new,
-        clock: fake_clock,
-        sleeper: ->(*) { Thread.pass },
-        http: FakeHttp.new,
-        readiness_path: nil,
-        startup_grace_seconds: 0.0,
-        mode: :continuous,
-        database_url: nil,
+        runtime: Load::Runner::Runtime.new(fake_clock, ->(*) { Thread.pass }, FakeHttp.new, Load::Runner::InternalStopFlag.new),
+        config: Load::Runner::Config.new(mode: :continuous, readiness_path: nil, startup_grace_seconds: 0.0),
+        invariant_config: Load::Runner::InvariantConfig.new(policy: :enforce, database_url: nil),
       )
     end
 
     assert_equal "continuous mode requires the workload to provide an invariant sampler", error.message
   end
 
-  def test_runner_asks_workload_for_invariant_sampler_in_continuous_mode
+  def test_runtime_default_provides_clock_sleeper_http_and_stop_flag
+    runtime = Load::Runner::Runtime.default
+
+    assert_respond_to runtime.clock, :call
+    assert_respond_to runtime.sleeper, :call
+    assert_equal Net::HTTP, runtime.http
+    assert_instance_of Load::Runner::InternalStopFlag, runtime.stop_flag
+  end
+
+  def test_config_defaults_match_existing_runner_defaults
+    config = Load::Runner::Config.new
+
+    assert_equal "/up", config.readiness_path
+    assert_equal 15, config.startup_grace_seconds
+    assert_equal 5, config.metrics_interval_seconds
+    assert_nil config.workload_file
+    assert_nil config.app_root
+    assert_nil config.adapter_bin
+    assert_equal :finite, config.mode
+    assert_nil config.verifier
+  end
+
+  def test_invariant_config_defaults_match_existing_runner_defaults
+    config = Load::Runner::InvariantConfig.new
+
+    assert_equal :enforce, config.policy
+    assert_nil config.sampler
+    assert_equal Load::Runner::DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS, config.sample_interval_seconds
+    if ENV["DATABASE_URL"].nil?
+      assert_nil config.database_url
+    else
+      assert_equal ENV["DATABASE_URL"], config.database_url
+    end
+    assert_equal PG, config.pg
+  end
+
+  def test_runner_uses_invariant_config_database_url_and_pg_when_resolving_sampler
     workload = RecordingSamplerWorkload.new
 
     Load::Runner.new(
       workload:,
       adapter_client: FakeAdapterClient.new,
       run_record: FakeRunRecord.new,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      mode: :continuous,
-      database_url: "postgres://example.test/checkpoint",
-      pg: :fake_pg,
+      runtime: Load::Runner::Runtime.new(fake_clock, ->(*) { Thread.pass }, FakeHttp.new, Load::Runner::InternalStopFlag.new),
+      config: Load::Runner::Config.new(mode: :continuous, readiness_path: nil, startup_grace_seconds: 0.0),
+      invariant_config: Load::Runner::InvariantConfig.new(database_url: "postgres://example.test/checkpoint", pg: :fake_pg),
     )
 
     assert_equal ["postgres://example.test/checkpoint", :fake_pg], workload.invariant_sampler_args
+  end
+
+  def test_runner_continuous_mode_validation_uses_grouped_configs
+    error = assert_raises(Load::AdapterClient::AdapterError) do
+      Load::Runner.new(
+        workload: MetricsWorkload.new,
+        adapter_client: FakeAdapterClient.new,
+        run_record: FakeRunRecord.new,
+        runtime: Load::Runner::Runtime.new(fake_clock, ->(*) { Thread.pass }, FakeHttp.new, Load::Runner::InternalStopFlag.new),
+        config: Load::Runner::Config.new(mode: :continuous, readiness_path: nil, startup_grace_seconds: 0.0),
+        invariant_config: Load::Runner::InvariantConfig.new(policy: :enforce, database_url: nil),
+      )
+    end
+
+    assert_equal "continuous mode requires the workload to provide an invariant sampler", error.message
   end
 
   def test_soak_mode_runs_until_stop_flag
@@ -388,15 +430,9 @@ class RunnerTest < Minitest::Test
       workload: NeverFinishingWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      mode: :continuous,
-      invariant_sampler: sampler,
-      invariant_sample_interval_seconds: 0.001,
-      database_url: nil,
+      runtime: fake_runtime,
+      config: fake_config(mode: :continuous, readiness_path: nil, startup_grace_seconds: 0.0),
+      invariant_config: fake_invariant_config(sampler:, sample_interval_seconds: 0.001, database_url: nil),
     )
 
     exit_code = Timeout.timeout(2.5) { runner.run }
@@ -565,16 +601,9 @@ class RunnerTest < Minitest::Test
       workload: MetricsWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: -> { clock.now },
-      sleeper: ->(seconds) { clock.advance_by(seconds); Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
-      mode: :continuous,
-      invariant_sampler: sampler,
-      invariant_sample_interval_seconds: 0.001,
-      database_url: nil,
+      runtime: fake_runtime(clock: -> { clock.now }, sleeper: ->(seconds) { clock.advance_by(seconds); Thread.pass }, stop_flag:),
+      config: fake_config(mode: :continuous, readiness_path: nil, startup_grace_seconds: 0.0),
+      invariant_config: fake_invariant_config(sampler:, sample_interval_seconds: 0.001, database_url: nil),
     )
 
     exit_code = Timeout.timeout(2.0) { runner.run }
@@ -1066,6 +1095,33 @@ class RunnerTest < Minitest::Test
     -> { Time.now.utc }
   end
 
+  def fake_runtime(clock: fake_clock, sleeper: ->(*) { Thread.pass }, http: FakeHttp.new, stop_flag: Load::Runner::InternalStopFlag.new)
+    Load::Runner::Runtime.new(clock, sleeper, http, stop_flag)
+  end
+
+  def fake_config(readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, mode: :finite, verifier: nil)
+    Load::Runner::Config.new(
+      readiness_path: readiness_path,
+      startup_grace_seconds: startup_grace_seconds,
+      metrics_interval_seconds: metrics_interval_seconds,
+      workload_file: workload_file,
+      app_root: app_root,
+      adapter_bin: adapter_bin,
+      mode: mode,
+      verifier: verifier,
+    )
+  end
+
+  def fake_invariant_config(policy: :enforce, sampler: nil, sample_interval_seconds: Load::Runner::DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS, database_url: ENV["DATABASE_URL"], pg: PG)
+    Load::Runner::InvariantConfig.new(
+      policy: policy,
+      sampler: sampler,
+      sample_interval_seconds: sample_interval_seconds,
+      database_url: database_url,
+      pg: pg,
+    )
+  end
+
   def invariant_sample(open_count:, total_count:, open_floor:, total_floor:, total_ceiling:)
     Load::Runner::InvariantSample.new(
       [
@@ -1081,17 +1137,9 @@ class RunnerTest < Minitest::Test
       workload: BarrierWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
-      mode: :continuous,
-      invariant_sampler:,
-      invariant_sample_interval_seconds: 0.001,
-      database_url:,
-      invariant_policy:,
+      runtime: fake_runtime(stop_flag:),
+      config: fake_config(mode: :continuous, readiness_path: nil, startup_grace_seconds: 0.0),
+      invariant_config: fake_invariant_config(policy: invariant_policy, sampler: invariant_sampler, sample_interval_seconds: 0.001, database_url: database_url),
       stderr:,
     )
   end
@@ -1102,10 +1150,8 @@ class RunnerTest < Minitest::Test
       workload: DelayedWorkload.new(delay_ms:),
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: FakeHttp.new,
-      startup_grace_seconds: 0.01,
+      runtime: fake_runtime(sleeper: ->(*) {}, http: FakeHttp.new),
+      config: fake_config(startup_grace_seconds: 0.01),
     )
   end
 
