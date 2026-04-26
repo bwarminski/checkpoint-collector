@@ -291,17 +291,25 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
 The current checkpoint uses direct database connections only. PlanetScale direct
 and pooled hosts are different operational paths, but for this direct-only
-checkpoint both `DATABASE_URL` and `BENCH_ADAPTER_PG_ADMIN_URL` may use port
-`5432`.
+checkpoint all Postgres URLs should use port `5432`.
 
-Use `verify-full` with the system CA bundle path. On this machine, libpq 18.0.1
-failed certificate verification with `sslrootcert=system`, while the explicit
-CA bundle worked.
+Canonical PlanetScale connection URL format:
 
 ```bash
-export DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'
-export BENCH_ADAPTER_PG_ADMIN_URL='postgres://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'
-export POSTGRES_URL="$DATABASE_URL"
+postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt
+```
+
+Export the complete URL, including the `sslmode` and `sslrootcert` query params.
+The load runner, Rails adapter, and collector pass these URLs through; they do
+not append or normalize SSL parameters. On this machine, libpq 18.0.1 failed
+certificate verification with `sslrootcert=system`, while the explicit CA bundle
+path worked.
+
+```bash
+export PLANETSCALE_DATABASE_URL='postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'
+export DATABASE_URL="$PLANETSCALE_DATABASE_URL"
+export BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL"
+export POSTGRES_URL="$PLANETSCALE_DATABASE_URL"
 ```
 
 Reset and reseed the PlanetScale branch:

@@ -33,9 +33,9 @@ PlanetScale Postgres changes those assumptions. The first PlanetScale pass will 
 PlanetScale soak uses the same top-level command shape as local soak:
 
 ```bash
-DATABASE_URL=postgresql://...:5432/... \
-BENCH_ADAPTER_PG_ADMIN_URL=postgresql://...:5432/... \
-POSTGRES_URL=postgresql://...:5432/... \
+DATABASE_URL='postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt' \
+BENCH_ADAPTER_PG_ADMIN_URL="$DATABASE_URL" \
+POSTGRES_URL="$DATABASE_URL" \
 COLLECTOR_DISABLE_LOG_INGESTION=1 \
 bin/load soak --workload missing-index-todos \
   --adapter adapters/rails/bin/bench-adapter \
@@ -47,6 +47,8 @@ bin/load soak --workload missing-index-todos \
 `BENCH_ADAPTER_PG_ADMIN_URL` is the direct connection used by adapter setup and stats operations. For PlanetScale this should use port `5432`.
 
 `POSTGRES_URL` is the collector stats polling connection. For this pass, use a direct connection on port `5432`.
+
+The canonical PlanetScale URL is `postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt`. Operators must export the complete URL; the load runner, Rails adapter, and collector pass connection URLs through and do not append SSL parameters.
 
 Remote reset/reseed is destructive to the target database. Operators must point these env vars at a branch intended for benchmark data, not a production branch.
 

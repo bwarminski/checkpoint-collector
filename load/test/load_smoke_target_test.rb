@@ -42,4 +42,15 @@ class LoadSmokeTargetTest < Minitest::Test
     assert_includes readme, "bin/load verify-fixture"
     assert_includes readme, "bin/load soak"
   end
+
+  def test_planetscale_docs_define_canonical_url_without_makefile_ssl_params
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+    makefile = File.read(File.expand_path("../../Makefile", __dir__))
+
+    assert_includes readme, "Canonical PlanetScale connection URL format"
+    assert_includes readme, "postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt"
+    planetscale_target = makefile[/load-soak-planetscale:.*?(?=\n\S|\z)/m]
+    refute_includes planetscale_target, "sslrootcert"
+    refute_includes planetscale_target, "sslmode"
+  end
 end

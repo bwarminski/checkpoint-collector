@@ -59,6 +59,14 @@ sed -n '314,372p' README.md
 ```
 
 ````output
+
+Reset and reseed the PlanetScale branch:
+
+```bash
+DATABASE_URL="$DATABASE_URL" \
+BENCH_ADAPTER_PG_ADMIN_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+BENCH_ADAPTER_RESET_STRATEGY=remote \
+adapters/rails/bin/bench-adapter --json reset-state \
   --app-root /home/bjw/db-specialist-demo \
   --workload missing-index-todos \
   --seed 42 \
@@ -110,14 +118,6 @@ If `make load-smoke` times out or exits `3`, the fastest way to understand why
 is to separate:
 
 - database reset and seeding
-- app startup
-- one request latency
-- parallel request latency
-
-The runner does not expose scale overrides yet, so manual experiments should go
-through the Rails adapter directly.
-
-### 1. Reset the benchmark database with a chosen seed size
 ````
 
 The load client change is small but important for PlanetScale: callers can now choose a request timeout. Normal request paths still default to five seconds, while the fixture verifier below uses a longer timeout for slow preflight endpoints after reset.
@@ -647,12 +647,14 @@ module Load
         TOTAL_COUNT_SQL = "SELECT reltuples::bigint AS count FROM pg_class WHERE relname = 'todos'".freeze
         DISABLE_TRACKING_SQL = "SET pg_stat_statements.track = 'none'".freeze
 
-        def initialize(pg:, database_url:, open_floor:, total_floor:, total_ceiling:)
+        def initialize(pg:, database_url:, open_floor:, total_floor:, total_ceiling:, stderr: $stderr)
           @pg = pg
           @database_url = database_url
           @open_floor = open_floor
           @total_floor = total_floor
           @total_ceiling = total_ceiling
+          @stderr = stderr
+          @tracking_warning_emitted = false
         end
 
         def call
@@ -674,6 +676,10 @@ module Load
         def disable_tracking(connection)
           connection.exec(DISABLE_TRACKING_SQL)
         rescue PG::InsufficientPrivilege
+          unless @tracking_warning_emitted
+            @stderr.puts("warning: unable to disable pg_stat_statements tracking for invariant sampler")
+            @tracking_warning_emitted = true
+          end
           nil
         end
 
@@ -936,8 +942,6 @@ grep -n -E 'PlanetScale|branch|Logs|Insights|pg_stat_statements' TODO.md JOURNAL
 ```
 
 ```output
-TODO.md:4:- Add optional PlanetScale branch-per-run support after remote reset/reseed works against an existing branch. The deferred design should cover branch creation, credential discovery, cleanup, billing safeguards, and whether to use `pscale` or the PlanetScale API directly.
-TODO.md:5:- Fast follow: evaluate PlanetScale Cluster Logs, Query Insights, and `pginsights` as a remote query-log evidence source after stats-only PlanetScale soak works. Do not block the first PlanetScale reset/reseed pass on log ingestion.
 JOURNAL.md:14:- The missing-index template must create `pg_stat_statements` itself; otherwise `fixture_01` clones successfully but `pg_stat_statements_reset()` fails at the end of reset.
 JOURNAL.md:24:- 2026-04-19 verification follow-up: forcing `COMPOSE_PROJECT_NAME=checkpoint-collector` in the smoke helpers makes pytest reuse the intended stack from a worktree, and the first smoke test needed to poll for its specific `pg_stat_statements` row instead of any `postgres_logs` row to avoid a clean-stack ingestion race.
 JOURNAL.md:43:- The Postgres compose service initially came up healthy without publishing `5432`; forcing a recreate restored the host port binding, and `reset-state` also has to `CREATE EXTENSION IF NOT EXISTS pg_stat_statements` before calling `pg_stat_statements_reset()`.
@@ -956,6 +960,8 @@ JOURNAL.md:135:- 2026-04-26 PlanetScale local verification: `make test-load` pas
 JOURNAL.md:136:- 2026-04-26 PlanetScale final soak checkpoint: successful remote soak evidence is `runs/20260426T190638Z-missing-index-todos`, run with `BENCH_ADAPTER_RESET_STRATEGY=remote`, explicit CA bundle URLs, `--startup-grace-seconds 60`, and `--invariants warn`. The run reset/seeding captured query id `-5699193110986258845`, readiness completed after `6117ms`, workers ran from `19:07:14 UTC` to `19:09:11 UTC`, SIGINT stopped cleanly, and `run.json` recorded `2771` total requests, `2742` ok, `29` errors, plus one healthy invariant sample. ClickHouse had target queryid evidence for `-5699193110986258845` with `10637` interval calls and estimated `14626.7ms` total exec time. Integration fixes discovered during this checkpoint: verifier HTTP timeout needed 30s for PlanetScale `/api/todos/counts`, and the invariant sampler must tolerate lack of permission to set `pg_stat_statements.track`.
 JOURNAL.md:137:- 2026-04-26 PlanetScale final verification: after the verifier-timeout and invariant-sampler fixes, `make test-workloads` passed with `54 runs, 225 assertions`, collector tests passed with `55 runs, 171 assertions`, `make test-adapters` passed with `26 runs, 75 assertions, 2 skips`, and `make test-load` passed on rerun with `157 runs, 532 assertions`. The first full `make test-load` attempt hit a non-reproducing failure in `test_runner_warn_policy_records_breaches_without_aborting`; that test passed in isolation and the serial suite rerun passed.
 JOURNAL.md:138:- 2026-04-26 PlanetScale review follow-up: keep `COLLECTOR_DISABLE_LOG_INGESTION` interpretation centralized in `CollectorRuntime` instead of also passing `log_ingestion_enabled` from the executable entrypoint. Reset failures should surface stderr/details in the adapter JSON error message; otherwise PlanetScale privilege or TLS failures become opaque during destructive reset/reseed checkpoints.
+JOURNAL.md:139:- 2026-04-26 PlanetScale operator debug: a `make load-soak-planetscale` failure with no output was caused by the exported PlanetScale URLs still using `sslrootcert=system`; Rails/PG failed in `prepare` with `SSL error: certificate verify failed`. Replacing only that query param with `sslrootcert=/etc/ssl/certs/ca-certificates.crt` made adapter `prepare` succeed. The load runner now prints and persists structured adapter JSON error messages so this failure is visible at the Make target.
+JOURNAL.md:140:- 2026-04-26 PlanetScale URL contract: the canonical direct connection URL for this branch is `postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt`. Operators must export the complete URL for `DATABASE_URL`, `BENCH_ADAPTER_PG_ADMIN_URL`, and `POSTGRES_URL`; the runner, adapter, and collector intentionally pass URLs through and do not append SSL parameters.
 ```
 
 Finally, the branch has targeted tests for the changed behavior. These are the quickest commands to run when editing this area: reset-state tests for adapter semantics, collector orchestration tests for stats-only mode, workload tests for verifier/invariant/action behavior, and load tests for runner/client wiring.

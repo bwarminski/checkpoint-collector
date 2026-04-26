@@ -523,12 +523,15 @@ PlanetScale soak targets an existing benchmark branch and resets that branch bef
 
 Before running it, enable `pg_stat_statements` for the PlanetScale branch in the dashboard, apply the extension change, and run `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` in the benchmark database.
 
-Use PgBouncer for app traffic and a direct connection for setup/stat polling:
+Use the direct PlanetScale connection for app traffic, setup, and stat polling.
+Export the complete canonical URL, including SSL parameters; the runner does not
+append or normalize them.
 
 ```bash
-export DATABASE_URL='postgresql://USER:PASSWORD@HOST:6432/DATABASE?sslmode=require'
-export BENCH_ADAPTER_PG_ADMIN_URL='postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require'
-export POSTGRES_URL="$BENCH_ADAPTER_PG_ADMIN_URL"
+export PLANETSCALE_DATABASE_URL='postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'
+export DATABASE_URL="$PLANETSCALE_DATABASE_URL"
+export BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL"
+export POSTGRES_URL="$PLANETSCALE_DATABASE_URL"
 ```
 
 Run a reset/reseed checkpoint:
