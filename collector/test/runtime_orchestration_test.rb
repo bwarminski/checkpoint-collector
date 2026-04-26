@@ -108,9 +108,40 @@ class RuntimeOrchestrationTest < Minitest::Test
     assert_equal ["checkpoint_demo", "checkpoint_demo"], clickhouse_service.database_params
   end
 
+  def test_run_once_pass_can_skip_log_ingestion_while_collecting_stats
+    events = []
+    clickhouse_service = FakeClickhouseService.new(events: events)
+    observed_offsets = []
+    stats_connections = []
+    clickhouse_connections = []
+
+    runtime = build_runtime(
+      events: events,
+      clickhouse_service: clickhouse_service,
+      observed_offsets: observed_offsets,
+      stats_connections: stats_connections,
+      clickhouse_connections: clickhouse_connections,
+      log_reader: lambda do |_, byte_offset|
+        observed_offsets << byte_offset
+        raise "log reader should not be called"
+      end,
+      log_ingestion_enabled: false,
+    )
+
+    runtime.run_once_pass
+
+    assert_equal [], observed_offsets
+    assert_equal [
+      [:stats_exec, 1, Collector::STATS_SQL],
+      [:stats_exec, 1, Collector::INFO_SQL],
+      [:insert, 1, "query_events"],
+      [:stats_close, 1],
+    ], events
+  end
+
   private
 
-  def build_runtime(events:, clickhouse_service:, observed_offsets:, stats_connections:, clickhouse_connections:, log_reader:, clickhouse_url: "http://clickhouse:8123")
+  def build_runtime(events:, clickhouse_service:, observed_offsets:, stats_connections:, clickhouse_connections:, log_reader:, clickhouse_url: "http://clickhouse:8123", log_ingestion_enabled: true)
     pg = FakePg.new do |url|
       connection = StatsConnection.new(
         id: stats_connections.length + 1,
@@ -148,6 +179,7 @@ class RuntimeOrchestrationTest < Minitest::Test
       state_store_class: ClickhouseLogStateStore,
       state_store_transport: clickhouse_service.method(:call),
       log_reader: log_reader,
+      log_ingestion_enabled: log_ingestion_enabled,
     )
   end
 
