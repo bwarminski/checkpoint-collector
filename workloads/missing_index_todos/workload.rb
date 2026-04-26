@@ -20,7 +20,7 @@ module Load
         end
 
         def scale
-          Load::Scale.new(rows_per_table: 100_000, seed: 42, extra: { open_fraction: 0.6, user_count: 1_000 })
+          Load::Scale.new(rows_per_table: 100_000, seed: 42, extra: { open_fraction: 0.6, user_count: 100 })
         end
 
         def actions
@@ -30,7 +30,7 @@ module Load
             Load::ActionEntry.new(Actions::CreateTodo, 7),
             Load::ActionEntry.new(Actions::CloseTodo, 7),
             Load::ActionEntry.new(Actions::DeleteCompletedTodos, 3),
-            Load::ActionEntry.new(Actions::FetchCounts, 2),
+            Load::ActionEntry.new(Actions::FetchCounts, 0),
             Load::ActionEntry.new(Actions::SearchTodos, 3),
           ]
         end

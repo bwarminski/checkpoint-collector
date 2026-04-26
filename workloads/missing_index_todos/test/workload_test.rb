@@ -9,15 +9,15 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     workload = Load::Workloads::MissingIndexTodos::Workload.new
 
     assert_equal "missing-index-todos", workload.name
-    assert_equal Load::Scale.new(rows_per_table: 100_000, extra: { open_fraction: 0.6, user_count: 1_000 }, seed: 42), workload.scale
-    assert_equal 1_000, workload.scale.extra.fetch(:user_count)
+    assert_equal Load::Scale.new(rows_per_table: 100_000, extra: { open_fraction: 0.6, user_count: 100 }, seed: 42), workload.scale
+    assert_equal 100, workload.scale.extra.fetch(:user_count)
     assert_equal [
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::ListOpenTodos, 68),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::ListRecentTodos, 12),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::CreateTodo, 7),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::CloseTodo, 7),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::DeleteCompletedTodos, 3),
-      Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::FetchCounts, 2),
+      Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::FetchCounts, 0),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::SearchTodos, 3),
     ], workload.actions
     assert_equal Load::LoadPlan.new(workers: 16, duration_seconds: 60, rate_limit: :unlimited, seed: nil), workload.load_plan
