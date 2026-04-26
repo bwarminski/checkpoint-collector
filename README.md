@@ -407,7 +407,103 @@ Useful signals:
   - a very long `reset-state` usually means template rebuild or large seed work
   - a short `start` plus many request failures means the app booted, but the endpoint could not keep up with the workload
 
-### 6. Compare app time vs database time
+### 6. Check which query family dominated in ClickHouse
+
+When the oracle fails on dominance, or when the run feels slower than you
+expected, the next question is not "was Postgres slow?" It is "which query
+family actually consumed the most total time during the run window?"
+
+The process is:
+
+1. read the run window and target `query_ids` from `run.json`
+2. ask ClickHouse for the top queryids in that window by estimated total exec
+   time
+3. compare the workload's target queryid against the top challengers
+4. if a challenger is winning, resolve the query text in `pg_stat_statements`
+
+Start from the run record:
+
+```bash
+latest=$(ls -1dt runs/* | head -n1)
+sed -n '1,220p' "$latest/run.json"
+```
+
+The fields you need are:
+
+- `window.start_ts`
+- `window.end_ts`
+- `query_ids`
+
+Then ask ClickHouse for the top queryids in that run window:
+
+```bash
+docker compose exec clickhouse clickhouse-client --query "
+  SELECT
+    toString(queryid) AS queryid,
+    toString(sum(total_exec_count)) AS total_calls,
+    toString(round(sum(total_exec_count * avg_exec_time_ms), 1)) AS total_exec_time_ms_estimate
+  FROM query_intervals
+  WHERE interval_ended_at BETWEEN parseDateTime64BestEffort('2026-04-26 13:11:29 UTC')
+    AND parseDateTime64BestEffort('2026-04-26 13:12:29 UTC') + INTERVAL 90 SECOND
+  GROUP BY queryid
+  ORDER BY sum(total_exec_count * avg_exec_time_ms) DESC
+  LIMIT 10
+"
+```
+
+Representative output from this branch while diagnosing dominance drift:
+
+```text
+queryid               total_calls  total_exec_time_ms_estimate
+7354691429047661116  1000         6020.9
+-3708805788459505815  161         209.9
+```
+
+That told us the intended target query was not actually winning. The dominant
+family was the counts-side N+1:
+
+- `7354691429047661116` -> `SELECT COUNT(*) FROM "todos" WHERE "todos"."user_id" = $1`
+- `-3708805788459505815` -> tenant-scoped open todos
+
+Once you know the top queryid, resolve it in Postgres:
+
+```bash
+docker compose exec postgres psql -U postgres -d checkpoint_demo -P pager=off -c "
+  select
+    queryid::text,
+    calls,
+    round(mean_exec_time::numeric, 1) as mean_exec_time_ms,
+    left(query, 160) as query
+  from pg_stat_statements
+  where queryid in (7354691429047661116, -3708805788459505815)
+  order by total_exec_time desc;
+"
+```
+
+Representative output:
+
+```text
+      queryid       | calls | mean_exec_time_ms | query
+--------------------+-------+-------------------+------------------------------------------------------------
+7354691429047661116 | 1000  | 6.0               | SELECT COUNT(*) FROM "todos" WHERE "todos"."user_id" = $1
+-3708805788459505815 | 161  | 1.3               | SELECT "todos".* FROM "todos" WHERE "todos"."user_id" = $1
+```
+
+How to interpret it:
+
+- if the workload `query_ids` are at the top, the oracle should usually pass
+  dominance unless the margin is too small
+- if a different queryid is winning, the run is telling you the workload shape
+  has shifted, not that the oracle is wrong
+- `total_exec_time_ms_estimate` is more important than call count here; a query
+  with fewer calls can still dominate if each call is much more expensive
+
+On this branch, that process is how we discovered that `/api/todos/counts` was
+still load-bearing during tuning. It led to lowering `user_count` and setting
+`FetchCounts` weight to `0` so the tenant open-todos path stayed dominant for
+the current gate.
+
+### 7. Compare app time vs database time
 
 If requests time out but you suspect the database is still fine, compare the app
 path with the database's view of the query:
@@ -425,7 +521,7 @@ If Postgres shows sub-second or low-single-digit-second execution while the HTTP
 client times out, the bottleneck is probably in app-side queueing, object
 materialization, or JSON rendering rather than the SQL itself.
 
-### 7. Stop the app when finished
+### 8. Stop the app when finished
 
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
