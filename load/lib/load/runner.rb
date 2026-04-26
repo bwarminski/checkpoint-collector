@@ -223,17 +223,6 @@ module Load
       @runtime.clock.call
     end
 
-    def workload_file
-      return @settings.workload_file if @settings.workload_file
-
-      path = @workload.class.instance_method(:name).source_location&.first
-      return nil unless path
-
-      expanded = File.expand_path(path)
-      cwd = "#{Dir.pwd}/"
-      expanded.start_with?(cwd) ? expanded.delete_prefix(cwd) : expanded
-    end
-
     def stop_adapter_safely(result, request_totals)
       pid = @run_state.snapshot.dig(:adapter, :pid)
       return result unless pid
@@ -255,27 +244,6 @@ module Load
       required_keys.each { |key| response.fetch(key) }
     rescue KeyError
       raise AdapterClient::AdapterError, "invalid adapter #{response_name} response"
-    end
-
-    def deep_merge(left, right)
-      left.merge(right) do |_, left_value, right_value|
-        if left_value.is_a?(Hash) && right_value.is_a?(Hash)
-          deep_merge(left_value, right_value)
-        else
-          right_value
-        end
-      end
-    end
-
-    def deep_copy(value)
-      case value
-      when Hash
-        value.each_with_object({}) { |(key, inner_value), copy| copy[key] = deep_copy(inner_value) }
-      when Array
-        value.map { |inner_value| deep_copy(inner_value) }
-      else
-        value
-      end
     end
 
     class InternalStopFlag
