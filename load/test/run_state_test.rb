@@ -52,6 +52,77 @@ class RunStateTest < Minitest::Test
     end
   end
 
+  def test_merge_isolates_nested_caller_owned_data
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: dir)
+      state = build_state(run_record:)
+
+      state.write_initial
+      fragment = {
+        adapter: {
+          describe: {
+            features: ["read", "write"],
+          },
+        },
+      }
+
+      state.merge(fragment)
+      fragment.fetch(:adapter).fetch(:describe).fetch(:features) << "mutated"
+
+      assert_equal ["read", "write"], state.snapshot.dig(:adapter, :describe, :features)
+    end
+  end
+
+  def test_append_warning_isolates_nested_caller_owned_data
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: dir)
+      state = build_state(run_record:)
+
+      state.write_initial
+      warning = {
+        type: "invariant_breach",
+        message: "too low",
+        checks: [
+          { name: "open_count", breaches: ["open_count low"] },
+        ],
+      }
+
+      state.append_warning(warning)
+      warning.fetch(:checks).first.fetch(:breaches) << "mutated"
+
+      assert_equal ["open_count low"], state.snapshot.fetch(:warnings).first.fetch(:checks).first.fetch(:breaches)
+    end
+  end
+
+  def test_append_invariant_sample_isolates_nested_caller_owned_data
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: dir)
+      state = build_state(run_record:)
+
+      state.write_initial
+      checks = [
+        {
+          name: "open_count",
+          actual: 100,
+          min: 300,
+          max: nil,
+          breach: true,
+          breaches: ["open_count low"],
+        },
+      ]
+
+      state.append_invariant_sample(
+        sampled_at: "2026-04-25 12:00:00 UTC",
+        breach: true,
+        breaches: ["open_count low"],
+        checks:,
+      )
+      checks.first.fetch(:breaches) << "mutated"
+
+      assert_equal ["open_count low"], state.snapshot.fetch(:invariant_samples).first.fetch(:checks).first.fetch(:breaches)
+    end
+  end
+
   def test_finish_writes_request_totals_and_error_code
     Dir.mktmpdir do |dir|
       run_record = Load::RunRecord.new(run_dir: dir)
@@ -68,6 +139,24 @@ class RunStateTest < Minitest::Test
       payload = run_record.read_run_json
       assert_equal 10, payload.dig("outcome", "requests_total")
       assert_equal "adapter_error", payload.dig("outcome", "error_code")
+    end
+  end
+
+  def test_finish_writes_window_end_ts_when_aborted_without_success
+    Dir.mktmpdir do |dir|
+      run_record = Load::RunRecord.new(run_dir: dir)
+      state = build_state(run_record:)
+
+      state.write_initial
+      state.finish(
+        now: Time.utc(2026, 4, 25, 12, 1, 0),
+        request_totals: { total: 0, ok: 0, error: 0 },
+        aborted: true,
+        error_code: "no_successful_requests",
+      )
+
+      payload = run_record.read_run_json
+      assert_equal "2026-04-25 12:01:00 UTC", payload.dig("window", "end_ts")
     end
   end
 

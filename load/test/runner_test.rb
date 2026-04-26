@@ -1074,6 +1074,7 @@ class RunnerTest < Minitest::Test
 
     assert_equal 3, exit_code
     assert_equal "no_successful_requests", run_record.outcome.fetch(:error_code)
+    assert_equal true, run_record.read_run_json.fetch("window").key?("end_ts")
   end
 
   def test_runner_writes_spec_run_json_fields_on_happy_path

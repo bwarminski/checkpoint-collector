@@ -96,6 +96,7 @@
 - 2026-04-25 runner decomposition design: keep `Load::Runner` as the top-level use-case shell, but extract `RunState`, `LoadExecution`, and `InvariantMonitor` as the first real boundary cuts; do not widen scope into `AdapterSession` yet.
 - 2026-04-25 Task 1 extraction start: `RunState` is being extracted next; the focused spec needs to cover isolated snapshot copies because the runner currently mutates shared state under a mutex and the new boundary must keep run.json writes from aliasing caller-owned data.
 - 2026-04-25 Task 1 extraction result: `TrackingBuffer` now pins window start through `runner.run_state` and must call `current_time` through `send`; otherwise the private-method boundary breaks worker requests and the run falls back to `no_successful_requests`.
+- 2026-04-25 Task 1 review fix: `RunState` now has regression coverage for nested caller-owned payload isolation on `merge`, `append_warning`, and `append_invariant_sample`, and the runner no-success path is anchored to keep writing `window.end_ts`.
 
 - 2026-04-25 Task 1: moved workload knobs into `Load::Scale#extra`; `Scale` now validates reserved keys and emits only `ROWS_PER_TABLE` plus uppercase extras.
 - 2026-04-25 verification: `load/test/scale_test.rb`, `load/test/adapter_client_test.rb`, `load/test/cli_test.rb`, `load/test/workload_registry_test.rb`, `load/test/runner_test.rb`, and `workloads/missing_index_todos/test/workload_test.rb` all passed under `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby ...`.
