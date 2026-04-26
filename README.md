@@ -58,6 +58,48 @@ bin/load soak --workload missing-index-todos \
   --app-root /home/bjw/db-specialist-demo
 ```
 
+### Docker Compose Collector Modes
+
+The compose collector defaults to the local Docker path: it reads
+`postgresql://postgres:postgres@postgres:5432/checkpoint_demo`, writes to
+`http://clickhouse:8123`, and ingests the mounted Postgres JSON log volume.
+
+```bash
+docker compose up -d --build
+```
+
+Use shell variables when the collector container should poll a different
+Postgres target or ClickHouse endpoint:
+
+```bash
+COLLECTOR_POSTGRES_URL='postgresql://postgres:postgres@postgres:5432/checkpoint_demo' \
+COLLECTOR_CLICKHOUSE_URL=http://clickhouse:8123 \
+COLLECTOR_INTERVAL_SECONDS=5 \
+docker compose up -d --force-recreate collector
+```
+
+For stats-only mode, pass `COLLECTOR_DISABLE_LOG_INGESTION=1`. This keeps
+`pg_stat_statements` polling enabled but skips reading the mounted Postgres log
+file.
+
+```bash
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+docker compose up -d --force-recreate collector
+```
+
+For PlanetScale from the compose collector, point `COLLECTOR_POSTGRES_URL` at
+the complete PlanetScale direct URL and keep stats-only mode enabled:
+
+```bash
+COLLECTOR_POSTGRES_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+docker compose up -d --force-recreate collector
+```
+
+The compose collector runs inside the Docker network, so its default
+`COLLECTOR_CLICKHOUSE_URL` is `http://clickhouse:8123`. Host-side commands use
+`CLICKHOUSE_URL=http://localhost:8123` instead.
+
 ## Load Runner
 
 The top-level entrypoint is `bin/load run`, which combines a workload, an
@@ -348,6 +390,15 @@ POSTGRES_URL="$POSTGRES_URL" \
 CLICKHOUSE_URL=http://localhost:8123 \
 BUNDLE_GEMFILE=collector/Gemfile \
 bundle exec ruby collector/bin/collector
+```
+
+To run the Docker Compose collector against PlanetScale instead, use the
+compose mode documented above:
+
+```bash
+COLLECTOR_POSTGRES_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+docker compose up -d --force-recreate collector
 ```
 
 For a one-pass checkpoint, load the collector entrypoint explicitly:

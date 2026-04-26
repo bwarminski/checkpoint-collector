@@ -65,4 +65,14 @@ class ComposeStackTest < Minitest::Test
     assert_includes compose, "- postgres_logs:/var/log/postgresql:ro"
     refute_includes compose, "- postgres_data:/var/lib/postgresql/data:ro"
   end
+
+  def test_collector_compose_environment_supports_local_and_remote_modes
+    compose = File.read(File.expand_path("../../docker-compose.yml", __dir__))
+
+    assert_includes compose, "POSTGRES_URL=${COLLECTOR_POSTGRES_URL:-postgresql://postgres:postgres@postgres:5432/checkpoint_demo}"
+    assert_includes compose, "CLICKHOUSE_URL=${COLLECTOR_CLICKHOUSE_URL:-http://clickhouse:8123}"
+    assert_includes compose, "COLLECTOR_INTERVAL_SECONDS=${COLLECTOR_INTERVAL_SECONDS:-5}"
+    assert_includes compose, "POSTGRES_LOG_PATH=${POSTGRES_LOG_PATH:-/var/log/postgresql/postgresql}"
+    assert_includes compose, "COLLECTOR_DISABLE_LOG_INGESTION"
+  end
 end

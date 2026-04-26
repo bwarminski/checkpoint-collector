@@ -43,6 +43,16 @@ class LoadSmokeTargetTest < Minitest::Test
     assert_includes readme, "bin/load soak"
   end
 
+  def test_readme_documents_compose_collector_modes
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+
+    assert_includes readme, "### Docker Compose Collector Modes"
+    assert_includes readme, "COLLECTOR_POSTGRES_URL"
+    assert_includes readme, "COLLECTOR_CLICKHOUSE_URL"
+    assert_includes readme, "COLLECTOR_DISABLE_LOG_INGESTION=1"
+    assert_includes readme, "docker compose up -d --force-recreate collector"
+  end
+
   def test_planetscale_docs_define_canonical_url_without_makefile_ssl_params
     readme = File.read(File.expand_path("../../README.md", __dir__))
     makefile = File.read(File.expand_path("../../Makefile", __dir__))
