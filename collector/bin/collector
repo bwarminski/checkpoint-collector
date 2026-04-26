@@ -103,7 +103,8 @@ class CollectorRuntime
     clickhouse_connection_class: ClickhouseConnection,
     state_store_class: ClickhouseLogStateStore,
     state_store_transport: nil,
-    log_reader: nil
+    log_reader: nil,
+    log_ingestion_enabled: ENV.fetch("COLLECTOR_DISABLE_LOG_INGESTION", nil).nil?
   )
     @interval_seconds = interval_seconds
     @postgres_url = postgres_url
@@ -120,6 +121,7 @@ class CollectorRuntime
     @state_store_class = state_store_class
     @state_store_transport = state_store_transport
     @log_reader = log_reader || default_log_reader
+    @log_ingestion_enabled = log_ingestion_enabled
   end
 
   def run_forever
@@ -131,13 +133,15 @@ class CollectorRuntime
     clickhouse_connection = @clickhouse_connection_class.new(base_url: @clickhouse_url)
     state_store = @state_store_class.new(base_url: @clickhouse_url, transport: @state_store_transport)
 
-    @log_ingester_class.new(
-      log_reader: @log_reader,
-      clickhouse_connection: clickhouse_connection,
-      state_store: state_store,
-      clock: @clock,
-      stderr: @stderr
-    ).ingest_file(@log_file)
+    if @log_ingestion_enabled
+      @log_ingester_class.new(
+        log_reader: @log_reader,
+        clickhouse_connection: clickhouse_connection,
+        state_store: state_store,
+        clock: @clock,
+        stderr: @stderr
+      ).ingest_file(@log_file)
+    end
 
     @collector_class.new(
       stats_connection: stats_connection,
@@ -184,6 +188,7 @@ if $PROGRAM_NAME == __FILE__
     interval_seconds: Integer(ENV.fetch("COLLECTOR_INTERVAL_SECONDS", "5")),
     postgres_url: ENV.fetch("POSTGRES_URL"),
     clickhouse_url: ENV.fetch("CLICKHOUSE_URL"),
-    log_file: ENV.fetch("POSTGRES_LOG_PATH", CollectorRuntime::DEFAULT_LOG_FILE)
+    log_file: ENV.fetch("POSTGRES_LOG_PATH", CollectorRuntime::DEFAULT_LOG_FILE),
+    log_ingestion_enabled: ENV.fetch("COLLECTOR_DISABLE_LOG_INGESTION", nil).nil?
   ).run_forever
 end
