@@ -6,24 +6,7 @@ require "uri"
 module RailsAdapter
   module Commands
     class ResetState
-      QUERY_IDS_SCRIPT = {
-        "missing-index-todos" => <<~RUBY.strip,
-          require "json"
-          user = User.first or raise("expected a seeded user")
-          user.todos.with_status("open").ordered_by_created_desc.page(1, 50).load
-          connection = ActiveRecord::Base.connection
-          query_ids = [
-            %(SELECT "todos".* FROM "todos" WHERE "todos"."user_id" = $1 AND "todos"."status" = $2 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $3 OFFSET $4),
-          ].flat_map do |query_text|
-            connection.exec_query(
-              "SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = \#{connection.quote(query_text)}"
-            ).rows.flatten
-          end.uniq
-          $stdout.write(JSON.generate(query_ids: query_ids))
-        RUBY
-      }.freeze
-
-      def initialize(app_root:, seed:, env_pairs:, workload: nil, command_runner: RailsAdapter::CommandRunner.new, template_cache: RailsAdapter::TemplateCache.new, reset_strategy: ENV.fetch("BENCH_ADAPTER_RESET_STRATEGY", "local"), clock: -> { Time.now.to_f })
+      def initialize(app_root:, seed:, env_pairs:, workload: nil, command_runner: RailsAdapter::CommandRunner.new, template_cache: RailsAdapter::TemplateCache.new, reset_strategy: ENV.fetch("BENCH_ADAPTER_RESET_STRATEGY", "local"), workload_root: File.join(RailsAdapter::REPO_ROOT, "workloads"), clock: -> { Time.now.to_f })
         @app_root = app_root
         @workload = workload
         @seed = seed
@@ -31,6 +14,7 @@ module RailsAdapter
         @command_runner = command_runner
         @template_cache = template_cache
         @reset_strategy = reset_strategy
+        @workload_root = workload_root
         @clock = clock
       end
 
@@ -127,13 +111,13 @@ module RailsAdapter
       end
 
       def capture_query_ids
-        script = QUERY_IDS_SCRIPT[@workload]
-        return nil unless script
+        path = query_ids_script_path
+        return nil unless path
 
         result = @command_runner.capture3(
           "bin/rails",
           "runner",
-          script,
+          path,
           env: rails_env,
           chdir: @app_root,
           command_name: "reset-state",
@@ -141,6 +125,13 @@ module RailsAdapter
         raise command_failure_message("query id capture failed", result.stderr) unless result.success?
 
         JSON.parse(result.stdout).fetch("query_ids")
+      end
+
+      def query_ids_script_path
+        return nil unless @workload
+
+        path = File.join(@workload_root, @workload.tr("-", "_"), "rails", "reset_state_query_ids.rb")
+        File.exist?(path) ? path : nil
       end
 
       def command_failure_message(message, detail)
