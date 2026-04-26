@@ -10,12 +10,14 @@ module Load
         TOTAL_COUNT_SQL = "SELECT reltuples::bigint AS count FROM pg_class WHERE relname = 'todos'".freeze
         DISABLE_TRACKING_SQL = "SET pg_stat_statements.track = 'none'".freeze
 
-        def initialize(pg:, database_url:, open_floor:, total_floor:, total_ceiling:)
+        def initialize(pg:, database_url:, open_floor:, total_floor:, total_ceiling:, stderr: $stderr)
           @pg = pg
           @database_url = database_url
           @open_floor = open_floor
           @total_floor = total_floor
           @total_ceiling = total_ceiling
+          @stderr = stderr
+          @tracking_warning_emitted = false
         end
 
         def call
@@ -37,6 +39,10 @@ module Load
         def disable_tracking(connection)
           connection.exec(DISABLE_TRACKING_SQL)
         rescue PG::InsufficientPrivilege
+          unless @tracking_warning_emitted
+            @stderr.puts("warning: unable to disable pg_stat_statements tracking for invariant sampler")
+            @tracking_warning_emitted = true
+          end
           nil
         end
 

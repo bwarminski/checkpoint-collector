@@ -45,6 +45,7 @@ class MissingIndexTodosInvariantSamplerTest < Minitest::Test
   end
 
   def test_sampler_returns_counts_when_tracking_cannot_be_disabled
+    stderr = StringIO.new
     pg = FakePg.new(
       open_count: 35_000,
       total_count: 100_000,
@@ -56,9 +57,11 @@ class MissingIndexTodosInvariantSamplerTest < Minitest::Test
       open_floor: 30_000,
       total_floor: 80_000,
       total_ceiling: 200_000,
+      stderr:,
     )
 
     sample = sampler.call
+    second_sample = sampler.call
 
     assert_includes pg.connection.session_sql, Load::Workloads::MissingIndexTodos::InvariantSampler::DISABLE_TRACKING_SQL
     assert_includes pg.connection.session_sql, Load::Workloads::MissingIndexTodos::InvariantSampler::OPEN_COUNT_SQL
@@ -66,6 +69,9 @@ class MissingIndexTodosInvariantSamplerTest < Minitest::Test
     assert_equal ["open_count", "total_count"], sample.checks.map(&:name)
     assert_equal [35_000, 100_000], sample.checks.map(&:actual)
     assert_equal true, sample.healthy?
+    assert_equal ["open_count", "total_count"], second_sample.checks.map(&:name)
+    assert_equal 1, stderr.string.lines.count
+    assert_includes stderr.string, "warning: unable to disable pg_stat_statements tracking"
   end
 
   class FakePg
