@@ -4,6 +4,14 @@ require "stringio"
 require_relative "test_helper"
 
 class InvariantMonitorTest < Minitest::Test
+  def test_config_rejects_invalid_policy
+    error = assert_raises(ArgumentError) do
+      Load::InvariantMonitor::Config.new(policy: :bogus, interval_seconds: 1.0)
+    end
+
+    assert_equal "invalid invariant policy: :bogus", error.message
+  end
+
   def test_state_increment_breaches_returns_new_count
     state = Load::InvariantMonitor::State.new
 

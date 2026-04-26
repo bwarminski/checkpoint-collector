@@ -8,6 +8,16 @@ module Load
     Shutdown = Class.new(StandardError)
 
     Config = Data.define(:policy, :interval_seconds) do
+      VALID_POLICIES = [:off, :warn, :enforce].freeze
+
+      def initialize(policy:, interval_seconds:)
+        unless VALID_POLICIES.include?(policy)
+          raise ArgumentError, "invalid invariant policy: #{policy.inspect}"
+        end
+
+        super
+      end
+
       def off?
         policy == :off
       end
