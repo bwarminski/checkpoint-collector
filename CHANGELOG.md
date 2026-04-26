@@ -16,6 +16,7 @@
 
 ### Changed
 
+- **`run.json` schema_version 1 → 2.** `invariant_samples` entries no longer store fixture-specific top-level fields like `open_count`, `total_count`, `open_floor`, `total_floor`, and `total_ceiling`. They now store a workload-agnostic `checks` array of `{name, actual, min, max, breach, breaches}` records. Downstream tooling reading `run.json` should bump its expected schema version.
 - **Pathology contract is tenant-scoped.** The bad query is no longer "no useful index at all" — it's "the app uses `index_todos_on_user_id` to find one tenant slice, then must still filter `status` and sort inside that slice." Verifier and oracle reflect this access pattern.
 - **Pre-flight gate ordering.** Runner executes `probe_readiness → verify_fixture → start_workers`. Soak runs share the gate.
 - **Reset-state queryid fingerprint.** Adapter warms the tenant-scoped query shape so `pg_stat_statements` resolves a stable queryid the oracle reuses on lookup fallback.
