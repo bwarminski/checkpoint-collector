@@ -14,13 +14,18 @@ module Load
           end
 
           def call
-            client.get("/api/todos/search?q=#{URI.encode_www_form_component(query)}")
+            client.get("/api/todos/search?user_id=#{sample_user_id}&q=#{URI.encode_www_form_component(query)}")
           end
 
           private
 
           def query
             ctx.fetch(:query, "foo")
+          end
+
+          def sample_user_id
+            user_count = Integer(ctx.fetch(:scale).extra.fetch(:user_count))
+            rng.rand(1..user_count)
           end
         end
       end

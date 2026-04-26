@@ -19,7 +19,7 @@ module Load
         end
 
         def scale
-          Load::Scale.new(rows_per_table: 100_000, extra: { open_fraction: 0.6 }, seed: 42)
+          Load::Scale.new(rows_per_table: 100_000, seed: 42, extra: { open_fraction: 0.6, user_count: 1_000 })
         end
 
         def actions

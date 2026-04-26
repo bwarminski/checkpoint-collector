@@ -1722,6 +1722,8 @@ class RunnerTest < Minitest::Test
   end
 
   class RecordingRequestHttp < FakeHttp
+    Response = Struct.new(:code, :body)
+
     attr_reader :create_user_ids, :delete_user_ids, :closed_todo_ids
 
     def initialize(stop_flag:, stop_after:)
@@ -1736,9 +1738,9 @@ class RunnerTest < Minitest::Test
 
     def request(request)
       @request_count += 1
-      record_request(request)
+      response = record_request(request)
       @stop_flag.trigger(:sigterm) if @request_count >= @stop_after
-      Response.new("200")
+      response
     end
 
     private
@@ -1747,10 +1749,18 @@ class RunnerTest < Minitest::Test
       case request.path
       when "/api/todos"
         @create_user_ids << JSON.parse(request.body).fetch("user_id")
-      when "/api/todos/completed"
-        @delete_user_ids << JSON.parse(request.body).fetch("user_id")
+        Response.new("200", "")
+      when %r{\A/api/todos/completed\?user_id=(\d+)\z}
+        @delete_user_ids << Regexp.last_match(1).to_i
+        Response.new("200", "")
+      when %r{\A/api/todos\?user_id=(\d+)&status=open\z}
+        user_id = Regexp.last_match(1).to_i
+        Response.new("200", JSON.generate([{ "id" => user_id }]))
       when %r{\A/api/todos/(\d+)\z}
         @closed_todo_ids << Regexp.last_match(1).to_i
+        Response.new("200", "")
+      else
+        Response.new("200", "")
       end
     end
   end
@@ -1774,7 +1784,7 @@ class RunnerTest < Minitest::Test
     end
 
     def scale
-      Load::Scale.new(rows_per_table: 100, seed: 42)
+      Load::Scale.new(rows_per_table: 100, seed: 42, extra: { user_count: 100 })
     end
 
     def actions

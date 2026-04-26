@@ -9,7 +9,8 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     workload = Load::Workloads::MissingIndexTodos::Workload.new
 
     assert_equal "missing-index-todos", workload.name
-    assert_equal Load::Scale.new(rows_per_table: 100_000, extra: { open_fraction: 0.6 }, seed: 42), workload.scale
+    assert_equal Load::Scale.new(rows_per_table: 100_000, extra: { open_fraction: 0.6, user_count: 1_000 }, seed: 42), workload.scale
+    assert_equal 1_000, workload.scale.extra.fetch(:user_count)
     assert_equal [
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::ListOpenTodos, 68),
       Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::ListRecentTodos, 12),
@@ -48,11 +49,12 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
   def test_list_open_todos_gets_open_status_endpoint
     response = Object.new
     client = FakeClient.new(response)
-    action = Load::Workloads::MissingIndexTodos::Actions::ListOpenTodos.new(rng: Random.new(42), ctx: {}, client:)
+    scale = Load::Scale.new(rows_per_table: 100_000, extra: { user_count: 1_000 }, seed: 42)
+    action = Load::Workloads::MissingIndexTodos::Actions::ListOpenTodos.new(rng: Random.new(42), ctx: { scale: }, client:)
 
     assert_equal :list_open_todos, action.name
     assert_same response, action.call
-    assert_equal ["/api/todos?status=open"], client.paths
+    assert_equal ["/api/todos?user_id=103&status=open"], client.paths
   end
 
   class FakeClient

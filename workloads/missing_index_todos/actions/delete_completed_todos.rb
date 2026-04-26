@@ -12,7 +12,7 @@ module Load
           end
 
           def call
-            client.request(:delete, "/api/todos/completed", body: { user_id: user_id })
+            client.request(:delete, "/api/todos/completed?user_id=#{user_id}")
           end
 
           private
@@ -22,10 +22,8 @@ module Load
           end
 
           def sample_user_id
-            scale = ctx[:scale]
-            return 1 unless scale
-
-            rng.rand(1..scale.rows_per_table)
+            user_count = Integer(ctx.fetch(:scale).extra.fetch(:user_count))
+            rng.rand(1..user_count)
           end
         end
       end
