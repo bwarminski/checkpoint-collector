@@ -36,8 +36,11 @@ Add focused assertions for the future `State` responsibilities where useful:
 
 - breach counter increments return the new count
 - stored failure is cleared after one raise path
+- `Sink` delegates `sample`, `warning`, `stderr_warning`, and `breach_stop` without any policy branching
 
 Do not rewrite the existing broad behavior tests if a narrower addition is enough.
+
+For the current sleeping-path test at `load/test/invariant_monitor_test.rb:103`, do not rely on `instance_variable_set(:@sleeping, true)` after the refactor. Restructure that test to drive the real sleep path instead of mutating a flat ivar that will move into `State`.
 
 ### Step 2. Run the focused test file and confirm failure first if new tests were added
 
@@ -81,7 +84,7 @@ Give it small delegation methods:
 - `sample(sample)`
 - `warning(warning_hash)`
 - `stderr_warning(message)`
-- `stop(reason)`
+- `breach_stop(reason)`
 
 `Sink` must not branch on policy.
 
@@ -102,8 +105,20 @@ Add methods:
 - `record_failure`
 - `clear_failure`
 
-`increment_breaches` must return the new count.
-`clear_failure` must return-and-clear atomically.
+Keep the threshold decision in `InvariantMonitor`: `increment_breaches` must return the new count so the monitor remains the place that decides whether `>= 3` triggers `:invariant_breach`.
+
+`clear_failure` must preserve the current atomic return-and-clear behavior.
+
+`with_sleeping` must not introduce its own `Thread.handle_interrupt` block. Its body should only toggle the sleeping flag around `yield`:
+
+```ruby
+def with_sleeping
+  @mutex.synchronize { @sleeping = true }
+  yield
+ensure
+  @mutex.synchronize { @sleeping = false }
+end
+```
 
 ### Step 4. Change the constructor to grouped inputs
 
@@ -117,7 +132,27 @@ Refactor `Load::InvariantMonitor.new` to take:
 
 Remove the flat constructor fields that are now grouped into `Config` and `Sink`.
 
-### Step 5. Update `Load::Runner` call sites
+### Step 5. Migrate every constructor call site to the grouped shape
+
+Update all flat-shape constructor call sites to the grouped shape:
+
+- `load/test/invariant_monitor_test.rb:12`
+- `load/test/invariant_monitor_test.rb:34`
+- `load/test/invariant_monitor_test.rb:52`
+- `load/test/invariant_monitor_test.rb:70`
+- `load/test/invariant_monitor_test.rb:92`
+- `load/test/invariant_monitor_test.rb:113`
+- `load/lib/load/runner.rb:92-102`
+
+At those sites:
+
+- build `Load::InvariantMonitor::Config.new(policy:, interval_seconds:)`
+- build `Load::InvariantMonitor::Sink.new(on_sample:, on_warning:, on_breach_stop:, stderr:)`
+- keep `sampler:`, `stop_flag:`, and `sleeper:` flat
+
+For `load/test/invariant_monitor_test.rb:103`, restructure the test to drive the real sleep path instead of adding a special accessor for `State`.
+
+### Step 6. Update `Load::Runner` call site
 
 Update `load/lib/load/runner.rb` so monitor construction uses:
 
@@ -126,7 +161,9 @@ Update `load/lib/load/runner.rb` so monitor construction uses:
 
 Do not change runner behavior beyond the constructor call shape.
 
-### Step 6. Run focused tests and existing invariant runner locks
+### Step 7. Run focused tests and existing invariant runner locks
+
+The `test_runner_off_policy_skips_invariant_sampling` lock already exists by name in `load/test/runner_test.rb`, so keep using that exact name in the verification commands.
 
 Run:
 
@@ -158,7 +195,7 @@ Refactor `sample_once` so it reads as policy flow:
    - print warning in `warn`
    - return in `warn`
    - increment breaches in `enforce`
-   - stop on threshold
+   - call `@sink.breach_stop(:invariant_breach)` on threshold
 
 Keep policy branching inside the monitor.
 
@@ -171,6 +208,8 @@ Preserve the current `Thread.handle_interrupt` discipline:
 - immediate only during sleep
 - deferred during `sample_once`
 
+`State#with_sleeping` must only toggle sleeping state around `yield`. It must not add interrupt handling of its own.
+
 ### Step 3. Rewrite failure handling around `State#record_failure` and `clear_failure`
 
 When the sampler thread raises unexpectedly:
@@ -180,7 +219,7 @@ When the sampler thread raises unexpectedly:
 
 When `stop` runs:
 
-- clear and raise the stored failure once
+- preserve the current clear-and-raise-once behavior
 - do not raise again on repeated `stop` calls
 
 ### Step 4. Delete dead flat ivars and helper code
@@ -245,13 +284,11 @@ Run:
 
 ```bash
 git diff --check
-rg -n '@consecutive_breaches|@sleeping|@failure|@on_sample|@on_warning|@on_breach_stop|@interval_seconds|@policy|@stderr' load/lib/load/invariant_monitor.rb
 ```
 
 Pass criteria:
 
 - `git diff --check` is clean
-- the grep returns nothing for old flat monitor ivars
 
 ## Risks
 
@@ -270,3 +307,5 @@ Before declaring the work done, verify:
 - `warn`, `off`, and `enforce` behavior remain unchanged
 - repeated `stop` does not re-raise the same stored failure
 - `Thread.handle_interrupt` behavior is preserved
+- every flat-shape constructor call site was migrated
+- `Sink#breach_stop` naming is consistent
