@@ -114,6 +114,16 @@ class RunStateTest < Minitest::Test
     assert_equal "adapter_error", payload.dig("outcome", "error_code")
   end
 
+  def test_snapshot_returns_an_isolated_copy
+    state = build_state(run_record: FakeRunRecord.new)
+    state.write_initial
+
+    snapshot = state.snapshot
+    snapshot["warnings"] << "mutation"
+
+    assert_equal [], state.snapshot.fetch("warnings")
+  end
+
   private
 
   def build_state(run_record:)
@@ -330,6 +340,21 @@ initial_state
 
 with `RunState` calls.
 
+Delete the runner-owned state machinery after replacement:
+
+```ruby
+@state
+@state_mutex
+@window_started
+write_state
+snapshot_state
+initial_state
+pin_window_start
+append_warning
+append_invariant_sample
+outcome_payload
+```
+
 - [ ] **Step 7: Run the runner behavior locks**
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb`
@@ -352,7 +377,7 @@ git commit -m "refactor: extract run state"
 - Modify: `load/lib/load.rb`, `load/lib/load/runner.rb`
 - Test: `load/test/invariant_monitor_test.rb`, `load/test/runner_test.rb`
 
-- [ ] **Step 1: Write focused monitor tests for `enforce|warn|off`**
+- [ ] **Step 1: Write focused monitor tests for `enforce|warn|off` and thread lifecycle**
 
 ```ruby
 # load/test/invariant_monitor_test.rb
@@ -376,7 +401,7 @@ class InvariantMonitorTest < Minitest::Test
       stderr: StringIO.new,
     )
 
-    monitor.send(:sample_once)
+    monitor.sample_once
 
     assert_equal 1, warnings.length
     assert_equal [], stops
@@ -396,7 +421,7 @@ class InvariantMonitorTest < Minitest::Test
       stderr: StringIO.new,
     )
 
-    3.times { monitor.send(:sample_once) }
+    3.times { monitor.sample_once }
 
     assert_equal [:invariant_breach], stops
   end
@@ -415,6 +440,49 @@ class InvariantMonitorTest < Minitest::Test
     )
 
     assert_nil monitor.start
+  end
+
+  def test_monitor_stop_unblocks_thread_during_sleep
+    blocker = Queue.new
+    sleep_observed = Queue.new
+    monitor = Load::InvariantMonitor.new(
+      sampler: -> { sample(breach: false) },
+      policy: :enforce,
+      interval_seconds: 60.0,
+      stop_flag: Load::Runner::InternalStopFlag.new,
+      sleeper: ->(*) { sleep_observed << true; blocker.pop },
+      on_sample: ->(*) {},
+      on_warning: ->(*) {},
+      on_breach_stop: ->(*) {},
+      stderr: StringIO.new,
+    )
+
+    thread = monitor.start
+    sleep_observed.pop
+    monitor.stop(thread)
+
+    refute thread.alive?
+  end
+
+  def test_monitor_propagates_sampler_failure_as_breach_stop
+    stops = []
+    monitor = Load::InvariantMonitor.new(
+      sampler: -> { raise "boom" },
+      policy: :enforce,
+      interval_seconds: 0.0,
+      stop_flag: Load::Runner::InternalStopFlag.new,
+      sleeper: ->(*) {},
+      on_sample: ->(*) {},
+      on_warning: ->(*) {},
+      on_breach_stop: ->(reason) { stops << reason },
+      stderr: StringIO.new,
+    )
+
+    thread = monitor.start
+    thread.join
+
+    assert_equal [:invariant_sampler_failed], stops
+    assert_raises(Load::InvariantMonitor::Failure) { monitor.stop(thread) }
   end
 
   private
@@ -463,17 +531,30 @@ module Load
       return nil if @policy == :off || @sampler.nil?
 
       Thread.new do
-        loop do
-          break if @stop_flag.call
-          sleep_once
-          break if @stop_flag.call
-          sample_once
+        begin
+          loop do
+            break if @stop_flag.call
+
+            begin
+              Thread.handle_interrupt(Shutdown => :immediate) do
+                sleep_once
+              end
+            rescue Shutdown
+              break
+            end
+
+            break if @stop_flag.call
+
+            Thread.handle_interrupt(Shutdown => :never) do
+              sample_once
+            end
+          end
+        rescue StopIteration, Shutdown
+          nil
+        rescue StandardError => error
+          @failure ||= error
+          @on_breach_stop.call(:invariant_sampler_failed)
         end
-      rescue StopIteration, Shutdown
-        nil
-      rescue StandardError => error
-        @failure ||= error
-        @on_breach_stop.call(:invariant_sampler_failed)
       end
     end
 
@@ -484,9 +565,13 @@ module Load
         thread.raise(Shutdown.new)
       end
       thread.join
-      raise Failure, "invariant sampler failed" if @failure
+      failure = @failure
+      @failure = nil
+      raise Failure, "invariant sampler failed" if failure
     rescue ThreadError
-      raise Failure, "invariant sampler failed" if @failure
+      failure = @failure
+      @failure = nil
+      raise Failure, "invariant sampler failed" if failure
     end
 
     def sample_once
@@ -533,9 +618,9 @@ require_relative "load/invariant_monitor"
 ```ruby
 # load/lib/load/runner.rb
 @invariant_monitor = Load::InvariantMonitor.new(
-  sampler: @invariants.sampler,
-  policy: @invariants.policy,
-  interval_seconds: @invariants.interval_seconds,
+  sampler: sampler,
+  policy: invariant_policy,
+  interval_seconds: invariant_sample_interval_seconds,
   stop_flag: @runtime.stop_flag,
   sleeper: @runtime.sleeper,
   on_sample: ->(sample) { @run_state.append_invariant_sample(sample.to_record(sampled_at: current_time)) },
@@ -561,17 +646,42 @@ raise_invariant_failure_if_present
 
 with the monitor’s public `start` and `stop`.
 
+Delete the runner-owned invariant scaffolding after replacement:
+
+```ruby
+InvariantState
+@invariants
+start_invariant_thread
+stop_invariant_thread
+sample_invariants
+reset_invariant_breaches
+emit_invariant_warning
+mark_invariant_thread_sleeping
+invariant_thread_sleeping?
+record_invariant_failure
+raise_invariant_failure_if_present
+```
+
 - [ ] **Step 6: Run the monitor-focused tests**
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/invariant_monitor_test.rb`
 
 Expected: `3 runs, ... 0 failures, 0 errors`
 
-- [ ] **Step 7: Run the existing runner invariant-policy tests**
+- [ ] **Step 7: Run the existing runner invariant-policy tests unchanged**
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb`
 
-Expected: the existing `warn`, `off`, and `enforce` tests remain green unchanged.
+Expected: the existing behavior locks remain green unchanged:
+
+```text
+test_runner_aborts_after_three_consecutive_invariant_breaches
+test_runner_warn_policy_records_breaches_without_aborting
+test_runner_off_policy_skips_invariant_sampling
+test_runner_records_invariant_breach_before_first_successful_request
+test_runner_persists_invariant_samples_in_run_record
+test_internal_stop_flag_preserves_first_reason
+```
 
 - [ ] **Step 8: Commit the `InvariantMonitor` extraction**
 
@@ -589,7 +699,7 @@ git commit -m "refactor: extract invariant monitor"
 - Modify: `load/lib/load.rb`, `load/lib/load/runner.rb`
 - Test: `load/test/load_execution_test.rb`, `load/test/runner_test.rb`
 
-- [ ] **Step 1: Write focused execution tests for worker/reporter behavior**
+- [ ] **Step 1: Write focused execution tests for worker/reporter behavior without racy exact counts**
 
 ```ruby
 # load/test/load_execution_test.rb
@@ -598,57 +708,131 @@ git commit -m "refactor: extract invariant monitor"
 require_relative "test_helper"
 
 class LoadExecutionTest < Minitest::Test
-  def test_returns_aggregate_request_totals_from_workers
-    workload = build_workload
+  def test_returns_request_totals_with_at_least_one_success
+    ready = Queue.new
+    release = Queue.new
+    stop_flag = Load::Runner::InternalStopFlag.new
     execution = Load::LoadExecution.new(
-      workload:,
+      workload: build_workload(action_class: BarrierAction, workers: 1, duration_seconds: 60.0),
       base_url: "http://127.0.0.1:3000",
-      runtime: runtime,
+      runtime: runtime(stop_flag:),
       metrics_interval_seconds: 5.0,
       run_record: FakeRunRecord.new,
-      on_first_success: ->(*) {},
+      on_first_success: -> {},
+      reporter_factory: ->(**) { FakeReporter.new },
     )
+    BarrierAction.ready_queue = ready
+    BarrierAction.release_queue = release
 
-    result = execution.run(mode: :finite, duration_seconds: 0.0)
+    thread = Thread.new { execution.run(mode: :finite, duration_seconds: 60.0) }
+    ready.pop
+    stop_flag.trigger(:timeout)
+    release << true
+    result = thread.value
 
-    assert_equal({ total: 1, ok: 1, error: 0 }, result.request_totals)
+    assert_operator result.fetch(:ok), :>=, 1
   end
 
   def test_continuous_mode_waits_for_stop_flag
     stop_flag = Load::Runner::InternalStopFlag.new
     execution = Load::LoadExecution.new(
-      workload: build_workload,
+      workload: build_workload(action_class: FastAction, workers: 1, duration_seconds: 60.0),
       base_url: "http://127.0.0.1:3000",
       runtime: Load::Runner::Runtime.new(-> { Time.now.utc }, ->(*) { stop_flag.trigger(:sigterm) }, FakeHttp.new, stop_flag),
       metrics_interval_seconds: 5.0,
       run_record: FakeRunRecord.new,
-      on_first_success: ->(*) {},
+      on_first_success: -> {},
+      reporter_factory: ->(**) { FakeReporter.new },
     )
 
-    result = execution.run(mode: :continuous, duration_seconds: 60)
+    result = execution.run(mode: :continuous, duration_seconds: 60.0)
 
-    assert_equal 1, result.request_totals.fetch(:ok)
+    assert_operator result.fetch(:ok), :>=, 1
+  end
+
+  def test_on_first_success_fires_once_across_concurrent_workers
+    mutex = Mutex.new
+    calls = []
+    execution = Load::LoadExecution.new(
+      workload: build_workload(action_class: FastAction, workers: 16, duration_seconds: 0.01),
+      base_url: "http://127.0.0.1:3000",
+      runtime: runtime,
+      metrics_interval_seconds: 5.0,
+      run_record: FakeRunRecord.new,
+      on_first_success: -> { mutex.synchronize { calls << true } },
+      reporter_factory: ->(**) { FakeReporter.new },
+    )
+
+    execution.run(mode: :finite, duration_seconds: 0.01)
+
+    assert_equal 1, calls.length
+  end
+
+  def test_reporter_stops_when_wait_raises
+    reporter = FakeReporter.new
+    execution = Load::LoadExecution.new(
+      workload: build_workload(action_class: FastAction, workers: 1, duration_seconds: 60.0),
+      base_url: "http://127.0.0.1:3000",
+      runtime: Load::Runner::Runtime.new(-> { Time.now.utc }, ->(*) { raise "boom" }, FakeHttp.new, Load::Runner::InternalStopFlag.new),
+      metrics_interval_seconds: 5.0,
+      run_record: FakeRunRecord.new,
+      on_first_success: -> {},
+      reporter_factory: ->(**) { reporter },
+    )
+
+    assert_raises(RuntimeError) { execution.run(mode: :finite, duration_seconds: 60.0) }
+    assert_equal 1, reporter.stop_calls
   end
 
   private
 
-  def build_workload
+  def build_workload(action_class:, workers:, duration_seconds:)
     Class.new(Load::Workload) do
       def name = "fixture-workload"
       def scale = Load::Scale.new(rows_per_table: 1, seed: 42)
-      def actions = [Load::ActionEntry.new(SimpleAction, 1)]
-      def load_plan = Load::LoadPlan.new(workers: 1, duration_seconds: 0.0, rate_limit: :unlimited, seed: 42)
+      define_method(:actions) { [Load::ActionEntry.new(action_class, 1)] }
+      define_method(:load_plan) { Load::LoadPlan.new(workers:, duration_seconds:, rate_limit: :unlimited, seed: 42) }
     end.new
   end
 
-  SimpleAction = Class.new(Load::Action) do
+  FastAction = Class.new(Load::Action) do
     Response = Struct.new(:code)
-    def name = :simple
+    def name = :fast
     def call = Response.new("200")
   end
 
-  def runtime
-    Load::Runner::Runtime.new(-> { Time.now.utc }, ->(*) {}, FakeHttp.new, Load::Runner::InternalStopFlag.new)
+  BarrierAction = Class.new(Load::Action) do
+    Response = Struct.new(:code)
+
+    class << self
+      attr_accessor :ready_queue, :release_queue
+    end
+
+    def name = :barrier
+
+    def call
+      self.class.ready_queue << true
+      self.class.release_queue.pop
+      Response.new("200")
+    end
+  end
+
+  class FakeReporter
+    attr_reader :stop_calls
+
+    def initialize
+      @stop_calls = 0
+    end
+
+    def start; end
+
+    def stop
+      @stop_calls += 1
+    end
+  end
+
+  def runtime(stop_flag: Load::Runner::InternalStopFlag.new)
+    Load::Runner::Runtime.new(-> { Time.now.utc }, ->(*) {}, FakeHttp.new, stop_flag)
   end
 end
 ```
@@ -667,17 +851,46 @@ Expected: `NameError` or `LoadError` because `Load::LoadExecution` does not exis
 # ABOUTME: Owns worker construction, wait-loop behavior, request totals, and thread drain.
 module Load
   class LoadExecution
-    Result = Data.define(:request_totals)
     WORKER_DRAIN_TIMEOUT_SECONDS = 1.0
     CONTINUOUS_POLL_SECONDS = 0.1
 
-    def initialize(workload:, base_url:, runtime:, metrics_interval_seconds:, run_record:, on_first_success:)
+    class TrackingBuffer < Load::Metrics::Buffer
+      def initialize(on_first_success:)
+        super()
+        @on_first_success = on_first_success
+        @started = false
+        @request_totals = { total: 0, ok: 0, error: 0 }
+      end
+
+      def record_ok(**kwargs)
+        super(**kwargs)
+        @request_totals[:total] += 1
+        @request_totals[:ok] += 1
+        return if @started
+
+        @started = true
+        @on_first_success.call
+      end
+
+      def record_error(**kwargs)
+        super(**kwargs)
+        @request_totals[:total] += 1
+        @request_totals[:error] += 1
+      end
+
+      def request_totals
+        @request_totals.dup
+      end
+    end
+
+    def initialize(workload:, base_url:, runtime:, metrics_interval_seconds:, run_record:, on_first_success:, reporter_factory: nil)
       @workload = workload
       @base_url = base_url
       @runtime = runtime
       @metrics_interval_seconds = metrics_interval_seconds
       @run_record = run_record
       @on_first_success = on_first_success
+      @reporter_factory = reporter_factory
     end
 
     def run(mode:, duration_seconds:)
@@ -687,7 +900,7 @@ module Load
       threads = workers.map { |worker| Thread.new { worker.run } }
       wait(mode:, duration_seconds:)
       drain_threads(threads)
-      Result.new(aggregate_request_totals(workers))
+      aggregate_request_totals(workers)
     ensure
       reporter&.stop
     end
@@ -704,7 +917,7 @@ module Load
         Load::Worker.new(
           worker_id: index + 1,
           selector: Load::Selector.new(entries: entries, rng: Random.new(seed + index)),
-          buffer: tracking_buffer,
+          buffer: TrackingBuffer.new(on_first_success: @on_first_success),
           client: Load::Client.new(base_url: @base_url, http: @runtime.http),
           ctx: { base_url: @base_url, scale: @workload.scale },
           rng: Random.new(seed + index),
@@ -714,37 +927,9 @@ module Load
       end
     end
 
-    def tracking_buffer
-      Class.new(Load::Metrics::Buffer) do
-        define_method(:initialize) do |on_first_success|
-          super()
-          @on_first_success = on_first_success
-          @started = false
-          @request_totals = { total: 0, ok: 0, error: 0 }
-        end
-
-        define_method(:record_ok) do |**kwargs|
-          super(**kwargs)
-          @request_totals[:total] += 1
-          @request_totals[:ok] += 1
-          return if @started
-          @started = true
-          @on_first_success.call
-        end
-
-        define_method(:record_error) do |**kwargs|
-          super(**kwargs)
-          @request_totals[:total] += 1
-          @request_totals[:error] += 1
-        end
-
-        define_method(:request_totals) do
-          @request_totals.dup
-        end
-      end.new(@on_first_success)
-    end
-
     def build_reporter(workers)
+      return @reporter_factory.call(workers:, interval_seconds: @metrics_interval_seconds, run_record: @run_record, runtime: @runtime) if @reporter_factory
+
       Load::Reporter.new(
         workers:,
         interval_seconds: @metrics_interval_seconds,
@@ -764,7 +949,10 @@ module Load
         deadline = @runtime.clock.call + duration_seconds
         until @runtime.stop_flag.call
           remaining = deadline - @runtime.clock.call
-          break if remaining <= 0
+          if remaining <= 0
+            @runtime.stop_flag.trigger(:timeout) if @runtime.stop_flag.respond_to?(:trigger)
+            break
+          end
           Thread.pass
           @runtime.sleeper.call([1.0, remaining].min)
         end
@@ -815,22 +1003,43 @@ execution = Load::LoadExecution.new(
   run_record: @run_record,
   on_first_success: -> { @run_state.pin_window_start(now: current_time) },
 )
-request_totals = execution.run(mode: @mode, duration_seconds: @workload.load_plan.duration_seconds).request_totals
+request_totals = execution.run(mode: @mode, duration_seconds: @workload.load_plan.duration_seconds)
 ```
 
 Then let `Runner` use `request_totals` when finalizing the outcome through `RunState`.
+
+Delete the runner-owned worker execution scaffolding after replacement:
+
+```ruby
+TrackingBuffer
+@tracking_buffers
+register_tracking_buffer
+aggregate_request_totals
+start_workers
+wait_for_window_end
+wait_for_stop_signal
+```
 
 - [ ] **Step 6: Run the focused execution tests**
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/load_execution_test.rb`
 
-Expected: `2 runs, ... 0 failures, 0 errors`
+Expected: `4 runs, ... 0 failures, 0 errors`
 
 - [ ] **Step 7: Run the runner behavior suite again**
 
 Run: `BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb`
 
-Expected: all existing runner tests remain green.
+Expected: all existing runner tests remain green, especially:
+
+```text
+test_runner_aborts_after_three_consecutive_invariant_breaches
+test_runner_warn_policy_records_breaches_without_aborting
+test_runner_off_policy_skips_invariant_sampling
+test_runner_records_invariant_breach_before_first_successful_request
+test_runner_persists_invariant_samples_in_run_record
+test_internal_stop_flag_preserves_first_reason
+```
 
 - [ ] **Step 8: Commit the `LoadExecution` extraction**
 
@@ -871,6 +1080,16 @@ Run: `git diff --check`
 
 Expected: no output
 
+Then run the runner-cleanup grep:
+
+Run:
+
+```bash
+grep -n "@state\\|@state_mutex\\|@window_started\\|@tracking_buffers\\|register_tracking_buffer\\|aggregate_request_totals\\|InvariantState\\|TrackingBuffer\\|wait_for_window_end\\|wait_for_stop_signal\\|start_invariant_thread\\|stop_invariant_thread\\|sample_invariants\\|emit_invariant_warning\\|mark_invariant_thread_sleeping\\|invariant_thread_sleeping" load/lib/load/runner.rb
+```
+
+Expected: no output
+
 - [ ] **Step 5: Commit the verified refactor**
 
 ```bash
@@ -889,6 +1108,10 @@ git commit -m "test: verify runner decomposition"
 - `LoadExecution` extraction: covered by Task 3
 - keep `Runner` as top-level coordinator: covered by Tasks 1-3 by only moving internals
 - preserve CLI, artifact shape, and invariant semantics: covered by Task 4 plus unchanged runner/CLI/workload tests
+- preserve `:timeout` stop-flag trigger on finite deadline: covered by Task 3 step 3 and runner regression tests
+- preserve cooperative shutdown of the invariant thread (`Thread.handle_interrupt` scoping): covered by Task 2 step 3 and the new lifecycle test
+- monitor failure propagates as `:invariant_sampler_failed`: covered by Task 2 step 1 and step 3
+- tracking buffer is a real named class, not an anonymous per-worker class: covered by Task 3 step 3
 
 No spec gaps found.
 
@@ -901,6 +1124,53 @@ No spec gaps found.
 
 - `RunState` API uses `write_initial`, `merge`, `pin_window_start`, `append_warning`, `append_invariant_sample`, and `finish` consistently.
 - `InvariantMonitor` API uses `start`, `stop`, and `sample_once` consistently.
-- `LoadExecution` API uses `run(mode:, duration_seconds:)` and returns `Result.new(request_totals)`.
+- `LoadExecution` API uses `run(mode:, duration_seconds:)` and returns the request-totals hash directly.
 
 Plan is internally consistent.
+
+## Validation Gate
+
+- `make test` must pass cleanly.
+- 50x stability gate on the relocated invariant-breach runner test:
+
+```bash
+for i in $(seq 1 50); do
+  BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/runner_test.rb \
+    --name test_runner_aborts_after_three_consecutive_invariant_breaches 2>&1 | tail -3
+done | grep -E "errors|failures" | sort -u
+```
+
+Expected: one line reporting `0 failures, 0 errors`.
+
+- 50x stability gate on cooperative monitor shutdown:
+
+```bash
+for i in $(seq 1 50); do
+  BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/invariant_monitor_test.rb \
+    --name test_monitor_stop_unblocks_thread_during_sleep 2>&1 | tail -3
+done | grep -E "errors|failures" | sort -u
+```
+
+Expected: one line reporting `0 failures, 0 errors`.
+
+- Live finite run plus oracle:
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+BUNDLE_GEMFILE=collector/Gemfile \
+bundle exec bin/load run \
+  --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+CLICKHOUSE_URL=http://localhost:8123/ \
+BUNDLE_GEMFILE=collector/Gemfile \
+bundle exec ruby workloads/missing_index_todos/oracle.rb runs/<latest>
+```
+
+Expected: oracle prints `PASS`.
+
+- Runner cleanup grep from Task 4 step 4 returns no output.
+- `wc -l load/lib/load/runner.rb` should drop substantially from the current ~600-line shape toward roughly 250-300 lines.
