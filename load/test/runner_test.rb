@@ -22,17 +22,12 @@ class RunnerTest < Minitest::Test
       verifier_calls << base_url
       { ok: true }
     end
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: VerifierOrderWorkload.new,
       adapter_client: adapter,
       run_record: FakeRunRecord.new,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: ReadinessLoggingHttp.new(call_order:),
-      startup_grace_seconds: 0.1,
-      stop_flag:,
-      verifier:,
-      mode: :finite,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, http: ReadinessLoggingHttp.new(call_order:), stop_flag:),
+      config: fake_config(startup_grace_seconds: 0.1, verifier:, mode: :finite),
     )
 
     exit_code = runner.run
@@ -55,18 +50,13 @@ class RunnerTest < Minitest::Test
       verifier_calls << base_url
       { ok: true }
     end
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: VerifierOrderWorkload.new,
       adapter_client: adapter,
       run_record: FakeRunRecord.new,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: ReadinessLoggingHttp.new(call_order:),
-      startup_grace_seconds: 0.1,
-      stop_flag:,
-      verifier:,
-      mode: :continuous,
-      invariant_sampler: FakeInvariantSampler.new([]),
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, http: ReadinessLoggingHttp.new(call_order:), stop_flag:),
+      config: fake_config(startup_grace_seconds: 0.1, verifier:, mode: :continuous),
+      invariant_config: fake_invariant_config(sampler: FakeInvariantSampler.new([])),
     )
 
     exit_code = runner.run
@@ -89,17 +79,12 @@ class RunnerTest < Minitest::Test
         call_order << :verify
         raise Load::FixtureVerifier::VerificationError, "counts pathology missing for #{base_url}"
       end
-      runner = Load::Runner.new(
+      runner = build_runner(
         workload: VerifierOrderWorkload.new,
         adapter_client: adapter,
         run_record:,
-        clock: fake_clock,
-        sleeper: ->(*) { Thread.pass },
-        http: ReadinessLoggingHttp.new(call_order:),
-        startup_grace_seconds: 0.1,
-        stop_flag:,
-        verifier:,
-        mode: :finite,
+        runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, http: ReadinessLoggingHttp.new(call_order:), stop_flag:),
+        config: fake_config(startup_grace_seconds: 0.1, verifier:, mode: :finite),
       )
 
       exit_code = runner.run
@@ -407,20 +392,17 @@ class RunnerTest < Minitest::Test
   def test_runner_reports_sampler_failure_as_controlled_error
     run_record = FakeRunRecord.new
     stop_flag = Load::Runner::InternalStopFlag.new
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MetricsWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
-      mode: :continuous,
-      invariant_sampler: RaisingInvariantSampler.new(stop_flag:),
-      invariant_sample_interval_seconds: 0.001,
-      database_url: nil,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, stop_flag:),
+      config: fake_config(mode: :continuous, readiness_path: nil, startup_grace_seconds: 0.0),
+      invariant_config: fake_invariant_config(
+        sampler: RaisingInvariantSampler.new(stop_flag:),
+        sample_interval_seconds: 0.001,
+        database_url: nil,
+      ),
     )
 
     exit_code = Timeout.timeout(2.0) { runner.run }
@@ -500,20 +482,13 @@ class RunnerTest < Minitest::Test
     clock = AdvancingClock.new(Time.utc(2026, 4, 25, 0, 0, 0))
     sleeper = BlockingInvariantSleeper.new(clock:, blocked_interval: 60.0)
     sampler = RecordingInvariantSampler.new(clock:)
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MetricsWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: -> { clock.now },
-      sleeper:,
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
-      mode: :continuous,
-      invariant_sampler: sampler,
-      invariant_sample_interval_seconds: 60.0,
-      database_url: nil,
+      runtime: fake_runtime(clock: -> { clock.now }, sleeper:, stop_flag:),
+      config: fake_config(mode: :continuous, readiness_path: nil, startup_grace_seconds: 0.0),
+      invariant_config: fake_invariant_config(sampler:, sample_interval_seconds: 60.0, database_url: nil),
     )
 
     thread = Thread.new { runner.run }
@@ -579,16 +554,12 @@ class RunnerTest < Minitest::Test
     run_record = FakeRunRecord.new
     stop_flag = Load::Runner::InternalStopFlag.new
     http = RecordingRequestHttp.new(stop_flag:, stop_after: 300)
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MixedWriteWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: http,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, http:, stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0),
     )
 
     exit_code = Timeout.timeout(2.0) { runner.run }
@@ -635,16 +606,12 @@ class RunnerTest < Minitest::Test
     stop_flag = StopFlag.new
     SeedRecordingAction.reset!
     SeedRecordingAction.stop_flag = stop_flag
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MetricsWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0),
     )
 
     exit_code = runner.run
@@ -660,14 +627,11 @@ class RunnerTest < Minitest::Test
     stop_flag = StopFlag.new
     clock = AdvancingClock.new(Time.utc(2026, 4, 24, 0, 0, 0))
     sleeper = ->(*) { stop_flag.trigger(:sigint) }
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: -> { clock.now },
-      sleeper:,
-      http: FakeHttp.new,
-      stop_flag:,
+      runtime: fake_runtime(clock: -> { clock.now }, sleeper:, stop_flag:),
     )
 
     runner.run
@@ -683,14 +647,12 @@ class RunnerTest < Minitest::Test
       prepare_error: Load::AdapterClient::AdapterError.new("boom"),
       adapter_bin: "adapters/rails/bin/bench-adapter",
     )
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: FakeHttp.new,
-      adapter_bin: "adapters/rails/bin/bench-adapter",
+      runtime: fake_runtime(sleeper: ->(*) {}),
+      config: fake_config(adapter_bin: "adapters/rails/bin/bench-adapter"),
     )
 
     exit_code = runner.run
@@ -705,14 +667,12 @@ class RunnerTest < Minitest::Test
   def test_runner_returns_one_when_adapter_describe_fails
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(describe_error: Load::AdapterClient::AdapterError.new("boom"))
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: FakeHttp.new,
-      adapter_bin: "adapters/rails/bin/bench-adapter",
+      runtime: fake_runtime(sleeper: ->(*) {}),
+      config: fake_config(adapter_bin: "adapters/rails/bin/bench-adapter"),
     )
 
     exit_code = runner.run
@@ -725,14 +685,12 @@ class RunnerTest < Minitest::Test
   def test_runner_returns_one_when_start_response_is_missing_required_fields
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(start_response: { "ok" => true })
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: FakeHttp.new,
-      adapter_bin: "adapters/rails/bin/bench-adapter",
+      runtime: fake_runtime(sleeper: ->(*) {}),
+      config: fake_config(adapter_bin: "adapters/rails/bin/bench-adapter"),
     )
 
     exit_code = runner.run
@@ -746,14 +704,12 @@ class RunnerTest < Minitest::Test
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
     clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
     http = ProbeHttp.new
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: -> { clock.now },
-      sleeper: ->(seconds) { clock.advance_by(seconds) },
-      http:,
-      startup_grace_seconds: 0.01,
+      runtime: fake_runtime(clock: -> { clock.now }, sleeper: ->(seconds) { clock.advance_by(seconds) }, http:),
+      config: fake_config(startup_grace_seconds: 0.01),
     )
 
     exit_code = runner.run
@@ -769,14 +725,12 @@ class RunnerTest < Minitest::Test
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
     clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
     http = LateSuccessHttp.new(clock:, advance_by: 0.02)
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: -> { clock.now },
-      sleeper: ->(seconds) { clock.advance_by(seconds) },
-      http:,
-      startup_grace_seconds: 0.01,
+      runtime: fake_runtime(clock: -> { clock.now }, sleeper: ->(seconds) { clock.advance_by(seconds) }, http:),
+      config: fake_config(startup_grace_seconds: 0.01),
     )
 
     exit_code = runner.run
@@ -793,14 +747,12 @@ class RunnerTest < Minitest::Test
     clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
     http = ProbeHttp.new
     sleep_durations = []
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: -> { clock.now },
-      sleeper: ->(seconds) { sleep_durations << seconds; clock.advance_by(seconds) },
-      http:,
-      startup_grace_seconds: 0.05,
+      runtime: fake_runtime(clock: -> { clock.now }, sleeper: ->(seconds) { sleep_durations << seconds; clock.advance_by(seconds) }, http:),
+      config: fake_config(startup_grace_seconds: 0.05),
     )
 
     exit_code = runner.run
@@ -814,14 +766,12 @@ class RunnerTest < Minitest::Test
   def test_runner_records_adapter_describe_metadata_before_readiness
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(describe_response: { "name" => "rails-postgres-adapter", "framework" => "rails", "runtime" => "ruby-3.3" })
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: FakeWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: FakeHttp.new,
-      adapter_bin: "adapters/rails/bin/bench-adapter",
+      runtime: fake_runtime(sleeper: ->(*) {}),
+      config: fake_config(adapter_bin: "adapters/rails/bin/bench-adapter"),
     )
 
     runner.run
@@ -860,17 +810,12 @@ class RunnerTest < Minitest::Test
     run_record = FakeRunRecord.new
     stop_flag = StopFlag.new
     SeedRecordingAction.stop_flag = stop_flag
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: ZeroSeedWorkload.new,
       adapter_client: FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }),
       run_record:,
-      clock: -> { Time.now.utc },
-      sleeper: ->(seconds) { sleep([seconds, 0.001].min) if seconds.positive? },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      adapter_bin: "adapters/rails/bin/bench-adapter",
-      stop_flag:,
+      runtime: fake_runtime(clock: -> { Time.now.utc }, sleeper: ->(seconds) { sleep([seconds, 0.001].min) if seconds.positive? }, stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0, adapter_bin: "adapters/rails/bin/bench-adapter"),
     )
 
     exit_code = Timeout.timeout(1.0) { runner.run }
@@ -883,17 +828,12 @@ class RunnerTest < Minitest::Test
     run_record = FakeRunRecord.new
     stop_flag = StopFlag.new
     http = CountingHttp.new(on_request: -> { stop_flag.trigger(:request_seen) })
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: HttpClientWorkload.new,
       adapter_client: FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" }),
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http:,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      adapter_bin: "adapters/rails/bin/bench-adapter",
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, http:, stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0, adapter_bin: "adapters/rails/bin/bench-adapter"),
     )
 
     exit_code = runner.run
@@ -907,16 +847,12 @@ class RunnerTest < Minitest::Test
     stop_flag = StopFlag.new
     SeedRecordingAction.reset!
     SeedRecordingAction.stop_flag = stop_flag
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MetricsWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0),
     )
 
     exit_code = runner.run
@@ -929,16 +865,12 @@ class RunnerTest < Minitest::Test
     run_record = FakeRunRecord.new
     stop_flag = StopFlag.new
     stop_flag.trigger(:sigterm)
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MultiWorkerWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) {}, stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0),
     )
     calls = []
     client_singleton = Load::Client.singleton_class
@@ -961,16 +893,12 @@ class RunnerTest < Minitest::Test
     run_record = FakeRunRecord.new
     adapter = FakeAdapterClient.new(start_response: { "ok" => true, "pid" => 123, "base_url" => "http://127.0.0.1:3999" })
     stop_flag = StopFlag.new
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: HungRequestWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: HungHttp.new(on_request: -> { stop_flag.trigger(:sigterm) }),
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) {}, http: HungHttp.new(on_request: -> { stop_flag.trigger(:sigterm) }), stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0),
     )
 
     exit_code = Timeout.timeout(2.0) { runner.run }
@@ -986,16 +914,12 @@ class RunnerTest < Minitest::Test
     SeedRecordingAction.reset!
     SeedRecordingAction.stop_flag = stop_flag
     adapter = FakeAdapterClient.new(stop_error: Load::AdapterClient::AdapterError.new("boom"))
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MetricsWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0),
     )
 
     exit_code = runner.run
@@ -1012,16 +936,12 @@ class RunnerTest < Minitest::Test
       stop_error: Load::AdapterClient::AdapterError.new("boom"),
     )
     stop_flag = StopFlag.new
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: HungRequestWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: HungHttp.new(on_request: -> { stop_flag.trigger(:sigterm) }),
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) {}, http: HungHttp.new(on_request: -> { stop_flag.trigger(:sigterm) }), stop_flag:),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0),
     )
 
     exit_code = Timeout.timeout(2.0) { runner.run }
@@ -1042,20 +962,19 @@ class RunnerTest < Minitest::Test
       reset_state_response: { "query_ids" => ["111", "222"] },
       adapter_bin: "adapters/rails/bin/bench-adapter",
     )
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MetricsWorkload.new,
       adapter_client: adapter,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      metrics_interval_seconds: 2.5,
-      app_root: "/tmp/demo",
-      workload_file: "workloads/metrics_workload.rb",
-      adapter_bin: "adapters/rails/bin/bench-adapter",
-      stop_flag:,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }, stop_flag:),
+      config: fake_config(
+        readiness_path: nil,
+        startup_grace_seconds: 0.0,
+        metrics_interval_seconds: 2.5,
+        app_root: "/tmp/demo",
+        workload_file: "workloads/metrics_workload.rb",
+        adapter_bin: "adapters/rails/bin/bench-adapter",
+      ),
     )
 
     exit_code = runner.run
@@ -1084,15 +1003,12 @@ class RunnerTest < Minitest::Test
 
   def test_runner_initial_state_uses_schema_version_2
     run_record = FakeRunRecord.new
-    runner = Load::Runner.new(
+    runner = build_runner(
       workload: MetricsWorkload.new,
       adapter_client: FakeAdapterClient.new,
       run_record:,
-      clock: fake_clock,
-      sleeper: ->(*) { Thread.pass },
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
+      runtime: fake_runtime(sleeper: ->(*) { Thread.pass }),
+      config: fake_config(readiness_path: nil, startup_grace_seconds: 0.0),
     )
 
     assert_equal 2, runner.run_state.snapshot.fetch(:schema_version)
@@ -1132,6 +1048,18 @@ class RunnerTest < Minitest::Test
       sample_interval_seconds: sample_interval_seconds,
       database_url: database_url,
       pg: pg,
+    )
+  end
+
+  def build_runner(workload:, adapter_client:, run_record:, runtime: fake_runtime, config: fake_config, invariant_config: fake_invariant_config, stderr: StringIO.new)
+    Load::Runner.new(
+      workload:,
+      adapter_client:,
+      run_record:,
+      runtime:,
+      config:,
+      invariant_config:,
+      stderr:,
     )
   end
 
