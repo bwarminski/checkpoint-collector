@@ -71,7 +71,7 @@ module RailsAdapter
           chdir: @app_root,
           command_name: "reset-state",
         )
-        raise "schema load failed" unless schema.success?
+        raise command_failure_message("schema load failed", schema.stderr) unless schema.success?
 
         load_dataset = RailsAdapter::Commands::LoadDataset.new(
           app_root: @app_root,
@@ -81,15 +81,15 @@ module RailsAdapter
           command_runner: @command_runner,
           clock: @clock,
         ).call
-        raise "seed failed" unless load_dataset.fetch("ok")
+        raise result_failure_message("seed failed", load_dataset) unless load_dataset.fetch("ok")
       end
 
       def build_template
         drop = @command_runner.capture3("bin/rails", "db:drop", env: rails_env, chdir: @app_root, command_name: "reset-state")
-        raise "db:drop failed" unless drop.success?
+        raise command_failure_message("db:drop failed", drop.stderr) unless drop.success?
 
         migrate = RailsAdapter::Commands::Migrate.new(app_root: @app_root, command_runner: @command_runner).call
-        raise "db:create db:schema:load failed" unless migrate.fetch("ok")
+        raise result_failure_message("db:create db:schema:load failed", migrate) unless migrate.fetch("ok")
 
         load_dataset = RailsAdapter::Commands::LoadDataset.new(
           app_root: @app_root,
@@ -99,7 +99,7 @@ module RailsAdapter
           command_runner: @command_runner,
           clock: @clock,
         ).call
-        raise "seed runner failed" unless load_dataset.fetch("ok")
+        raise result_failure_message("seed runner failed", load_dataset) unless load_dataset.fetch("ok")
       end
 
       def reset_pg_stat_statements
@@ -111,7 +111,7 @@ module RailsAdapter
           chdir: @app_root,
           command_name: "reset-state",
         )
-        raise "pg_stat_statements_reset failed" unless result.success?
+        raise command_failure_message("pg_stat_statements_reset failed", result.stderr) unless result.success?
       end
 
       def ensure_pg_stat_statements
@@ -123,7 +123,7 @@ module RailsAdapter
           chdir: @app_root,
           command_name: "reset-state",
         )
-        raise "pg_stat_statements extension failed" unless result.success?
+        raise command_failure_message("pg_stat_statements extension failed", result.stderr) unless result.success?
       end
 
       def capture_query_ids
@@ -138,9 +138,24 @@ module RailsAdapter
           chdir: @app_root,
           command_name: "reset-state",
         )
-        raise "query id capture failed" unless result.success?
+        raise command_failure_message("query id capture failed", result.stderr) unless result.success?
 
         JSON.parse(result.stdout).fetch("query_ids")
+      end
+
+      def command_failure_message(message, detail)
+        detail = detail.to_s.strip
+        detail.empty? ? message : "#{message}: #{detail}"
+      end
+
+      def result_failure_message(message, result)
+        error = result.fetch("error")
+        details = error.fetch("details", {})
+        [
+          message,
+          error.fetch("message", nil),
+          details.fetch("stderr", nil),
+        ].compact.map(&:to_s).map(&:strip).reject(&:empty?).join(": ")
       end
 
       def database_name

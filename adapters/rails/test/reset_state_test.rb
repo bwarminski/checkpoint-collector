@@ -99,6 +99,32 @@ class ResetStateTest < Minitest::Test
     refute result.fetch("ok")
     assert_equal "reset_failed", result.fetch("error").fetch("code")
     assert_includes result.fetch("error").fetch("message"), "schema load failed"
+    assert_includes result.fetch("error").fetch("message"), "schema failed"
+  end
+
+  def test_reset_state_remote_strategy_reports_seed_failure_details
+    runner = FakeCommandRunner.new(
+      results: {
+        ["bin/rails", "runner", %(load Rails.root.join("db/seeds.rb").to_s)] => FakeResult.new(status: 1, stdout: "", stderr: "seed failed"),
+      },
+    )
+    command = RailsAdapter::Commands::ResetState.new(
+      app_root: "/tmp/demo",
+      workload: "missing-index-todos",
+      seed: 42,
+      env_pairs: {},
+      command_runner: runner,
+      template_cache: FakeTemplateCache.new,
+      reset_strategy: "remote",
+      clock: fake_clock(0.0, 1.0),
+    )
+
+    result = command.call
+
+    refute result.fetch("ok")
+    assert_equal "reset_failed", result.fetch("error").fetch("code")
+    assert_includes result.fetch("error").fetch("message"), "seed failed"
+    assert_includes result.fetch("error").fetch("message"), "seed runner failed"
   end
 
   def test_reset_state_rebuilds_template_when_seed_env_changes
