@@ -195,6 +195,19 @@ class RunnerTest < Minitest::Test
     assert_equal "continuous mode requires the workload to provide an invariant sampler", error.message
   end
 
+  def test_runner_constructor_accepts_grouped_dependencies_only
+    runner = Load::Runner.new(
+      workload: MetricsWorkload.new,
+      adapter_client: FakeAdapterClient.new,
+      run_record: FakeRunRecord.new,
+      runtime: Load::Runner::Runtime.new(fake_clock, ->(*) { Thread.pass }, FakeHttp.new, Load::Runner::InternalStopFlag.new),
+      config: Load::Runner::Config.new(readiness_path: nil, startup_grace_seconds: 0.0),
+      invariant_config: Load::Runner::InvariantConfig.new(policy: :off),
+    )
+
+    assert_instance_of Load::Runner, runner
+  end
+
   def test_soak_mode_runs_until_stop_flag
     stop_flag = Load::Runner::InternalStopFlag.new
     workers_ready = Queue.new
