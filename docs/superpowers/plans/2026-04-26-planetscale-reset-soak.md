@@ -509,7 +509,7 @@ Add `load-soak-planetscale` to `.PHONY` and append:
 load-soak-planetscale:
 	@test -n "$$DATABASE_URL" || (echo "DATABASE_URL is required" >&2; exit 1)
 	@test -n "$$BENCH_ADAPTER_PG_ADMIN_URL" || (echo "BENCH_ADAPTER_PG_ADMIN_URL is required" >&2; exit 1)
-	BENCH_ADAPTER_RESET_STRATEGY=remote bin/load soak --workload missing-index-todos --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo
+	BENCH_ADAPTER_RESET_STRATEGY=remote bin/load soak --workload missing-index-todos --invariants warn --startup-grace-seconds 60 --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo
 ```
 
 - [ ] **Step 2: Add README section**
@@ -548,7 +548,7 @@ Run soak:
 
 ```bash
 BENCH_ADAPTER_RESET_STRATEGY=remote \
-bin/load soak --workload missing-index-todos \
+bin/load soak --workload missing-index-todos --invariants warn --startup-grace-seconds 60 \
   --adapter adapters/rails/bin/bench-adapter \
   --app-root /home/bjw/db-specialist-demo
 ```
