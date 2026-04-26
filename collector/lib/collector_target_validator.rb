@@ -7,7 +7,12 @@ require "uri"
 class CollectorTargetValidator
   Error = Class.new(StandardError)
   VALIDATION_COMMENT = "collector_target_validation".freeze
-  VALIDATION_SQL = "SELECT 1 /* #{VALIDATION_COMMENT} */".freeze
+  VALIDATION_SQL = "SELECT current_setting('server_version_num') /* #{VALIDATION_COMMENT} */".freeze
+  VALIDATION_QUERYIDS_SQL = <<~SQL.freeze
+    SELECT DISTINCT queryid::text AS queryid
+    FROM pg_stat_statements
+    WHERE query = 'SELECT current_setting($1) /* collector_target_validation */'
+  SQL
   PG_STAT_STATEMENTS_CHECK_SQL = "SELECT 1 FROM pg_stat_statements LIMIT 1".freeze
 
   def initialize(postgres_url:, clickhouse_url:, require_stats_only: false, env: ENV, pg: PG, runtime_factory: nil, clickhouse_query: nil)
@@ -24,13 +29,14 @@ class CollectorTargetValidator
     validate_config!
     verify_postgres_target!
     collector_state_before = collector_state_count
-    query_events_before = validation_query_event_count
 
     run_validation_query
+    queryids = validation_queryids
+    query_events_before = validation_query_event_count(queryids)
     @runtime_factory.call(postgres_url: @postgres_url, clickhouse_url: @clickhouse_url).run_once_pass
 
     collector_state_after = collector_state_count
-    query_events_after = validation_query_event_count
+    query_events_after = validation_query_event_count(queryids)
     raise Error, "collector_state did not advance" unless collector_state_after > collector_state_before
     raise Error, "query_events did not capture #{VALIDATION_COMMENT}" unless query_events_after > query_events_before
 
@@ -68,6 +74,16 @@ class CollectorTargetValidator
     end
   end
 
+  def validation_queryids
+    rows = with_postgres_connection do |connection|
+      connection.exec(VALIDATION_QUERYIDS_SQL)
+    end
+    queryids = Array(rows).map { |row| row.fetch("queryid").to_s }.reject(&:empty?).uniq
+    raise Error, "pg_stat_statements did not expose #{VALIDATION_COMMENT} queryid" if queryids.empty?
+
+    queryids
+  end
+
   def with_postgres_connection
     connection = @pg.connect(@postgres_url)
     yield connection
@@ -79,11 +95,12 @@ class CollectorTargetValidator
     clickhouse_scalar("SELECT count() AS value FROM collector_state")
   end
 
-  def validation_query_event_count
+  def validation_query_event_count(queryids)
+    escaped_queryids = queryids.map { |queryid| "'#{queryid.gsub("'", "''")}'" }.join(", ")
     clickhouse_scalar(<<~SQL)
       SELECT count() AS value
       FROM query_events
-      WHERE position(statement_text, '#{VALIDATION_COMMENT}') > 0
+      WHERE queryid IN (#{escaped_queryids})
     SQL
   end
 

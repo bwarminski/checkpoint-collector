@@ -4,9 +4,16 @@ require "minitest/autorun"
 require_relative "../lib/collector_target_validator"
 
 class CollectorTargetValidatorTest < Minitest::Test
+  VALIDATION_QUERYIDS_SQL = <<~SQL.freeze
+    SELECT DISTINCT queryid::text AS queryid
+    FROM pg_stat_statements
+    WHERE query = 'SELECT current_setting($1) /* collector_target_validation */'
+  SQL
+
   def test_call_runs_marker_query_and_requires_fresh_clickhouse_evidence
-    pg = FakePg.new
+    pg = FakePg.new(queryid_rows: [{ "queryid" => "6865378226349601843" }])
     runtime_calls = []
+    captured_sql = []
     scalar_values = {
       "collector_state" => [10, 11],
       "query_events" => [20, 21],
@@ -14,7 +21,7 @@ class CollectorTargetValidatorTest < Minitest::Test
     validator = build_validator(
       pg:,
       runtime_factory: ->(**kwargs) { runtime_calls << kwargs; FakeRuntime.new },
-      clickhouse_query: scalar_query(scalar_values),
+      clickhouse_query: scalar_query(scalar_values, captured_sql:),
     )
 
     result = validator.call
@@ -24,9 +31,14 @@ class CollectorTargetValidatorTest < Minitest::Test
     assert_equal 11, result.fetch("collector_state_after")
     assert_equal 20, result.fetch("query_events_before")
     assert_equal 21, result.fetch("query_events_after")
-    assert_equal ["postgres://example.test/checkpoint", "postgres://example.test/checkpoint"], pg.urls
+    assert_equal ["postgres://example.test/checkpoint", "postgres://example.test/checkpoint", "postgres://example.test/checkpoint"], pg.urls
     assert_includes pg.connections.fetch(0).sql, CollectorTargetValidator::PG_STAT_STATEMENTS_CHECK_SQL
     assert_includes pg.connections.fetch(1).sql, CollectorTargetValidator::VALIDATION_SQL
+    assert_includes pg.connections.fetch(2).sql, VALIDATION_QUERYIDS_SQL
+    assert captured_sql.grep(/queryid IN \('6865378226349601843'\)/).any?,
+      "expected ClickHouse validation to filter by resolved queryid, got #{captured_sql.inspect}"
+    refute captured_sql.any? { |sql| sql.include?(CollectorTargetValidator::VALIDATION_COMMENT) },
+      "pg_stat_statements strips SQL comments, so ClickHouse validation must not depend on them"
     assert_equal [{ postgres_url: "postgres://example.test/checkpoint", clickhouse_url: "http://clickhouse:8123" }], runtime_calls
   end
 
@@ -96,7 +108,7 @@ class CollectorTargetValidatorTest < Minitest::Test
     env: {},
     pg: FakePg.new,
     runtime_factory: ->(**) { FakeRuntime.new },
-    clickhouse_query: scalar_query("collector_state" => [1, 2], "query_events" => [1, 2])
+    clickhouse_query: scalar_query({ "collector_state" => [1, 2], "query_events" => [1, 2] })
   )
     CollectorTargetValidator.new(
       postgres_url:,
@@ -109,8 +121,9 @@ class CollectorTargetValidatorTest < Minitest::Test
     )
   end
 
-  def scalar_query(values)
+  def scalar_query(values, captured_sql: [])
     lambda do |clickhouse_url:, sql:|
+      captured_sql << sql
       key = sql.include?("collector_state") ? "collector_state" : "query_events"
       values.fetch(key).shift
     end
@@ -125,15 +138,16 @@ class CollectorTargetValidatorTest < Minitest::Test
   class FakePg
     attr_reader :connections, :urls
 
-    def initialize(error_on: nil)
+    def initialize(error_on: nil, queryid_rows: [{ "queryid" => "6865378226349601843" }])
       @error_on = error_on
+      @queryid_rows = queryid_rows
       @connections = []
       @urls = []
     end
 
     def connect(url)
       @urls << url
-      connection = FakeConnection.new(error_on: @error_on)
+      connection = FakeConnection.new(error_on: @error_on, queryid_rows: @queryid_rows)
       @connections << connection
       connection
     end
@@ -142,14 +156,16 @@ class CollectorTargetValidatorTest < Minitest::Test
   class FakeConnection
     attr_reader :sql
 
-    def initialize(error_on:)
+    def initialize(error_on:, queryid_rows:)
       @error_on = error_on
+      @queryid_rows = queryid_rows
       @sql = []
     end
 
     def exec(sql)
       @sql << sql
       raise "blocked" if sql == @error_on
+      return @queryid_rows if sql == CollectorTargetValidatorTest::VALIDATION_QUERYIDS_SQL
 
       []
     end
