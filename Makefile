@@ -1,4 +1,6 @@
-.PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads
+# ABOUTME: Defines local verification and benchmark operator shortcuts.
+# ABOUTME: Keeps destructive load commands explicit about their required environment.
+.PHONY: load-smoke verify-fixture load-soak load-soak-planetscale test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads
 
 test: test-load test-adapters test-workloads
 
@@ -27,3 +29,8 @@ verify-fixture:
 
 load-soak:
 	DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres bin/load soak --workload missing-index-todos --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo
+
+load-soak-planetscale:
+	@test -n "$$DATABASE_URL" || (echo "DATABASE_URL is required" >&2; exit 1)
+	@test -n "$$BENCH_ADAPTER_PG_ADMIN_URL" || (echo "BENCH_ADAPTER_PG_ADMIN_URL is required" >&2; exit 1)
+	BENCH_ADAPTER_RESET_STRATEGY=remote bin/load soak --workload missing-index-todos --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo

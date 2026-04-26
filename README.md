@@ -275,6 +275,82 @@ fixture verification failed for /api/todos/counts: expected at least 10 count ca
 | `soak` | yes | yes | usually no, unless you inspect it later | yes |
 | `verify-fixture` | no | no | no | no |
 
+## PlanetScale Soak
+
+PlanetScale soak targets an existing benchmark branch and resets that branch
+before workers start. This is destructive to the target database; do not point
+these commands at production.
+
+Before running it, enable `pg_stat_statements` for the PlanetScale branch in
+the dashboard, apply the extension change, and run this in the benchmark
+database:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+```
+
+The current checkpoint uses direct database connections only. PlanetScale direct
+and pooled hosts are different operational paths, but for this direct-only
+checkpoint both `DATABASE_URL` and `BENCH_ADAPTER_PG_ADMIN_URL` may use port
+`5432`.
+
+Use `verify-full` with the system CA bundle path. On this machine, libpq 18.0.1
+failed certificate verification with `sslrootcert=system`, while the explicit
+CA bundle worked.
+
+```bash
+export DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'
+export BENCH_ADAPTER_PG_ADMIN_URL='postgres://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'
+export POSTGRES_URL="$DATABASE_URL"
+```
+
+Reset and reseed the PlanetScale branch:
+
+```bash
+DATABASE_URL="$DATABASE_URL" \
+BENCH_ADAPTER_PG_ADMIN_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+BENCH_ADAPTER_RESET_STRATEGY=remote \
+adapters/rails/bin/bench-adapter --json reset-state \
+  --app-root /home/bjw/db-specialist-demo \
+  --workload missing-index-todos \
+  --seed 42 \
+  --env ROWS_PER_TABLE=100000 \
+  --env OPEN_FRACTION=0.6 \
+  --env USER_COUNT=100
+```
+
+Run soak:
+
+```bash
+DATABASE_URL="$DATABASE_URL" \
+BENCH_ADAPTER_PG_ADMIN_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+make load-soak-planetscale
+```
+
+Run the collector against PlanetScale in stats-only mode:
+
+```bash
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+POSTGRES_URL="$POSTGRES_URL" \
+CLICKHOUSE_URL=http://localhost:8123 \
+BUNDLE_GEMFILE=collector/Gemfile \
+bundle exec ruby collector/bin/collector
+```
+
+For a one-pass checkpoint, load the collector entrypoint explicitly:
+
+```bash
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+POSTGRES_URL="$POSTGRES_URL" \
+CLICKHOUSE_URL=http://localhost:8123 \
+BUNDLE_GEMFILE=collector/Gemfile \
+bundle exec ruby -e 'load "./collector/bin/collector"; CollectorRuntime.new(interval_seconds: 5, postgres_url: ENV.fetch("POSTGRES_URL"), clickhouse_url: ENV.fetch("CLICKHOUSE_URL")).run_once_pass'
+```
+
+Branch-per-run automation and PlanetScale Logs/Insights ingestion are future
+work. The first PlanetScale implementation uses `pg_stat_statements` query
+evidence.
+
 ## Manual Exploration
 
 If `make load-smoke` times out or exits `3`, the fastest way to understand why
