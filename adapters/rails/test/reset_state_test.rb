@@ -97,8 +97,8 @@ class ResetStateTest < Minitest::Test
     result = command.call
 
     refute result.fetch("ok")
-    assert_equal "reset_failed", result.fetch("error_code")
-    assert_includes result.fetch("message"), "schema load failed"
+    assert_equal "reset_failed", result.fetch("error").fetch("code")
+    assert_includes result.fetch("error").fetch("message"), "schema load failed"
   end
 
   def test_reset_state_rebuilds_template_when_seed_env_changes
