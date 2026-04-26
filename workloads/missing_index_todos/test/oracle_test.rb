@@ -75,6 +75,24 @@ class MissingIndexTodosOracleTest < Minitest::Test
     assert_equal %(("todos"."user_id" = 1)), result.fetch(:plan).fetch("tenant_condition")
   end
 
+  def test_oracle_accepts_multi_child_bitmap_shape_when_one_child_proves_tenant_contract
+    result = build_dominance_oracle(
+      explain_rows: [
+        explain_row(plan: missing_index_plan(access_node_builder: method(:multi_child_bitmap_access_node))),
+      ],
+      clickhouse_topn_rows: [
+        { "queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0" },
+      ],
+    ).call(
+      run_dir: write_run_record(query_ids: ["primary"]),
+      database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+      clickhouse_url: "http://clickhouse:8123",
+    )
+
+    assert_equal "Bitmap Heap Scan", result.fetch(:plan).fetch("Node Type")
+    assert_equal %(("todos"."user_id" = 1)), result.fetch(:plan).fetch("tenant_condition")
+  end
+
   def test_oracle_fails_when_run_record_lacks_top_level_query_ids
     run_dir = write_run_record
     explain_rows = [
@@ -236,6 +254,48 @@ class MissingIndexTodosOracleTest < Minitest::Test
     end
 
     assert_includes error.message, "user_id"
+    assert_includes error.message, "FAIL: explain"
+  end
+
+  def test_oracle_fails_when_plan_has_wrong_sort
+    run_dir = write_run_record(query_ids: ["111"])
+    explain_rows = [explain_row(plan: missing_index_plan(sort_keys: ["updated_at DESC", "id DESC"]))]
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg: FakePg.new(explain_rows),
+      clickhouse_query: ->(**) { { "total_exec_count" => "600" } },
+      sleeper: ->(*) {},
+    )
+
+    error = assert_raises(Load::Workloads::MissingIndexTodos::Oracle::Failure) do
+      oracle.call(
+        run_dir:,
+        database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+        clickhouse_url: "http://clickhouse:8123",
+      )
+    end
+
+    assert_includes error.message, "created_at, desc, id, desc"
+    assert_includes error.message, "FAIL: explain"
+  end
+
+  def test_oracle_fails_when_plan_has_no_sort
+    run_dir = write_run_record(query_ids: ["111"])
+    explain_rows = [explain_row(plan: missing_index_plan_without_sort)]
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg: FakePg.new(explain_rows),
+      clickhouse_query: ->(**) { { "total_exec_count" => "600" } },
+      sleeper: ->(*) {},
+    )
+
+    error = assert_raises(Load::Workloads::MissingIndexTodos::Oracle::Failure) do
+      oracle.call(
+        run_dir:,
+        database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+        clickhouse_url: "http://clickhouse:8123",
+      )
+    end
+
+    assert_includes error.message, "created_at, desc, id, desc"
     assert_includes error.message, "FAIL: explain"
   end
 
@@ -417,15 +477,30 @@ class MissingIndexTodosOracleTest < Minitest::Test
     }
   end
 
-  def missing_index_plan(sort_node_type: "Sort", sort_keys: ["created_at DESC", "id DESC"], access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+  def missing_index_plan(sort_node_type: "Sort", sort_keys: ["created_at DESC", "id DESC"], access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id", access_node_builder: nil)
     {
       "Node Type" => "Limit",
       "Plans" => [
         {
           "Node Type" => sort_node_type,
           "Sort Key" => sort_keys,
-          "Plans" => [missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)],
+          "Plans" => [
+            if access_node_builder
+              access_node_builder.call(filter:, access_condition:, index_name:)
+            else
+              missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)
+            end,
+          ],
         },
+      ],
+    }
+  end
+
+  def missing_index_plan_without_sort(access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+    {
+      "Node Type" => "Limit",
+      "Plans" => [
+        missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:),
       ],
     }
   end
@@ -454,6 +529,32 @@ class MissingIndexTodosOracleTest < Minitest::Test
         "Filter" => filter,
       }
     end
+  end
+
+  def multi_child_bitmap_access_node(filter:, access_condition:, index_name:)
+    {
+      "Node Type" => "Bitmap Heap Scan",
+      "Relation Name" => "todos",
+      "Recheck Cond" => access_condition,
+      "Filter" => filter,
+      "Plans" => [
+        {
+          "Node Type" => "BitmapAnd",
+          "Plans" => [
+            {
+              "Node Type" => "Bitmap Index Scan",
+              "Index Name" => "index_todos_on_status",
+              "Index Cond" => %(("todos"."status" = 'open'::text)),
+            },
+            {
+              "Node Type" => "Bitmap Index Scan",
+              "Index Name" => index_name,
+              "Index Cond" => access_condition,
+            },
+          ],
+        },
+      ],
+    }
   end
 
   def write_run_record(query_ids: nil)

@@ -111,6 +111,18 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     assert_equal "Bitmap Heap Scan", result.fetch(:checks).fetch(0).fetch(:node_type)
   end
 
+  def test_verifier_accepts_multi_child_bitmap_shape_when_one_child_proves_tenant_contract
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan(access_node_builder: method(:multi_child_bitmap_access_node)) : search_reference_plan
+      end,
+    )
+
+    result = verifier.call(base_url: "http://app.test")
+
+    assert_equal "Bitmap Heap Scan", result.fetch(:checks).fetch(0).fetch(:node_type)
+  end
+
   def test_verifier_uses_default_counts_calls_reader
     connection = FakePgConnection.new([{ "calls" => "7" }])
     pg = FakePg.new(connection)
@@ -180,6 +192,36 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     assert_includes error.message, "/api/todos"
   end
 
+  def test_verifier_fails_when_missing_index_plan_has_wrong_sort
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan(sort_keys: ["updated_at DESC", "id DESC"]) : search_reference_plan
+      end,
+    )
+
+    error = assert_raises(Load::VerificationError) do
+      verifier.call(base_url: "http://app.test")
+    end
+
+    assert_includes error.message, "created_at DESC, id DESC"
+    assert_includes error.message, "/api/todos"
+  end
+
+  def test_verifier_fails_when_missing_index_plan_has_no_sort
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan_without_sort : search_reference_plan
+      end,
+    )
+
+    error = assert_raises(Load::VerificationError) do
+      verifier.call(base_url: "http://app.test")
+    end
+
+    assert_includes error.message, "created_at DESC, id DESC"
+    assert_includes error.message, "/api/todos"
+  end
+
   def test_verifier_fails_when_counts_calls_are_below_user_count
     verifier = build_verifier(counts_calls_reader: -> { 2 }, counts_body: counts_body_for_users(10))
 
@@ -204,6 +246,21 @@ class MissingIndexTodosVerifierTest < Minitest::Test
 
     assert_includes error.message, "/api/todos/search"
     assert_includes error.message, "search"
+  end
+
+  def test_verifier_fails_when_search_plan_has_extra_stable_child_entries
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan : search_plan_with_extra_stable_child_entry
+      end,
+    )
+
+    error = assert_raises(Load::VerificationError) do
+      verifier.call(base_url: "http://app.test")
+    end
+
+    assert_includes error.message, "/api/todos/search"
+    assert_includes error.message, "search explain tree drifted"
   end
 
   def test_verifier_allows_search_plan_when_only_volatile_fields_drift
@@ -242,15 +299,30 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     end
   end
 
-  def missing_index_plan(sort_node_type: "Sort", sort_keys: ["created_at DESC", "id DESC"], access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+  def missing_index_plan(sort_node_type: "Sort", sort_keys: ["created_at DESC", "id DESC"], access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id", access_node_builder: nil)
     {
       "Node Type" => "Limit",
       "Plans" => [
         {
           "Node Type" => sort_node_type,
           "Sort Key" => sort_keys,
-          "Plans" => [missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)],
+          "Plans" => [
+            if access_node_builder
+              access_node_builder.call(filter:, access_condition:, index_name:)
+            else
+              missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)
+            end,
+          ],
         },
+      ],
+    }
+  end
+
+  def missing_index_plan_without_sort(access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+    {
+      "Node Type" => "Limit",
+      "Plans" => [
+        missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:),
       ],
     }
   end
@@ -279,6 +351,32 @@ class MissingIndexTodosVerifierTest < Minitest::Test
         "Filter" => filter,
       }
     end
+  end
+
+  def multi_child_bitmap_access_node(filter:, access_condition:, index_name:)
+    {
+      "Node Type" => "Bitmap Heap Scan",
+      "Relation Name" => "todos",
+      "Recheck Cond" => access_condition,
+      "Filter" => filter,
+      "Plans" => [
+        {
+          "Node Type" => "BitmapAnd",
+          "Plans" => [
+            {
+              "Node Type" => "Bitmap Index Scan",
+              "Index Name" => "index_todos_on_status",
+              "Index Cond" => %(("todos"."status" = 'open'::text)),
+            },
+            {
+              "Node Type" => "Bitmap Index Scan",
+              "Index Name" => index_name,
+              "Index Cond" => access_condition,
+            },
+          ],
+        },
+      ],
+    }
   end
 
   def search_reference_plan
@@ -341,6 +439,16 @@ class MissingIndexTodosVerifierTest < Minitest::Test
         },
       ],
     }
+  end
+
+  def search_plan_with_extra_stable_child_entry
+    plan = JSON.parse(JSON.generate(search_reference_plan))
+    plan.fetch("Plans").first.fetch("Plans") << {
+      "Node Type" => "Seq Scan",
+      "Relation Name" => "todos",
+      "Filter" => "(((title)::text ~~ '%foo%'::text) AND (user_id = 2))",
+    }
+    plan
   end
 
   def search_reference_path

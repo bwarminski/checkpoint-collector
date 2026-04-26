@@ -121,16 +121,15 @@ module Load
           access_node = find_missing_index_access_node(plan)
           raise Failure, "FAIL: explain (expected todos access under sort #{EXPECTED_SORT_KEY.join(', ')})" unless access_node
 
-          tenant_condition = access_tenant_condition(access_node)
+          tenant_condition = matching_access_condition(access_node) { |condition| condition.include?("user_id") }
           raise Failure, "FAIL: explain (expected Index Cond or Recheck Cond to include user_id)" unless tenant_condition.include?("user_id")
           raise Failure, "FAIL: explain (expected status filter after tenant lookup)" unless access_node.fetch("Filter", "").to_s.include?("status")
 
-          index_name = access_index_name(access_node)
-          raise Failure, "FAIL: explain (expected user-scoped access via #{USER_ID_INDEX_NAME})" unless index_name == USER_ID_INDEX_NAME
+          raise Failure, "FAIL: explain (expected user-scoped access via #{USER_ID_INDEX_NAME})" unless subtree_includes_index_name?(access_node, USER_ID_INDEX_NAME)
 
           {
             "Node Type" => access_node.fetch("Node Type"),
-            "Index Name" => index_name,
+            "Index Name" => USER_ID_INDEX_NAME,
             "Sort Key" => ["created_at DESC", "id DESC"],
             "Filter" => access_node.fetch("Filter", "").to_s,
             "tenant_condition" => tenant_condition,
@@ -153,31 +152,25 @@ module Load
           nil
         end
 
-        def access_tenant_condition(node)
-          index_condition = node.fetch("Index Cond", "").to_s
-          return index_condition unless index_condition.empty?
-
-          recheck_condition = node.fetch("Recheck Cond", "").to_s
-          return recheck_condition unless recheck_condition.empty?
+        def matching_access_condition(node, &matcher)
+          [node.fetch("Index Cond", "").to_s, node.fetch("Recheck Cond", "").to_s].each do |condition|
+            return condition if !condition.empty? && matcher.call(condition)
+          end
 
           Array(node["Plans"]).each do |child|
-            condition = access_tenant_condition(child)
+            condition = matching_access_condition(child, &matcher)
             return condition unless condition.empty?
           end
 
           ""
         end
 
-        def access_index_name(node)
-          index_name = node.fetch("Index Name", "").to_s
-          return index_name unless index_name.empty?
+        def subtree_includes_index_name?(node, expected_index_name)
+          return true if node.fetch("Index Name", "").to_s == expected_index_name
 
-          Array(node["Plans"]).each do |child|
-            nested_index_name = access_index_name(child)
-            return nested_index_name unless nested_index_name.empty?
+          Array(node["Plans"]).any? do |child|
+            subtree_includes_index_name?(child, expected_index_name)
           end
-
-          ""
         end
 
         def sort_matches_expected?(node)

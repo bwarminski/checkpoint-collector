@@ -105,11 +105,11 @@ module Load
           access_node = find_missing_index_access_node(plan)
           raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected todos access under sort created_at DESC, id DESC" unless access_node
 
-          tenant_condition = access_tenant_condition(access_node)
+          tenant_condition = matching_access_condition(access_node) { |condition| condition.include?("user_id") }
           raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Index Cond or Recheck Cond to include user_id" unless tenant_condition.include?("user_id")
           raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected status filter after tenant lookup" unless access_node.fetch("Filter", "").to_s.include?("status")
 
-          unless access_index_name(access_node) == USER_ID_INDEX_NAME
+          unless subtree_includes_index_name?(access_node, USER_ID_INDEX_NAME)
             raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected user-scoped access via #{USER_ID_INDEX_NAME}"
           end
 
@@ -161,31 +161,25 @@ module Load
           nil
         end
 
-        def access_tenant_condition(node)
-          index_condition = node.fetch("Index Cond", "").to_s
-          return index_condition unless index_condition.empty?
-
-          recheck_condition = node.fetch("Recheck Cond", "").to_s
-          return recheck_condition unless recheck_condition.empty?
+        def matching_access_condition(node, &matcher)
+          [node.fetch("Index Cond", "").to_s, node.fetch("Recheck Cond", "").to_s].each do |condition|
+            return condition if !condition.empty? && matcher.call(condition)
+          end
 
           Array(node["Plans"]).each do |child|
-            condition = access_tenant_condition(child)
+            condition = matching_access_condition(child, &matcher)
             return condition unless condition.empty?
           end
 
           ""
         end
 
-        def access_index_name(node)
-          index_name = node.fetch("Index Name", "").to_s
-          return index_name unless index_name.empty?
+        def subtree_includes_index_name?(node, expected_index_name)
+          return true if node.fetch("Index Name", "").to_s == expected_index_name
 
-          Array(node["Plans"]).each do |child|
-            nested_index_name = access_index_name(child)
-            return nested_index_name unless nested_index_name.empty?
+          Array(node["Plans"]).any? do |child|
+            subtree_includes_index_name?(child, expected_index_name)
           end
-
-          ""
         end
 
         def sort_matches_expected?(node)
@@ -221,7 +215,7 @@ module Load
             actual.is_a?(Hash) && plan_matches_reference?(actual:, reference:, keys:)
           when Array
             actual.is_a?(Array) &&
-              actual.length >= reference.length &&
+              actual.length == reference.length &&
               reference.each_with_index.all? do |child_reference, index|
                 values_match_reference?(actual.fetch(index), child_reference, keys:)
               end
