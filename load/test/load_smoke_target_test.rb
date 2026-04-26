@@ -17,7 +17,7 @@ class LoadSmokeTargetTest < Minitest::Test
     makefile = File.read(File.expand_path("../../Makefile", __dir__))
 
     assert_includes makefile,
-      ".PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads"
+      ".PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads load-soak-planetscale validate-collector-postgres validate-collector-planetscale"
     assert_includes makefile, "test-adapters-integration: test-adapters-fixture-integration test-adapters-demo-integration"
     assert_includes makefile, "test-adapters-fixture-integration:"
     assert_includes makefile, "test-adapters-demo-integration:"
@@ -34,6 +34,16 @@ class LoadSmokeTargetTest < Minitest::Test
 
     assert_includes makefile, "verify-fixture:"
     assert_includes makefile, "load-soak:"
+  end
+
+  def test_makefile_exposes_collector_validation_targets
+    makefile = File.read(File.expand_path("../../Makefile", __dir__))
+
+    assert_includes makefile, "validate-collector-postgres"
+    assert_includes makefile, "validate-collector-planetscale"
+    assert_includes makefile, "bin/collector-validate"
+    assert_includes makefile, "COLLECTOR_DISABLE_LOG_INGESTION=1"
+    assert_includes makefile, "$${BENCH_ADAPTER_PG_ADMIN_URL:-$${POSTGRES_URL"
   end
 
   def test_readme_documents_verify_fixture_and_soak_commands

@@ -1,0 +1,34 @@
+#!/usr/bin/env ruby
+# ABOUTME: Validates one collector pass against a selected Postgres and ClickHouse target.
+# ABOUTME: Provides local and PlanetScale smoke checks for collector wiring.
+require "json"
+require "optparse"
+
+load File.expand_path("../collector/bin/collector", __dir__)
+require_relative "../collector/lib/collector_target_validator"
+
+begin
+  options = { require_stats_only: false }
+  OptionParser.new do |parser|
+    parser.on("--stats-only") { options[:require_stats_only] = true }
+  end.parse!(ARGV)
+
+  validator = CollectorTargetValidator.new(
+    postgres_url: ENV["POSTGRES_URL"],
+    clickhouse_url: ENV["CLICKHOUSE_URL"],
+    require_stats_only: options.fetch(:require_stats_only),
+  )
+  result = validator.call
+
+  $stdout.puts(
+    "collector validation passed: collector_state #{result.fetch("collector_state_before")} -> #{result.fetch("collector_state_after")}, " \
+    "query_events #{result.fetch("query_events_before")} -> #{result.fetch("query_events_after")}"
+  )
+  exit 0
+rescue CollectorTargetValidator::Error => error
+  $stderr.puts("collector validation failed: #{error.message}")
+  exit 1
+rescue OptionParser::ParseError => error
+  $stderr.puts(error.message)
+  exit 1
+end
