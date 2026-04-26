@@ -33,13 +33,14 @@ class CliTest < Minitest::Test
       "missing-index-todos"
     end
 
+    class Verifier
+      def call(base_url:)
+        { ok: true, base_url: }
+      end
+    end
+
     def verifier(database_url:, pg:)
-      Load::FixtureVerifier.new(
-        explain_reader: ->(*) { {} },
-        stats_reset: -> {},
-        counts_calls_reader: -> { 1 },
-        search_reference_reader: -> { {} },
-      )
+      Verifier.new
     end
   end
 
@@ -150,7 +151,7 @@ class CliTest < Minitest::Test
     end
   end
 
-  def test_run_command_builds_a_fixture_verifier_for_finite_runs
+  def test_run_command_builds_a_workload_owned_verifier_for_finite_runs
     factory = FakeRunnerFactory.new(exit_code: 0)
     original_database_url = ENV["DATABASE_URL"]
     ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
@@ -167,13 +168,13 @@ class CliTest < Minitest::Test
     )
 
     assert_equal 0, status
-    assert_instance_of Load::FixtureVerifier, factory.calls.first.fetch(:config).verifier
+    assert_instance_of MissingIndexTodosWorkload::Verifier, factory.calls.first.fetch(:config).verifier
     assert_equal :enforce, factory.calls.first.fetch(:invariant_config).policy
   ensure
     ENV["DATABASE_URL"] = original_database_url
   end
 
-  def test_run_command_builds_a_fixture_verifier_for_missing_index_todos_soak_runs
+  def test_run_command_builds_a_workload_owned_verifier_for_missing_index_todos_soak_runs
     factory = FakeRunnerFactory.new(exit_code: 0)
     original_database_url = ENV["DATABASE_URL"]
     ENV["DATABASE_URL"] = "postgres://example.test/checkpoint"
@@ -190,7 +191,7 @@ class CliTest < Minitest::Test
     )
 
     assert_equal 0, status
-    assert_instance_of Load::FixtureVerifier, factory.calls.first.fetch(:config).verifier
+    assert_instance_of MissingIndexTodosWorkload::Verifier, factory.calls.first.fetch(:config).verifier
     assert_equal :continuous, factory.calls.first.fetch(:config).mode
     assert_equal :enforce, factory.calls.first.fetch(:invariant_config).policy
   ensure
@@ -417,7 +418,7 @@ class CliTest < Minitest::Test
         verifier = Object.new
         verifier.define_singleton_method(:call) do |base_url:|
           raise "missing base_url" if base_url.nil?
-          raise Load::FixtureVerifier::VerificationError, "fixture verification failed for /api/todos/counts: expected at least 2 count calls"
+          raise Load::VerificationError, "fixture verification failed for /api/todos/counts: expected at least 2 count calls"
         end
 
         cli = Load::CLI.new(
@@ -450,7 +451,7 @@ class CliTest < Minitest::Test
         stderr = StringIO.new
         verifier = Object.new
         verifier.define_singleton_method(:call) do |base_url:|
-          raise Load::FixtureVerifier::VerificationError, "fixture verification failed for #{base_url}"
+          raise Load::VerificationError, "fixture verification failed for #{base_url}"
         end
 
         cli = Load::CLI.new(

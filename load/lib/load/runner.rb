@@ -130,7 +130,7 @@ module Load
       rescue Load::InvariantMonitor::Failure
         @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "invariant_sampler_failed"))
         result = Load::ExitCodes::ADAPTER_ERROR
-      rescue Load::FixtureVerifier::VerificationError => error
+      rescue Load::VerificationError => error
         @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "fixture_verification_failed").merge(error_message: error.message))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue AdapterClient::AdapterError

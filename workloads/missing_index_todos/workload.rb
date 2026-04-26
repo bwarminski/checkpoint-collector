@@ -2,6 +2,7 @@
 # ABOUTME: Declares the fixed scale, weighted actions, and load plan for the run.
 require_relative "../../load/lib/load"
 require_relative "invariant_sampler"
+require_relative "verifier"
 require_relative "actions/close_todo"
 require_relative "actions/create_todo"
 require_relative "actions/delete_completed_todos"
@@ -50,11 +51,7 @@ module Load
         end
 
         def verifier(database_url:, pg:)
-          Load::FixtureVerifier.new(
-            explain_reader: Load::FixtureVerifier.build_explain_reader(database_url:, pg:),
-            stats_reset: Load::FixtureVerifier.build_stats_reset(database_url:, pg:),
-            counts_calls_reader: Load::FixtureVerifier.build_counts_calls_reader(database_url:, pg:),
-          )
+          Load::Workloads::MissingIndexTodos::Verifier.new(database_url:, pg:)
         end
       end
     end

@@ -42,7 +42,7 @@ module Load
         @stderr.puts("unknown command: #{command}")
         usage_error
       end
-    rescue Load::FixtureVerifier::VerificationError => error
+    rescue Load::VerificationError => error
       @stderr.puts(error.message)
       Load::ExitCodes::ADAPTER_ERROR
     rescue VerifierError, Load::AdapterClient::AdapterError, Load::ReadinessGate::Timeout => error
@@ -139,7 +139,7 @@ module Load
       return verifier if verifier.respond_to?(:call)
 
       raise VerifierError, "verifier must respond to call"
-    rescue Load::FixtureVerifier::VerificationError
+    rescue Load::VerificationError
       raise
     rescue StandardError => error
       raise VerifierError, error.message
@@ -166,7 +166,7 @@ module Load
       ).call
       verifier.call(base_url:)
       Load::ExitCodes::SUCCESS
-    rescue Load::FixtureVerifier::VerificationError => error
+    rescue Load::VerificationError => error
       failure = error
       raise
     rescue StandardError => error

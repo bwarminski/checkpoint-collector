@@ -1,9 +1,10 @@
-# ABOUTME: Verifies fixture preflight checks for the mixed missing-index workload.
-# ABOUTME: Covers missing-index, counts N+1, and search-plan drift assertions.
+# ABOUTME: Verifies the missing-index workload preflight checks and failure boundaries.
+# ABOUTME: Covers missing-index, counts fan-out, and tenant-scoped search plan drift.
 require "json"
-require_relative "test_helper"
+require_relative "../../../load/test/test_helper"
+require_relative "../verifier"
 
-class FixtureVerifierTest < Minitest::Test
+class MissingIndexTodosVerifierTest < Minitest::Test
   FakeResponse = Struct.new(:code, :body)
 
   class FakeClient
@@ -56,14 +57,14 @@ class FixtureVerifierTest < Minitest::Test
     )
     explain_sqls = []
     stats_reset_calls = 0
-    verifier = Load::FixtureVerifier.new(
+    verifier = Load::Workloads::MissingIndexTodos::Verifier.new(
       client_factory: lambda do |base_url|
         assert_equal "http://app.test", base_url
         client
       end,
       explain_reader: lambda do |sql|
         explain_sqls << sql
-        sql.include?("status = 'open'") ? missing_index_plan : search_reference_plan
+        sql.include?(%(status = 'open')) ? missing_index_plan : search_reference_plan
       end,
       stats_reset: -> { stats_reset_calls += 1 },
       counts_calls_reader: -> { 11 },
@@ -79,20 +80,22 @@ class FixtureVerifierTest < Minitest::Test
     assert_equal 11, result.fetch(:checks).fetch(1).fetch(:calls)
     assert_equal 10, result.fetch(:checks).fetch(1).fetch(:users)
     assert_equal 2, explain_sqls.length
-    assert_includes explain_sqls.first, "status = 'open'"
-    assert_includes explain_sqls.last, "title LIKE '%foo%'"
+    assert_includes explain_sqls.first, %(status = 'open')
+    assert_includes explain_sqls.last, %(user_id = 1)
+    assert_includes explain_sqls.last, %(title LIKE '%foo%')
+    assert_includes explain_sqls.last, %(id DESC)
   end
 
   def test_verifier_uses_default_counts_calls_reader
     connection = FakePgConnection.new([{ "calls" => "7" }])
     pg = FakePg.new(connection)
-    verifier = Load::FixtureVerifier.new(
+    verifier = Load::Workloads::MissingIndexTodos::Verifier.new(
       client_factory: ->(base_url) do
         assert_equal "http://app.test", base_url
         counts_client(counts_body: counts_body_for_users(7))
       end,
       explain_reader: lambda do |sql|
-        sql.include?("status = 'open'") ? missing_index_plan : search_reference_plan
+        sql.include?(%(status = 'open')) ? missing_index_plan : search_reference_plan
       end,
       stats_reset: -> {},
       search_reference_reader: -> { search_reference_plan },
@@ -102,19 +105,19 @@ class FixtureVerifierTest < Minitest::Test
 
     result = verifier.call(base_url: "http://app.test")
 
-    assert_equal [Load::FixtureVerifier::COUNTS_CALLS_SQL], connection.executed_sqls
+    assert_equal [Load::Workloads::MissingIndexTodos::Verifier::COUNTS_CALLS_SQL], connection.executed_sqls
     assert_equal "postgres://db.test", pg.database_url
     assert_equal 7, result.fetch(:checks).fetch(1).fetch(:calls)
   end
 
-  def test_verifier_fails_when_missing_index_plan_loses_seq_scan
+  def test_verifier_fails_when_explain_shows_index_scan
     verifier = build_verifier(
       explain_reader: lambda do |sql|
-        sql.include?("status = 'open'") ? missing_index_plan(node_type: "Index Scan") : search_reference_plan
+        sql.include?(%(status = 'open')) ? missing_index_plan(node_type: "Index Scan") : search_reference_plan
       end,
     )
 
-    error = assert_raises(Load::FixtureVerifier::VerificationError) do
+    error = assert_raises(Load::VerificationError) do
       verifier.call(base_url: "http://app.test")
     end
 
@@ -122,10 +125,10 @@ class FixtureVerifierTest < Minitest::Test
     assert_includes error.message, "/api/todos"
   end
 
-  def test_verifier_fails_when_counts_path_does_not_scale_with_users_count
+  def test_verifier_fails_when_counts_calls_are_below_user_count
     verifier = build_verifier(counts_calls_reader: -> { 2 }, counts_body: counts_body_for_users(10))
 
-    error = assert_raises(Load::FixtureVerifier::VerificationError) do
+    error = assert_raises(Load::VerificationError) do
       verifier.call(base_url: "http://app.test")
     end
 
@@ -136,11 +139,11 @@ class FixtureVerifierTest < Minitest::Test
   def test_verifier_fails_when_search_plan_drifts_from_reference
     verifier = build_verifier(
       explain_reader: lambda do |sql|
-        sql.include?("status = 'open'") ? missing_index_plan : drifted_search_plan
+        sql.include?(%(status = 'open')) ? missing_index_plan : drifted_search_plan
       end,
     )
 
-    error = assert_raises(Load::FixtureVerifier::VerificationError) do
+    error = assert_raises(Load::VerificationError) do
       verifier.call(base_url: "http://app.test")
     end
 
@@ -151,7 +154,7 @@ class FixtureVerifierTest < Minitest::Test
   def test_verifier_allows_search_plan_when_only_volatile_fields_drift
     verifier = build_verifier(
       explain_reader: lambda do |sql|
-        sql.include?("status = 'open'") ? missing_index_plan : search_plan_with_volatile_drift
+        sql.include?(%(status = 'open')) ? missing_index_plan : search_plan_with_volatile_drift
       end,
     )
 
@@ -163,9 +166,9 @@ class FixtureVerifierTest < Minitest::Test
   private
 
   def build_verifier(explain_reader: nil, counts_calls_reader: nil, counts_body: counts_body_for_users(2))
-    Load::FixtureVerifier.new(
+    Load::Workloads::MissingIndexTodos::Verifier.new(
       client_factory: ->(*) { counts_client(counts_body:) },
-      explain_reader: explain_reader || lambda { |sql| sql.include?("status = 'open'") ? missing_index_plan : search_reference_plan },
+      explain_reader: explain_reader || lambda { |sql| sql.include?(%(status = 'open')) ? missing_index_plan : search_reference_plan },
       stats_reset: -> {},
       counts_calls_reader: counts_calls_reader || -> { 3 },
       search_reference_reader: -> { search_reference_plan },
@@ -184,7 +187,7 @@ class FixtureVerifierTest < Minitest::Test
     end
   end
 
-  def missing_index_plan(node_type: "Seq Scan", filter: %(("todos"."status" = 'open'::text)))
+  def missing_index_plan(node_type: "Seq Scan", filter: %(("todos"."user_id" = 1) AND ("todos"."status" = 'open'::text)))
     {
       "Node Type" => "Gather",
       "Plans" => [
@@ -238,7 +241,7 @@ class FixtureVerifierTest < Minitest::Test
           "Total Cost" => 888.88,
           "Plan Rows" => 44,
           "Plan Width" => 66,
-          "Sort Key" => ["created_at DESC"],
+          "Sort Key" => ["created_at DESC", "id DESC"],
           "Plans" => [
             {
               "Node Type" => "Seq Scan",
@@ -251,7 +254,7 @@ class FixtureVerifierTest < Minitest::Test
               "Total Cost" => 222.22,
               "Plan Rows" => 33,
               "Plan Width" => 55,
-              "Filter" => "((title)::text ~~ '%foo%'::text)",
+              "Filter" => "(((title)::text ~~ '%foo%'::text) AND (user_id = 1))",
             },
           ],
         },
@@ -260,6 +263,6 @@ class FixtureVerifierTest < Minitest::Test
   end
 
   def search_reference_path
-    File.expand_path("../../fixtures/mixed-todo-app/search-explain.json", __dir__)
+    File.expand_path("../../../fixtures/mixed-todo-app/search-explain.json", __dir__)
   end
 end

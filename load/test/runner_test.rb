@@ -77,7 +77,7 @@ class RunnerTest < Minitest::Test
       adapter = FakeAdapterClient.new(call_order:)
       verifier = lambda do |base_url:|
         call_order << :verify
-        raise Load::FixtureVerifier::VerificationError, "counts pathology missing for #{base_url}"
+        raise Load::VerificationError, "counts pathology missing for #{base_url}"
       end
       runner = build_runner(
         workload: VerifierOrderWorkload.new,

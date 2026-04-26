@@ -34,7 +34,7 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     workload = Load::Workloads::MissingIndexTodos::Workload.new
     verifier = workload.verifier(database_url: "postgres://example.test/checkpoint", pg: Object.new)
 
-    assert_instance_of Load::FixtureVerifier, verifier
+    assert_instance_of Load::Workloads::MissingIndexTodos::Verifier, verifier
   end
 
   def test_workload_sampler_applies_rows_per_table_thresholds_to_sample_output
