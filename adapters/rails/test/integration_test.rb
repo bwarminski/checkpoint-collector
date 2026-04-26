@@ -10,6 +10,21 @@ require "timeout"
 require_relative "test_helper"
 
 class IntegrationTest < Minitest::Test
+  def test_fixture_adapter_env_removes_inherited_postgres_urls
+    with_env(
+      "RUN_RAILS_INTEGRATION" => "1",
+      "DATABASE_URL" => "postgres://postgres:postgres@localhost:5432/checkpoint_demo",
+      "BENCH_ADAPTER_PG_ADMIN_URL" => "postgres://postgres:postgres@localhost:5432/postgres",
+    ) do
+      env = adapter_env
+
+      assert env.key?("DATABASE_URL"), "fixture adapter env must explicitly unset DATABASE_URL"
+      assert env.key?("BENCH_ADAPTER_PG_ADMIN_URL"), "fixture adapter env must explicitly unset BENCH_ADAPTER_PG_ADMIN_URL"
+      assert_nil env["DATABASE_URL"]
+      assert_nil env["BENCH_ADAPTER_PG_ADMIN_URL"]
+    end
+  end
+
   def test_prepare_migrate_load_start_and_stop_against_fixture_app
     skip "set RUN_RAILS_INTEGRATION=1 to run" unless ENV["RUN_RAILS_INTEGRATION"] == "1"
 
@@ -62,7 +77,7 @@ class IntegrationTest < Minitest::Test
   def adapter_env
     return {} unless ENV["RUN_RAILS_INTEGRATION"] == "1"
 
-    bundle_env(File.expand_path("fixtures/demo_app", __dir__))
+    fixture_env(File.expand_path("fixtures/demo_app", __dir__))
   end
 
   def bundle_env(app_root)
@@ -71,6 +86,26 @@ class IntegrationTest < Minitest::Test
       "BUNDLE_PATH" => File.join(app_root, "vendor/bundle"),
       "BUNDLE_USER_HOME" => File.join(app_root, ".bundle-home"),
     }
+  end
+
+  def fixture_env(app_root)
+    bundle_env(app_root).merge(
+      "DATABASE_URL" => nil,
+      "BENCH_ADAPTER_PG_ADMIN_URL" => nil,
+    )
+  end
+
+  def with_env(overrides)
+    previous = overrides.transform_values { nil }
+    overrides.each_key { |key| previous[key] = ENV[key] }
+    overrides.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    previous.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
   end
 
   def wait_for_up(base_url)
