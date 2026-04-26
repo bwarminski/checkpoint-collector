@@ -43,6 +43,64 @@ class ResetStateTest < Minitest::Test
     assert_includes runner.argv_history, ["bin/rails", "db:create", "db:schema:load"]
   end
 
+  def test_reset_state_remote_strategy_skips_template_cache_and_runs_schema_seed_and_stats_steps
+    query_ids_json = %({"query_ids":["111"]})
+    runner = FakeCommandRunner.new(
+      results: {
+        ["bin/rails", "runner", RailsAdapter::Commands::ResetState::QUERY_IDS_SCRIPT.fetch("missing-index-todos")] => FakeResult.new(status: 0, stdout: query_ids_json, stderr: ""),
+      },
+    )
+    cache = FakeTemplateCache.new
+    command = RailsAdapter::Commands::ResetState.new(
+      app_root: "/tmp/demo",
+      workload: "missing-index-todos",
+      seed: 42,
+      env_pairs: { "ROWS_PER_TABLE" => "100000", "OPEN_FRACTION" => "0.6", "USER_COUNT" => "100" },
+      command_runner: runner,
+      template_cache: cache,
+      reset_strategy: "remote",
+      clock: fake_clock(0.0, 1.0),
+    )
+
+    result = command.call
+
+    assert result.fetch("ok"), result.inspect
+    assert_equal ["111"], result.fetch("query_ids")
+    assert_equal 0, cache.build_calls
+    assert_equal 0, cache.clone_calls
+    assert_equal [
+      ["bin/rails", "db:schema:load"],
+      ["bin/rails", "runner", %(load Rails.root.join("db/seeds.rb").to_s)],
+      ["bin/rails", "runner", %(ActiveRecord::Base.connection.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"))],
+      ["bin/rails", "runner", RailsAdapter::Commands::ResetState::QUERY_IDS_SCRIPT.fetch("missing-index-todos")],
+      ["bin/rails", "runner", %(ActiveRecord::Base.connection.execute("SELECT pg_stat_statements_reset()"))],
+    ], runner.argv_history
+  end
+
+  def test_reset_state_remote_strategy_reports_schema_load_failure
+    runner = FakeCommandRunner.new(
+      results: {
+        ["bin/rails", "db:schema:load"] => FakeResult.new(status: 1, stdout: "", stderr: "schema failed"),
+      },
+    )
+    command = RailsAdapter::Commands::ResetState.new(
+      app_root: "/tmp/demo",
+      workload: "missing-index-todos",
+      seed: 42,
+      env_pairs: {},
+      command_runner: runner,
+      template_cache: FakeTemplateCache.new,
+      reset_strategy: "remote",
+      clock: fake_clock(0.0, 1.0),
+    )
+
+    result = command.call
+
+    refute result.fetch("ok")
+    assert_equal "reset_failed", result.fetch("error_code")
+    assert_includes result.fetch("message"), "schema load failed"
+  end
+
   def test_reset_state_rebuilds_template_when_seed_env_changes
     runner = FakeCommandRunner.new
     cache = SeedAwareTemplateCache.new
