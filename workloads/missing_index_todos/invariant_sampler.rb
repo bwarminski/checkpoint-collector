@@ -8,6 +8,7 @@ module Load
       class InvariantSampler
         OPEN_COUNT_SQL = "SELECT COUNT(*) AS count FROM todos WHERE status = 'open'".freeze
         TOTAL_COUNT_SQL = "SELECT reltuples::bigint AS count FROM pg_class WHERE relname = 'todos'".freeze
+        DISABLE_TRACKING_SQL = "SET pg_stat_statements.track = 'none'".freeze
 
         def initialize(pg:, database_url:, open_floor:, total_floor:, total_ceiling:)
           @pg = pg
@@ -19,21 +20,25 @@ module Load
 
         def call
           with_connection do |connection|
-            connection.transaction do |txn|
-              txn.exec("SET LOCAL pg_stat_statements.track = 'none'")
-              open_count = txn.exec(OPEN_COUNT_SQL).first.fetch("count").to_i
-              total_count = txn.exec(TOTAL_COUNT_SQL).first.fetch("count").to_i
-              Load::Runner::InvariantSample.new(
-                [
-                  Load::Runner::InvariantCheck.new("open_count", open_count, @open_floor, nil),
-                  Load::Runner::InvariantCheck.new("total_count", total_count, @total_floor, @total_ceiling),
-                ],
-              )
-            end
+            disable_tracking(connection)
+            open_count = connection.exec(OPEN_COUNT_SQL).first.fetch("count").to_i
+            total_count = connection.exec(TOTAL_COUNT_SQL).first.fetch("count").to_i
+            Load::Runner::InvariantSample.new(
+              [
+                Load::Runner::InvariantCheck.new("open_count", open_count, @open_floor, nil),
+                Load::Runner::InvariantCheck.new("total_count", total_count, @total_floor, @total_ceiling),
+              ],
+            )
           end
         end
 
         private
+
+        def disable_tracking(connection)
+          connection.exec(DISABLE_TRACKING_SQL)
+        rescue PG::InsufficientPrivilege
+          nil
+        end
 
         def with_connection
           connection = @pg.connect(@database_url)
