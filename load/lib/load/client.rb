@@ -39,9 +39,7 @@ module Load
     def start
       return self if @connection
 
-      connection = build_connection
-      connection.start
-      @connection = connection
+      @connection = connection_session(build_connection)
       self
     end
 
@@ -64,11 +62,12 @@ module Load
         @connection.request(request)
       elsif @http.respond_to?(:new)
         connection = build_connection
+        session = nil
         begin
-          connection.start
-          connection.request(request)
+          session = connection_session(connection)
+          session.request(request)
         ensure
-          connection&.finish
+          session.finish if session
         end
       else
         @http.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
@@ -82,6 +81,10 @@ module Load
 
     def uri_for(path)
       URI.join(@base_url.to_s.end_with?("/") ? @base_url.to_s : "#{@base_url}/", path.sub(/\A\//, ""))
+    end
+
+    def connection_session(connection)
+      connection.start || connection
     end
 
     def configure_timeouts(http)

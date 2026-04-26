@@ -98,6 +98,42 @@ class ClientTest < Minitest::Test
     client.finish
   end
 
+  def test_start_uses_started_session_when_connection_returns_one
+    session = FakeConnection.new
+    connection = Object.new
+    connection.define_singleton_method(:open_timeout=) { |_| }
+    connection.define_singleton_method(:read_timeout=) { |_| }
+    connection.define_singleton_method(:write_timeout=) { |_| }
+    connection.define_singleton_method(:keep_alive_timeout=) { |_| }
+    connection.define_singleton_method(:start) { session.start }
+    http = FakeHttp.new(connection)
+    client = Load::Client.new(base_url: "http://example.test:3000", http:)
+
+    client.start
+    client.get("/one")
+    client.finish
+
+    assert_equal 1, session.requests.length
+    assert session.finished?
+  end
+
+  def test_one_shot_request_uses_started_session_when_connection_returns_one
+    session = FakeConnection.new
+    connection = Object.new
+    connection.define_singleton_method(:open_timeout=) { |_| }
+    connection.define_singleton_method(:read_timeout=) { |_| }
+    connection.define_singleton_method(:write_timeout=) { |_| }
+    connection.define_singleton_method(:keep_alive_timeout=) { |_| }
+    connection.define_singleton_method(:start) { session.start }
+    http = FakeHttp.new(connection)
+    client = Load::Client.new(base_url: "http://example.test:3000", http:)
+
+    client.get("/one")
+
+    assert_equal 1, session.requests.length
+    assert session.finished?
+  end
+
   def test_request_encodes_body_for_delete_requests
     connection = FakeConnection.new
     http = FakeHttp.new(connection)
