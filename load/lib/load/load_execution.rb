@@ -54,22 +54,16 @@ module Load
     end
 
     def run(mode:, duration_seconds:)
-      request_totals = @request_totals
-      workers = nil
-      reporter = nil
-      threads = []
-
       begin
         workers = build_workers
         reporter = build_reporter(workers)
         threads = workers.map { |worker| Thread.new { worker.run } }
         reporter.start
         wait(mode:, duration_seconds:)
-        request_totals = aggregate_request_totals(workers)
       ensure
         drain_threads(threads)
         request_totals = aggregate_request_totals(workers || [])
-        reporter&.stop
+        reporter.stop
       end
 
       request_totals
