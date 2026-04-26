@@ -4,6 +4,8 @@ require "stringio"
 require_relative "test_helper"
 
 class LoadExecutionTest < Minitest::Test
+  StartupFailure = Class.new(StandardError)
+
   def test_returns_request_totals_with_at_least_one_success
     ready = Queue.new
     release = Queue.new
@@ -131,6 +133,27 @@ class LoadExecutionTest < Minitest::Test
     execution.send(:drain_threads, [thread])
 
     refute thread.alive?
+  end
+
+  def test_run_preserves_pre_startup_exception
+    workload = Object.new
+    workload.define_singleton_method(:actions) { raise StartupFailure, "boom" }
+    workload.define_singleton_method(:load_plan) { Load::LoadPlan.new(workers: 1, duration_seconds: 1.0, rate_limit: :unlimited, seed: 42) }
+    workload.define_singleton_method(:scale) { Load::Scale.new(rows_per_table: 1, seed: 42) }
+
+    execution = Load::LoadExecution.new(
+      workload:,
+      base_url: "http://127.0.0.1:3000",
+      runtime: runtime(sleeper: ->(*) {}),
+      metrics_interval_seconds: 5.0,
+      run_record: FakeRunRecord.new,
+      on_first_success: -> {},
+      reporter_factory: ->(**) { FakeReporter.new },
+    )
+
+    error = assert_raises(StartupFailure) { execution.run(mode: :finite, duration_seconds: 1.0) }
+
+    assert_equal "boom", error.message
   end
 
   private

@@ -61,9 +61,9 @@ module Load
         reporter.start
         wait(mode:, duration_seconds:)
       ensure
-        drain_threads(threads)
+        drain_threads(threads) if threads
         request_totals = aggregate_request_totals(workers || [])
-        reporter.stop
+        reporter&.stop
       end
 
       request_totals
