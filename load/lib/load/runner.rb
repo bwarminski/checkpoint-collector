@@ -12,7 +12,6 @@ module Load
     DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS = 60.0
     Runtime = Data.define(:clock, :sleeper, :http, :stop_flag)
     Settings = Data.define(:readiness_path, :startup_grace_seconds, :metrics_interval_seconds, :workload_file, :app_root, :adapter_bin)
-    InvariantState = Struct.new(:policy, :sampler, :interval_seconds, :consecutive_breaches, :thread_sleeping, :failure, keyword_init: true)
     attr_reader :run_state
 
     MetricsSink = Data.define(:run_record) do
@@ -90,9 +89,6 @@ module Load
       end
     end
 
-    class InvariantSamplerFailure < StandardError; end
-    class InvariantSamplerShutdown < StandardError; end
-
     def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil, verifier: nil, mode: :finite, invariant_policy: :enforce, invariant_sampler: nil, invariant_sample_interval_seconds: DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS, database_url: ENV["DATABASE_URL"], pg: PG, stderr: $stderr)
       @workload = workload
       @adapter_client = adapter_client
@@ -110,15 +106,6 @@ module Load
       if @mode == :continuous && invariant_policy != :off && sampler.nil?
         raise AdapterClient::AdapterError, "continuous mode requires the workload to provide an invariant sampler"
       end
-      @invariants = InvariantState.new(
-        policy: invariant_policy,
-        sampler: sampler,
-        interval_seconds: invariant_sample_interval_seconds,
-        consecutive_breaches: 0,
-        thread_sleeping: false,
-        failure: nil,
-      )
-      @invariant_mutex = Mutex.new
       @run_state = Load::RunState.new(
         run_record:,
         workload:,
@@ -128,6 +115,17 @@ module Load
         startup_grace_seconds: @settings.startup_grace_seconds,
         metrics_interval_seconds: @settings.metrics_interval_seconds,
         workload_file: workload_file,
+      )
+      @invariant_monitor = Load::InvariantMonitor.new(
+        sampler: sampler,
+        policy: invariant_policy,
+        interval_seconds: invariant_sample_interval_seconds,
+        stop_flag: @runtime.stop_flag,
+        sleeper: @runtime.sleeper,
+        on_sample: ->(sample) { @run_state.append_invariant_sample(**sample.to_record(sampled_at: current_time)) },
+        on_warning: ->(warning) { @run_state.append_warning(warning) },
+        on_breach_stop: ->(reason) { trigger_stop(reason) },
+        stderr: @stderr,
       )
       @tracking_buffers = []
     end
@@ -156,7 +154,7 @@ module Load
         start_workers(start_response.fetch("base_url"))
 
         result = finish_run
-      rescue InvariantSamplerFailure
+      rescue Load::InvariantMonitor::Failure
         @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "invariant_sampler_failed"))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue Load::FixtureVerifier::VerificationError => error
@@ -199,6 +197,9 @@ module Load
     end
 
     def start_workers(base_url)
+      reporter = nil
+      threads = []
+      invariant_thread = nil
       plan = @workload.load_plan
       rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @runtime.clock, sleeper: @runtime.sleeper)
       entries = @workload.actions
@@ -225,13 +226,18 @@ module Load
       )
       reporter.start
       threads = workers.map { |worker| Thread.new { worker.run } }
-      invariant_thread = start_invariant_thread
+      invariant_thread = @mode == :continuous ? @invariant_monitor.start : nil
       execute_window(plan.duration_seconds)
     ensure
-      stop_invariant_thread(invariant_thread)
+      invariant_failure = nil
+      begin
+        @invariant_monitor.stop(invariant_thread)
+      rescue Load::InvariantMonitor::Failure => error
+        invariant_failure = error
+      end
       drain_workers(threads)
       reporter.stop
-      raise_invariant_failure_if_present
+      raise invariant_failure if invariant_failure
     end
 
     def execute_window(duration_seconds)
@@ -267,72 +273,6 @@ module Load
         Thread.pass
         @runtime.sleeper.call(CONTINUOUS_POLL_SECONDS)
       end
-    end
-
-    def start_invariant_thread
-      return unless @mode == :continuous
-      return if @invariants.policy == :off
-      return unless @invariants.sampler
-
-      Thread.new do
-        begin
-          loop do
-            break if @runtime.stop_flag.call
-
-            begin
-              Thread.handle_interrupt(InvariantSamplerShutdown => :immediate) do
-                mark_invariant_thread_sleeping(true)
-                @runtime.sleeper.call(@invariants.interval_seconds)
-              end
-            rescue StopIteration, InvariantSamplerShutdown
-              break
-            ensure
-              mark_invariant_thread_sleeping(false)
-            end
-
-            break if @runtime.stop_flag.call
-
-            Thread.handle_interrupt(InvariantSamplerShutdown => :never) do
-              sample_invariants
-            end
-          end
-        rescue StopIteration, InvariantSamplerShutdown
-          nil
-        rescue StandardError => error
-          record_invariant_failure(error)
-          trigger_stop(:invariant_sampler_failed)
-        end
-      end
-    end
-
-    # sample -> breach? -> enforce -> ++counter -> >=3? -> trigger_stop
-    #                 -> warn    -> @stderr.puts (no counter)
-    #                 -> off     -> unreachable (thread never started)
-    #      -> !breach  -> counter = 0 (enforce only; harmless elsewhere)
-    def sample_invariants
-      sample = @invariants.sampler.call
-      @run_state.append_invariant_sample(
-        sampled_at: current_time,
-        breach: sample.breach?,
-        breaches: sample.breaches,
-        checks: sample.checks.map(&:to_record),
-      )
-      return reset_invariant_breaches unless sample.breach?
-
-      @run_state.append_warning(sample.to_warning)
-      emit_invariant_warning(sample) if @invariants.policy == :warn
-      return if @invariants.policy == :warn
-
-      @invariants.consecutive_breaches += 1
-      trigger_stop(:invariant_breach) if @invariants.consecutive_breaches >= 3
-    end
-
-    def reset_invariant_breaches
-      @invariants.consecutive_breaches = 0 if @invariants.policy == :enforce
-    end
-
-    def emit_invariant_warning(sample)
-      @stderr.puts("warning: invariant breach: #{sample.breaches.join('; ')}")
     end
 
     def trigger_stop(reason)
@@ -386,20 +326,6 @@ module Load
       @runtime.stop_flag.reason
     end
 
-    def stop_invariant_thread(thread)
-      return unless thread
-      return if thread == Thread.current
-
-      if invariant_thread_sleeping?
-        begin
-          thread.raise(InvariantSamplerShutdown.new)
-        rescue ThreadError
-          nil
-        end
-      end
-      thread.join
-    end
-
     def tracking_buffer
       TrackingBuffer.new(self)
     end
@@ -417,35 +343,6 @@ module Load
       expanded = File.expand_path(path)
       cwd = "#{Dir.pwd}/"
       expanded.start_with?(cwd) ? expanded.delete_prefix(cwd) : expanded
-    end
-
-    def mark_invariant_thread_sleeping(value)
-      @invariant_mutex.synchronize do
-        @invariants.thread_sleeping = value
-      end
-    end
-
-    def invariant_thread_sleeping?
-      @invariant_mutex.synchronize do
-        @invariants.thread_sleeping
-      end
-    end
-
-    def record_invariant_failure(error)
-      @invariant_mutex.synchronize do
-        @invariants.failure ||= error
-      end
-    end
-
-    def raise_invariant_failure_if_present
-      failure = @invariant_mutex.synchronize do
-        error = @invariants.failure
-        @invariants.failure = nil
-        error
-      end
-      return unless failure
-
-      raise InvariantSamplerFailure, "invariant sampler failed"
     end
 
     def stop_adapter_safely(result)

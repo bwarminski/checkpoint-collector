@@ -483,29 +483,6 @@ class RunnerTest < Minitest::Test
     thread&.join
   end
 
-  def test_stop_invariant_thread_ignores_thread_error_when_thread_exits_during_shutdown
-    runner = Load::Runner.new(
-      workload: MetricsWorkload.new,
-      adapter_client: FakeAdapterClient.new,
-      run_record: FakeRunRecord.new,
-      clock: fake_clock,
-      sleeper: ->(*) {},
-      http: FakeHttp.new,
-      readiness_path: nil,
-      startup_grace_seconds: 0.0,
-      mode: :continuous,
-      invariant_sampler: FakeInvariantSampler.new([]),
-      database_url: nil,
-    )
-    thread = ExitingInvariantThread.new
-
-    runner.send(:mark_invariant_thread_sleeping, true)
-    runner.send(:stop_invariant_thread, thread)
-
-    assert_equal 1, thread.raise_calls
-    assert_equal 1, thread.join_calls
-  end
-
   def test_invariant_check_reports_min_and_max_breaches
     check = Load::Runner::InvariantCheck.new("total_count", 250, 300, 200)
 
@@ -1819,29 +1796,6 @@ class RunnerTest < Minitest::Test
 
     def wait_until_interval_sleep
       @interval_sleep_started.pop
-    end
-  end
-
-  class ExitingInvariantThread
-    attr_reader :raise_calls, :join_calls
-
-    def initialize
-      @raise_calls = 0
-      @join_calls = 0
-    end
-
-    def alive?
-      true
-    end
-
-    def raise(*)
-      @raise_calls += 1
-      Kernel.raise ThreadError, "killed thread"
-    end
-
-    def join(*)
-      @join_calls += 1
-      true
     end
   end
 
