@@ -10,18 +10,18 @@ This walkthrough follows the current `wip/mixed-todo-fixture-design` branch in e
 The current behavior is defined by a stack of specs rather than one file. These specs explain why the branch now has a tenant-shaped workload, grouped runner constructor inputs, extracted execution collaborators, and a workload-owned verifier/oracle contract.
 
 ```bash
-rg -n '^# ' docs/superpowers/specs/2026-04-24-mixed-missing-index-design.md docs/superpowers/specs/2026-04-25-invariant-policy-design.md docs/superpowers/specs/2026-04-25-load-workload-boundaries-design.md docs/superpowers/specs/2026-04-25-tenant-shaped-workload-design.md docs/superpowers/specs/2026-04-25-runner-decomposition-design.md docs/superpowers/specs/2026-04-25-runner-constructor-design.md
+rg -n '^# ' docs/superpowers/specs/2026-04-24-mixed-missing-index-design.md docs/superpowers/specs/2026-04-25-invariant-policy-design.md docs/superpowers/specs/2026-04-25-load-workload-boundaries-design.md docs/superpowers/specs/2026-04-25-tenant-shaped-workload-design.md docs/superpowers/specs/2026-04-25-runner-decomposition-design.md docs/superpowers/specs/2026-04-25-runner-constructor-design.md | sort
 ```
 
 ```output
-docs/superpowers/specs/2026-04-25-runner-constructor-design.md:1:# Runner Constructor Design
-docs/superpowers/specs/2026-04-25-runner-decomposition-design.md:1:# Runner Decomposition Design
-docs/superpowers/specs/2026-04-25-load-workload-boundaries-design.md:1:# Load Workload Boundaries Design
-docs/superpowers/specs/2026-04-25-tenant-shaped-workload-design.md:1:# Tenant-Shaped Missing-Index Workload Design
+docs/superpowers/specs/2026-04-24-mixed-missing-index-design.md:1:# Mixed Missing-Index Todo Fixture — Design Spec
 docs/superpowers/specs/2026-04-25-invariant-policy-design.md:1:# ABOUTME: Specifies configurable invariant handling for load runner run and soak modes.
 docs/superpowers/specs/2026-04-25-invariant-policy-design.md:2:# ABOUTME: Defines enforce, warn, and off policies without changing fixture verification behavior.
 docs/superpowers/specs/2026-04-25-invariant-policy-design.md:4:# Invariant Policy Design
-docs/superpowers/specs/2026-04-24-mixed-missing-index-design.md:1:# Mixed Missing-Index Todo Fixture — Design Spec
+docs/superpowers/specs/2026-04-25-load-workload-boundaries-design.md:1:# Load Workload Boundaries Design
+docs/superpowers/specs/2026-04-25-runner-constructor-design.md:1:# Runner Constructor Design
+docs/superpowers/specs/2026-04-25-runner-decomposition-design.md:1:# Runner Decomposition Design
+docs/superpowers/specs/2026-04-25-tenant-shaped-workload-design.md:1:# Tenant-Shaped Missing-Index Workload Design
 ```
 
 ## Entry point and CLI
@@ -404,14 +404,18 @@ module Load
       )
       @invariant_monitor = Load::InvariantMonitor.new(
         sampler: sampler,
-        policy: @invariant_config.policy,
-        interval_seconds: @invariant_config.sample_interval_seconds,
+        config: Load::InvariantMonitor::Config.new(
+          policy: @invariant_config.policy,
+          interval_seconds: @invariant_config.sample_interval_seconds,
+        ),
         stop_flag: @runtime.stop_flag,
         sleeper: @runtime.sleeper,
-        on_sample: ->(sample) { @run_state.append_invariant_sample(**sample.to_record(sampled_at: current_time)) },
-        on_warning: ->(warning) { @run_state.append_warning(warning) },
-        on_breach_stop: ->(reason) { trigger_stop(reason) },
-        stderr: @stderr,
+        sink: Load::InvariantMonitor::Sink.new(
+          on_sample: ->(sample) { @run_state.append_invariant_sample(**sample.to_record(sampled_at: current_time)) },
+          on_warning: ->(warning) { @run_state.append_warning(warning) },
+          on_breach_stop: ->(reason) { trigger_stop(reason) },
+          stderr: @stderr,
+        ),
       )
     end
 
@@ -567,10 +571,6 @@ module Load
 
       required_keys.each { |key| response.fetch(key) }
     rescue KeyError
-      raise AdapterClient::AdapterError, "invalid adapter #{response_name} response"
-    end
-
-    def resolve_invariant_sampler
 ```
 
 ## Extracted collaborators
@@ -940,24 +940,105 @@ module Load
     Failure = Class.new(StandardError)
     Shutdown = Class.new(StandardError)
 
-    def initialize(sampler:, policy:, interval_seconds:, stop_flag:, sleeper:, on_sample:, on_warning:, on_breach_stop:, stderr:)
+    Config = Data.define(:policy, :interval_seconds) do
+      VALID_POLICIES = [:off, :warn, :enforce].freeze
+
+      def initialize(policy:, interval_seconds:)
+        unless VALID_POLICIES.include?(policy)
+          raise ArgumentError, "invalid invariant policy: #{policy.inspect}"
+        end
+
+        super
+      end
+
+      def off?
+        policy == :off
+      end
+
+      def warn?
+        policy == :warn
+      end
+
+      def enforce?
+        policy == :enforce
+      end
+    end
+
+    Sink = Data.define(:on_sample, :on_warning, :on_breach_stop, :stderr) do
+      def sample(sample)
+        on_sample.call(sample)
+      end
+
+      def warning(warning_hash)
+        on_warning.call(warning_hash)
+      end
+
+      def stderr_warning(message)
+        stderr.puts(message)
+      end
+
+      def breach_stop(reason)
+        on_breach_stop.call(reason)
+      end
+    end
+
+    class State
+      def initialize
+        @consecutive_breaches = 0
+        @sleeping = false
+        @failure = nil
+        @mutex = Mutex.new
+      end
+
+      def with_sleeping
+        @mutex.synchronize { @sleeping = true }
+        yield
+      ensure
+        @mutex.synchronize { @sleeping = false }
+      end
+
+      def sleeping?
+        @mutex.synchronize { @sleeping }
+      end
+
+      def increment_breaches
+        @mutex.synchronize do
+          @consecutive_breaches += 1
+        end
+      end
+
+      def reset_breaches
+        @mutex.synchronize do
+          @consecutive_breaches = 0
+        end
+      end
+
+      def record_failure(error)
+        @mutex.synchronize do
+          @failure ||= error
+        end
+      end
+
+      def clear_failure
+        @mutex.synchronize do
+          error = @failure
+          @failure = nil
+          error
+        end
+      end
+    end
+
+    def initialize(sampler:, config:, stop_flag:, sleeper:, sink:)
       @sampler = sampler
-      @policy = policy
-      @interval_seconds = interval_seconds
+      @config = config
       @stop_flag = stop_flag
       @sleeper = sleeper
-      @on_sample = on_sample
-      @on_warning = on_warning
-      @on_breach_stop = on_breach_stop
-      @stderr = stderr
-      @consecutive_breaches = 0
-      @sleeping = false
-      @failure = nil
-      @mutex = Mutex.new
+      @sink = sink
+      @state = State.new
     end
 
     def start
-      return nil if @policy == :off
+      return nil if @config.off?
       return nil if @sampler.nil?
 
       Thread.new do
@@ -967,7 +1048,9 @@ module Load
 
             begin
               Thread.handle_interrupt(Shutdown => :immediate) do
-                sleep_once
+                @state.with_sleeping do
+                  @sleeper.call(@config.interval_seconds)
+                end
               end
             rescue Shutdown, StopIteration
               break
@@ -982,8 +1065,8 @@ module Load
         rescue Shutdown, StopIteration
           nil
         rescue StandardError => error
-          record_failure(error)
-          @on_breach_stop.call(:invariant_sampler_failed)
+          @state.record_failure(error)
+          @sink.breach_stop(:invariant_sampler_failed)
         end
       end
     end
@@ -992,7 +1075,7 @@ module Load
       return unless thread
       return if thread == Thread.current
 
-      if sleeping?
+      if @state.sleeping?
         begin
           thread.raise(Shutdown.new)
         rescue ThreadError
@@ -1001,62 +1084,30 @@ module Load
       end
 
       thread.join
-      failure = clear_failure
+      failure = @state.clear_failure
       raise Failure, "invariant sampler failed" if failure
     end
 
     def sample_once
       sample = @sampler.call
-      @on_sample.call(sample)
-      return reset_breaches unless sample.breach?
+      @sink.sample(sample)
+
+      unless sample.breach?
+        @state.reset_breaches if @config.enforce?
+        return sample
+      end
 
       warning = sample.to_warning
-      @on_warning.call(warning)
-      @stderr.puts("warning: invariant breach: #{sample.breaches.join('; ')}") if @policy == :warn
-      return sample if @policy == :warn
+      @sink.warning(warning)
 
-      consecutive_breaches = @mutex.synchronize do
-        @consecutive_breaches += 1
+      if @config.warn?
+        @sink.stderr_warning("warning: invariant breach: #{sample.breaches.join('; ')}")
+        return sample
       end
-      @on_breach_stop.call(:invariant_breach) if consecutive_breaches >= 3
+
+      consecutive_breaches = @state.increment_breaches
+      @sink.breach_stop(:invariant_breach) if @config.enforce? && consecutive_breaches >= 3
       sample
-    end
-
-    private
-
-    def sleep_once
-      @mutex.synchronize do
-        @sleeping = true
-      end
-      @sleeper.call(@interval_seconds)
-    ensure
-      @mutex.synchronize do
-        @sleeping = false
-      end
-    end
-
-    def reset_breaches
-      @mutex.synchronize do
-        @consecutive_breaches = 0 if @policy == :enforce
-      end
-    end
-
-    def sleeping?
-      @mutex.synchronize { @sleeping }
-    end
-
-    def record_failure(error)
-      @mutex.synchronize do
-        @failure ||= error
-      end
-    end
-
-    def clear_failure
-      @mutex.synchronize do
-        error = @failure
-        @failure = nil
-        error
-      end
     end
   end
 end
@@ -2499,18 +2550,547 @@ PASS: dominance (6.76x over next queryid)
 During live verification, `/api/todos/counts` dominated whenever tenant count was too high because the controller still fans out one `COUNT(*)` query per user. The final branch state intentionally postpones that balancing work: `user_count` is now `100`, `FetchCounts` weight is `0`, and the journal records that counts/N+1 tuning is future work rather than part of this gate.
 
 ```bash
-rg -n 'FetchCounts|user_count|counts N\+1|dominance' JOURNAL.md workloads/missing_index_todos/workload.rb workloads/missing_index_todos/test/workload_test.rb
+rg -n 'FetchCounts|user_count|counts N\+1|dominance' JOURNAL.md workloads/missing_index_todos/workload.rb workloads/missing_index_todos/test/workload_test.rb | sort
 ```
 
 ```output
+JOURNAL.md:117:- 2026-04-25 tenant-shaped workload Task 1: `missing-index-todos` now sets `scale.extra[:user_count] = 1_000`; list/search/write actions sample `user_id` from `scale.extra`, `close_todo` prefetches one sampled user's open todos and returns a `204` no-op when none exist, and `delete_completed_todos` is a direct query-string delete with no prefetch.
+JOURNAL.md:118:- 2026-04-25 Task 1 regression note: `load/test/runner_test.rb` mixed-write support must model the new tenant-shaped contracts too; without `user_count` in the synthetic scale and a JSON body for `close_todo`'s open-todos prefetch, the runner test times out instead of producing diverse ids.
+JOURNAL.md:126:- 2026-04-26 dominance tuning: lowering `scale.extra[:user_count]` from `1_000` to `100` was not enough to restore oracle dominance because `/api/todos/counts` still drives the per-user `SELECT COUNT(*) FROM "todos" WHERE "todos"."user_id" = $1` family above the primary open-todos query. For now `FetchCounts` is weighted to `0` so the tenant-pathology gate can pass; revisit the counts/N+1 balance in a later phase instead of treating it as a requirement in this round.
+JOURNAL.md:91:- 2026-04-25 real mixed-workload tuning: with `rows_per_table: 100_000`, the counts N+1 path was too expensive at weight `6` and collapsed the dominance margin; lowering `FetchCounts` to weight `2` restored a real finite run to `744` ClickHouse calls on the primary query and a `4.32x` dominance margin over the next queryid.
 workloads/missing_index_todos/test/workload_test.rb:12:    assert_equal Load::Scale.new(rows_per_table: 100_000, extra: { open_fraction: 0.6, user_count: 100 }, seed: 42), workload.scale
 workloads/missing_index_todos/test/workload_test.rb:13:    assert_equal 100, workload.scale.extra.fetch(:user_count)
 workloads/missing_index_todos/test/workload_test.rb:20:      Load::ActionEntry.new(Load::Workloads::MissingIndexTodos::Actions::FetchCounts, 0),
 workloads/missing_index_todos/test/workload_test.rb:52:    scale = Load::Scale.new(rows_per_table: 100_000, extra: { user_count: 1_000 }, seed: 42)
 workloads/missing_index_todos/workload.rb:23:          Load::Scale.new(rows_per_table: 100_000, seed: 42, extra: { open_fraction: 0.6, user_count: 100 })
 workloads/missing_index_todos/workload.rb:33:            Load::ActionEntry.new(Actions::FetchCounts, 0),
-JOURNAL.md:91:- 2026-04-25 real mixed-workload tuning: with `rows_per_table: 100_000`, the counts N+1 path was too expensive at weight `6` and collapsed the dominance margin; lowering `FetchCounts` to weight `2` restored a real finite run to `744` ClickHouse calls on the primary query and a `4.32x` dominance margin over the next queryid.
-JOURNAL.md:117:- 2026-04-25 tenant-shaped workload Task 1: `missing-index-todos` now sets `scale.extra[:user_count] = 1_000`; list/search/write actions sample `user_id` from `scale.extra`, `close_todo` prefetches one sampled user's open todos and returns a `204` no-op when none exist, and `delete_completed_todos` is a direct query-string delete with no prefetch.
-JOURNAL.md:118:- 2026-04-25 Task 1 regression note: `load/test/runner_test.rb` mixed-write support must model the new tenant-shaped contracts too; without `user_count` in the synthetic scale and a JSON body for `close_todo`'s open-todos prefetch, the runner test times out instead of producing diverse ids.
-JOURNAL.md:126:- 2026-04-26 dominance tuning: lowering `scale.extra[:user_count]` from `1_000` to `100` was not enough to restore oracle dominance because `/api/todos/counts` still drives the per-user `SELECT COUNT(*) FROM "todos" WHERE "todos"."user_id" = $1` family above the primary open-todos query. For now `FetchCounts` is weighted to `0` so the tenant-pathology gate can pass; revisit the counts/N+1 balance in a later phase instead of treating it as a requirement in this round.
+```
+
+## Final InvariantMonitor cleanup
+
+The last branch-level cleanup was local to `Load::InvariantMonitor`. The monitor still owns thread lifecycle and policy flow, but its internal state is now grouped honestly: `Config` owns policy and interval, `Sink` owns side-effect endpoints, and `State` owns mutex-protected mutable thread state. The follow-up patch also made invalid policies fail fast instead of degrading silently if a caller bypasses the CLI parser.
+
+```bash
+sed -n '1,240p' load/lib/load/invariant_monitor.rb && printf '\n---\n' && sed -n '1,260p' load/test/invariant_monitor_test.rb
+```
+
+```output
+# ABOUTME: Runs the invariant sampler thread and applies breach policy.
+# ABOUTME: Emits samples, warnings, and stop signals without owning run-record schema.
+require "thread"
+
+module Load
+  class InvariantMonitor
+    Failure = Class.new(StandardError)
+    Shutdown = Class.new(StandardError)
+
+    Config = Data.define(:policy, :interval_seconds) do
+      VALID_POLICIES = [:off, :warn, :enforce].freeze
+
+      def initialize(policy:, interval_seconds:)
+        unless VALID_POLICIES.include?(policy)
+          raise ArgumentError, "invalid invariant policy: #{policy.inspect}"
+        end
+
+        super
+      end
+
+      def off?
+        policy == :off
+      end
+
+      def warn?
+        policy == :warn
+      end
+
+      def enforce?
+        policy == :enforce
+      end
+    end
+
+    Sink = Data.define(:on_sample, :on_warning, :on_breach_stop, :stderr) do
+      def sample(sample)
+        on_sample.call(sample)
+      end
+
+      def warning(warning_hash)
+        on_warning.call(warning_hash)
+      end
+
+      def stderr_warning(message)
+        stderr.puts(message)
+      end
+
+      def breach_stop(reason)
+        on_breach_stop.call(reason)
+      end
+    end
+
+    class State
+      def initialize
+        @consecutive_breaches = 0
+        @sleeping = false
+        @failure = nil
+        @mutex = Mutex.new
+      end
+
+      def with_sleeping
+        @mutex.synchronize { @sleeping = true }
+        yield
+      ensure
+        @mutex.synchronize { @sleeping = false }
+      end
+
+      def sleeping?
+        @mutex.synchronize { @sleeping }
+      end
+
+      def increment_breaches
+        @mutex.synchronize do
+          @consecutive_breaches += 1
+        end
+      end
+
+      def reset_breaches
+        @mutex.synchronize do
+          @consecutive_breaches = 0
+        end
+      end
+
+      def record_failure(error)
+        @mutex.synchronize do
+          @failure ||= error
+        end
+      end
+
+      def clear_failure
+        @mutex.synchronize do
+          error = @failure
+          @failure = nil
+          error
+        end
+      end
+    end
+
+    def initialize(sampler:, config:, stop_flag:, sleeper:, sink:)
+      @sampler = sampler
+      @config = config
+      @stop_flag = stop_flag
+      @sleeper = sleeper
+      @sink = sink
+      @state = State.new
+    end
+
+    def start
+      return nil if @config.off?
+      return nil if @sampler.nil?
+
+      Thread.new do
+        begin
+          loop do
+            break if @stop_flag.call
+
+            begin
+              Thread.handle_interrupt(Shutdown => :immediate) do
+                @state.with_sleeping do
+                  @sleeper.call(@config.interval_seconds)
+                end
+              end
+            rescue Shutdown, StopIteration
+              break
+            end
+
+            break if @stop_flag.call
+
+            Thread.handle_interrupt(Shutdown => :never) do
+              sample_once
+            end
+          end
+        rescue Shutdown, StopIteration
+          nil
+        rescue StandardError => error
+          @state.record_failure(error)
+          @sink.breach_stop(:invariant_sampler_failed)
+        end
+      end
+    end
+
+    def stop(thread)
+      return unless thread
+      return if thread == Thread.current
+
+      if @state.sleeping?
+        begin
+          thread.raise(Shutdown.new)
+        rescue ThreadError
+          nil
+        end
+      end
+
+      thread.join
+      failure = @state.clear_failure
+      raise Failure, "invariant sampler failed" if failure
+    end
+
+    def sample_once
+      sample = @sampler.call
+      @sink.sample(sample)
+
+      unless sample.breach?
+        @state.reset_breaches if @config.enforce?
+        return sample
+      end
+
+      warning = sample.to_warning
+      @sink.warning(warning)
+
+      if @config.warn?
+        @sink.stderr_warning("warning: invariant breach: #{sample.breaches.join('; ')}")
+        return sample
+      end
+
+      consecutive_breaches = @state.increment_breaches
+      @sink.breach_stop(:invariant_breach) if @config.enforce? && consecutive_breaches >= 3
+      sample
+    end
+  end
+end
+
+---
+# ABOUTME: Verifies invariant monitor thread lifecycle and policy handling.
+# ABOUTME: Covers warn, enforce, off, shutdown, and failure propagation.
+require "stringio"
+require_relative "test_helper"
+
+class InvariantMonitorTest < Minitest::Test
+  def test_config_rejects_invalid_policy
+    error = assert_raises(ArgumentError) do
+      Load::InvariantMonitor::Config.new(policy: :bogus, interval_seconds: 1.0)
+    end
+
+    assert_equal "invalid invariant policy: :bogus", error.message
+  end
+
+  def test_state_increment_breaches_returns_new_count
+    state = Load::InvariantMonitor::State.new
+
+    assert_equal 1, state.increment_breaches
+    assert_equal 2, state.increment_breaches
+  end
+
+  def test_sink_delegates_sample_warning_stderr_warning_and_breach_stop
+    samples = []
+    warnings = []
+    stops = []
+    stderr = StringIO.new
+    sink = Load::InvariantMonitor::Sink.new(
+      on_sample: ->(sample) { samples << sample.to_h },
+      on_warning: ->(warning) { warnings << warning },
+      on_breach_stop: ->(reason) { stops << reason },
+      stderr:,
+    )
+
+    sink.sample(healthy_sample)
+    sink.warning(type: "invariant_breach")
+    sink.stderr_warning("warning: invariant breach")
+    sink.breach_stop(:invariant_breach)
+
+    assert_equal [healthy_sample.to_h], samples
+    assert_equal [{ type: "invariant_breach" }], warnings
+    assert_equal "warning: invariant breach\n", stderr.string
+    assert_equal [:invariant_breach], stops
+  end
+
+  def test_enforce_policy_resets_breach_count_after_healthy_sample
+    stops = []
+    monitor = build_monitor(
+      sampler: [
+        breach_sample,
+        breach_sample,
+        healthy_sample,
+        breach_sample,
+        breach_sample,
+        breach_sample,
+      ],
+      policy: :enforce,
+      on_breach_stop: ->(reason) { stops << reason },
+    )
+
+    samples = 6.times.map { monitor.sample_once }
+
+    assert_kind_of Load::Runner::InvariantSample, samples[2]
+    assert_equal healthy_sample.to_h, samples[2].to_h
+    assert_equal [:invariant_breach], stops
+  end
+
+  def test_sample_once_uses_sink_boundaries_for_sample_warning_stderr_and_breach_stop
+    samples = []
+    warnings = []
+    stops = []
+    stderr = StringIO.new
+
+    warn_monitor = build_monitor(
+      sampler: breach_sample,
+      policy: :warn,
+      on_sample: ->(sample) { samples << sample.to_h },
+      on_warning: ->(warning) { warnings << warning },
+      on_breach_stop: ->(reason) { stops << reason },
+      stderr:,
+    )
+
+    enforce_monitor = build_monitor(
+      sampler: [breach_sample, breach_sample, breach_sample],
+      policy: :enforce,
+      on_sample: ->(sample) { samples << sample.to_h },
+      on_warning: ->(warning) { warnings << warning },
+      on_breach_stop: ->(reason) { stops << reason },
+      stderr:,
+    )
+
+    warn_monitor.sample_once
+    3.times { enforce_monitor.sample_once }
+
+    assert_equal 4, samples.length
+    assert_equal 4, warnings.length
+    assert_match(/warning: invariant breach:/, stderr.string)
+    assert_equal [:invariant_breach], stops
+  end
+
+  def test_warn_policy_records_warning_without_triggering_stop
+    warnings = []
+    stops = []
+    stderr = StringIO.new
+
+    monitor = build_monitor(
+      sampler: -> { breach_sample },
+      policy: :warn,
+      on_warning: ->(payload) { warnings << payload },
+      on_breach_stop: ->(reason) { stops << reason },
+      stderr:,
+    )
+
+    monitor.sample_once
+
+    assert_equal 1, warnings.length
+    assert_equal [], stops
+    assert_match(/warning: invariant breach:/, stderr.string)
+  end
+
+  def test_enforce_policy_triggers_stop_after_three_consecutive_breaches
+    stops = []
+
+    monitor = build_monitor(
+      sampler: -> { breach_sample },
+      policy: :enforce,
+      on_breach_stop: ->(reason) { stops << reason },
+    )
+
+    3.times { monitor.sample_once }
+
+    assert_equal [:invariant_breach], stops
+  end
+
+  def test_off_policy_never_starts
+    monitor = build_monitor(
+      sampler: -> { flunk "should not sample" },
+      policy: :off,
+    )
+
+    assert_nil monitor.start
+  end
+
+  def test_stop_unblocks_sleeping_thread
+    blocker = Queue.new
+    sleeper_entered = Queue.new
+    monitor = build_monitor(
+      sampler: -> { healthy_sample },
+      policy: :enforce,
+      interval_seconds: 60.0,
+      sleeper: ->(*) { sleeper_entered << true; blocker.pop },
+    )
+
+    thread = monitor.start
+    sleeper_entered.pop
+
+    monitor.stop(thread)
+
+    refute thread.alive?
+  end
+
+  def test_stop_ignores_thread_error_when_target_thread_exits_during_shutdown
+    thread = ExitingThread.new
+    sleeper_entered = Queue.new
+    monitor = build_monitor(
+      sampler: -> { healthy_sample },
+      policy: :enforce,
+      interval_seconds: 60.0,
+      sleeper: ->(*) { sleeper_entered << true; sleep },
+    )
+    sleeper_thread = monitor.start
+    sleeper_entered.pop
+
+    monitor.stop(thread)
+    monitor.stop(sleeper_thread)
+
+    assert_equal 1, thread.raise_calls
+    assert_equal 1, thread.join_calls
+  end
+
+  def test_sampler_failure_propagates_and_clears_after_stop_raises
+    stops = []
+    monitor = build_monitor(
+      sampler: -> { raise "boom" },
+      policy: :enforce,
+      on_breach_stop: ->(reason) { stops << reason },
+    )
+
+    thread = monitor.start
+    thread.join
+
+    assert_equal [:invariant_sampler_failed], stops
+    assert_raises(Load::InvariantMonitor::Failure) { monitor.stop(thread) }
+    monitor.stop(thread)
+  end
+
+  private
+
+  def build_monitor(sampler:, policy:, interval_seconds: 0.0, sleeper: ->(*) {}, on_sample: ->(*) {}, on_warning: ->(*) {}, on_breach_stop: ->(*) {}, stderr: StringIO.new)
+    sampler_callable =
+      if sampler.respond_to?(:call)
+        sampler
+      else
+        samples = Array(sampler)
+        -> { samples.shift }
+      end
+
+    Load::InvariantMonitor.new(
+      sampler: sampler_callable,
+      config: Load::InvariantMonitor::Config.new(
+        policy:,
+        interval_seconds:,
+      ),
+      stop_flag: Load::Runner::InternalStopFlag.new,
+      sleeper:,
+      sink: Load::InvariantMonitor::Sink.new(
+        on_sample:,
+        on_warning:,
+        on_breach_stop:,
+        stderr:,
+      ),
+    )
+  end
+
+  def breach_sample
+    Load::Runner::InvariantSample.new(
+      [Load::Runner::InvariantCheck.new("open_count", 1, 5, nil)],
+    )
+  end
+
+  def healthy_sample
+    Load::Runner::InvariantSample.new(
+      [Load::Runner::InvariantCheck.new("open_count", 10, 5, nil)],
+    )
+  end
+
+  class ExitingThread
+    attr_reader :raise_calls, :join_calls
+
+    def initialize
+      @raise_calls = 0
+      @join_calls = 0
+    end
+
+    def alive?
+      true
+    end
+
+    def raise(*)
+      @raise_calls += 1
+      Kernel.raise ThreadError, "thread exited during shutdown"
+    end
+
+    def join(*)
+      @join_calls += 1
+      true
+    end
+  end
+end
+```
+
+The corresponding runner change is intentionally narrow: `Load::Runner` still decides whether to create a monitor at all, but now constructs it with grouped `Config` and `Sink` collaborators instead of a long flat keyword list.
+
+```bash
+sed -n '80,130p' load/lib/load/runner.rb
+```
+
+```output
+      sampler = resolve_invariant_sampler
+      validate_invariant_sampler!(sampler)
+      @run_state = Load::RunState.new(
+        run_record:,
+        workload:,
+        adapter_bin: @config.adapter_bin || @adapter_client.adapter_bin,
+        app_root: @config.app_root,
+        readiness_path: @config.readiness_path,
+        startup_grace_seconds: @config.startup_grace_seconds,
+        metrics_interval_seconds: @config.metrics_interval_seconds,
+        workload_file: @config.workload_file,
+      )
+      @invariant_monitor = Load::InvariantMonitor.new(
+        sampler: sampler,
+        config: Load::InvariantMonitor::Config.new(
+          policy: @invariant_config.policy,
+          interval_seconds: @invariant_config.sample_interval_seconds,
+        ),
+        stop_flag: @runtime.stop_flag,
+        sleeper: @runtime.sleeper,
+        sink: Load::InvariantMonitor::Sink.new(
+          on_sample: ->(sample) { @run_state.append_invariant_sample(**sample.to_record(sampled_at: current_time)) },
+          on_warning: ->(warning) { @run_state.append_warning(warning) },
+          on_breach_stop: ->(reason) { trigger_stop(reason) },
+          stderr: @stderr,
+        ),
+      )
+    end
+
+    def run
+      request_totals = { total: 0, ok: 0, error: 0 }
+      begin
+        @run_state.write_initial
+        adapter_describe = @adapter_client.describe
+        validate_adapter_response!(adapter_describe, %w[name framework runtime], "describe")
+        @run_state.merge(adapter: {
+          describe: adapter_describe,
+          bin: @config.adapter_bin || @adapter_client.adapter_bin,
+          app_root: @config.app_root,
+        })
+
+        @adapter_client.prepare(app_root: @config.app_root)
+        reset_state = @adapter_client.reset_state(app_root: @config.app_root, workload: @workload.name, scale: @workload.scale)
+        @run_state.merge(query_ids: Array(reset_state["query_ids"]).map(&:to_s)) if reset_state.is_a?(Hash) && reset_state["query_ids"]
+
+        start_response = @adapter_client.start(app_root: @config.app_root)
+        validate_adapter_response!(start_response, %w[pid base_url], "start")
+        @run_state.merge(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
+
+        probe_readiness(start_response.fetch("base_url"))
+        verify_fixture(base_url: start_response.fetch("base_url"))
+```
+
+The final local verification for this cleanup was the full test gate. That matters here because the monitor is concurrency-heavy and the focused tests only approximate scheduler behavior. The branch stayed green after the refactor and the invalid-policy guard.
+
+```bash
+BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'ARGV.replace(["--seed","1220"]); Dir["load/test/*_test.rb"].sort.each { |path| load path }' | grep -E 'Run options|runs,|assertions,|skips' &&
+BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'ARGV.replace(["--seed","34677"]); Dir["adapters/rails/test/*_test.rb"].sort.each { |path| load path }' | grep -E 'Run options|runs,|assertions,|skips|You have skipped' &&
+BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'ARGV.replace(["--seed","229"]); Dir["workloads/missing_index_todos/test/*_test.rb"].sort.each { |path| load path }' | grep -E 'Run options|runs,|assertions,|skips'
+```
+
+```output
+Run options: --seed 1220
+154 runs, 525 assertions, 0 failures, 0 errors, 0 skips
+Run options: --seed 34677
+24 runs, 66 assertions, 0 failures, 0 errors, 2 skips
+You have skipped tests. Run with --verbose for details.
+Run options: --seed 229
+51 runs, 213 assertions, 0 failures, 0 errors, 0 skips
 ```
