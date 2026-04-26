@@ -339,6 +339,20 @@ class ResetStateTest < Minitest::Test
     refute RailsAdapter::Commands::ResetState.const_defined?(constant_name)
   end
 
+  def test_reset_state_default_workload_root_resolves_to_real_workload_script
+    command = RailsAdapter::Commands::ResetState.new(
+      app_root: "/tmp/demo",
+      workload: "missing-index-todos",
+      seed: 42,
+      env_pairs: {},
+    )
+    path = command.send(:query_ids_script_path)
+
+    refute_nil path, "default workload_root must resolve missing-index-todos script"
+    assert File.exist?(path), "expected real workload script at #{path}"
+    assert_match %r{/workloads/missing_index_todos/rails/reset_state_query_ids\.rb\z}, path
+  end
+
   private
 
   def write_workload_query_ids_script(root:, workload:, body:)

@@ -37,6 +37,18 @@ class MissingIndexTodosWorkloadTest < Minitest::Test
     assert_instance_of Load::Workloads::MissingIndexTodos::Verifier, verifier
   end
 
+  def test_workload_owns_rails_query_id_script
+    path = File.expand_path("../rails/reset_state_query_ids.rb", __dir__)
+
+    script = File.read(path)
+
+    assert_includes script, "User.first"
+    assert_includes script, %(user.todos.with_status("open").ordered_by_created_desc.page(1, 50).load)
+    assert_includes script, %(with_status("open"))
+    assert_includes script, %(SELECT "todos".* FROM "todos" WHERE "todos"."user_id" = $1 AND "todos"."status" = $2 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $3 OFFSET $4)
+    assert_includes script, "JSON.generate(query_ids: query_ids)"
+  end
+
   def test_workload_sampler_applies_rows_per_table_thresholds_to_sample_output
     workload = Load::Workloads::MissingIndexTodos::Workload.new
     pg = FakePg.new(open_count: 100, total_count: 1_000_000)
