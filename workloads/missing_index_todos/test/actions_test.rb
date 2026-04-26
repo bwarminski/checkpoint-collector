@@ -73,7 +73,7 @@ class MissingIndexTodosActionsTest < Minitest::Test
     assert_equal "200", response.code
     assert_equal [
       [:get, "/api/todos?user_id=3&status=open", nil],
-      [:patch, "/api/todos/17", { status: "closed" }],
+      [:patch, "/api/todos/23", { status: "closed" }],
     ], client.requests
   end
 

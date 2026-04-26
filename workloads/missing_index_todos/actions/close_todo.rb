@@ -16,17 +16,17 @@ module Load
           end
 
           def call
-            todo = open_todos.first
-            return NoOpResponse.new("204", "") unless todo
+            todo_id = open_todo_ids.sample(random: rng)
+            return NoOpResponse.new("204", "") unless todo_id
 
-            client.request(:patch, "/api/todos/#{todo.fetch("id")}", body: { status: "closed" })
+            client.request(:patch, "/api/todos/#{todo_id}", body: { status: "closed" })
           end
 
           private
 
-          def open_todos
+          def open_todo_ids
             response = client.get("/api/todos?user_id=#{sample_user_id}&status=open")
-            JSON.parse(response.body.to_s)
+            JSON.parse(response.body.to_s).map { |todo| todo.fetch("id") }
           end
 
           def sample_user_id
