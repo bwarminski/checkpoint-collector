@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reshape `missing-index-todos` into a tenant-scoped workload, update adapter query-id attribution to the new query shape, and move verifier ownership fully into workload code without changing the primary oracle contract.
+**Goal:** Reshape `missing-index-todos` into a tenant-scoped workload, update adapter query-id attribution to the new query shape, move verifier ownership fully into workload code, and preserve a realistic primary pathology contract for the tenant-scoped query family.
 
-**Architecture:** Keep the core load library orchestration generic while moving todo-specific verification into `workloads/missing_index_todos/`. At the same time, make the demo app and workload actions tenant-shaped by reading `user_count` from `Load::Scale#extra`, scoping list/search/write traffic to one user, and teaching the adapter’s `reset-state` query-id capture about the new tenant-scoped query.
+**Architecture:** Keep the core load library orchestration generic while moving todo-specific verification into `workloads/missing_index_todos/`. At the same time, make the demo app and workload actions tenant-shaped by reading `user_count` from `Load::Scale#extra`, scoping list/search/write traffic to one user, teaching the adapter’s `reset-state` query-id capture about the new tenant-scoped query, and updating the verifier/oracle to match the real indexed-by-user plan shape rather than the old seq-scan assumption.
 
 **Tech Stack:** Ruby, Minitest, Rails JSON API in `~/db-specialist-demo`, PostgreSQL `pg_stat_statements`, existing load runner/oracle infrastructure.
 
@@ -804,6 +804,124 @@ git add workloads/missing_index_todos/verifier.rb \
   fixtures/mixed-todo-app/search-explain.json
 git rm load/lib/load/fixture_verifier.rb
 git commit -m "refactor: move verifier into workload"
+```
+
+## Task 4: End-to-End Verification
+
+## Task 3.5: Realign the Primary Pathology Contract to the Tenant-Scoped Query
+
+**Files:**
+- Modify: `workloads/missing_index_todos/verifier.rb`
+- Modify: `workloads/missing_index_todos/oracle.rb`
+- Modify: `workloads/missing_index_todos/test/verifier_test.rb`
+- Modify: `workloads/missing_index_todos/test/oracle_test.rb`
+- Modify: `fixtures/mixed-todo-app/search-explain.json` only if the search reference needs a refresh after the contract change
+- Modify: `JOURNAL.md` only if verification reveals a non-obvious insight
+
+- [ ] **Step 1: Write the failing verifier/oracle tests for the real tenant-scoped plan shape**
+
+Add or update focused tests so the contract matches the live planner behavior:
+
+```ruby
+def tenant_index_plan
+  {
+    "Node Type" => "Limit",
+    "Plans" => [
+      {
+        "Node Type" => "Sort",
+        "Sort Key" => ["created_at DESC", "id DESC"],
+        "Plans" => [
+          {
+            "Node Type" => "Bitmap Heap Scan",
+            "Relation Name" => "todos",
+            "Recheck Cond" => "(user_id = 1)",
+            "Filter" => "((status)::text = 'open'::text)",
+            "Plans" => [
+              {
+                "Node Type" => "Bitmap Index Scan",
+                "Index Name" => "index_todos_on_user_id",
+                "Index Cond" => "(user_id = 1)",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  }
+end
+
+def test_verifier_accepts_tenant_scoped_user_id_index_path_with_status_filter
+  verifier = build_verifier(
+    explain_reader: ->(sql) { sql.include?("title LIKE") ? search_reference_plan : tenant_index_plan }
+  )
+
+  result = verifier.call(base_url: "http://app.test")
+
+  assert_equal "missing_index", result.fetch(:checks).first.fetch(:name)
+end
+
+def test_verifier_rejects_open_todos_plan_when_status_filter_disappears
+  verifier = build_verifier(
+    explain_reader: ->(sql) { sql.include?("title LIKE") ? search_reference_plan : tenant_index_plan.deep_merge("Plans" => [{ "Plans" => [{ "Filter" => nil }] }]) }
+  )
+
+  assert_raises(Load::VerificationError) { verifier.call(base_url: "http://app.test") }
+end
+```
+
+Update oracle-side tests so the plan checker expects:
+- a `todos` node
+- user-id-driven index access (`index_todos_on_user_id`)
+- a remaining `status` filter
+- sort on `created_at DESC, id DESC`
+
+- [ ] **Step 2: Run the focused verifier/oracle tests and verify they fail**
+
+Run:
+```bash
+BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby workloads/missing_index_todos/test/verifier_test.rb
+BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby workloads/missing_index_todos/test/oracle_test.rb
+```
+
+Expected: failures because the current verifier/oracle still insist on the old seq-scan contract.
+
+- [ ] **Step 3: Implement the minimal contract update**
+
+In `workloads/missing_index_todos/verifier.rb`, change the open-todos plan check so it verifies:
+- the plan still targets `todos`
+- the access path uses `index_todos_on_user_id`
+- a remaining `status` filter is present on the `todos` node
+- sort keys include `created_at DESC` and `id DESC`
+
+Do not require `Seq Scan`.
+
+In `workloads/missing_index_todos/oracle.rb`, change the explain check to the same contract. The PASS/FAIL messaging should stay explicit about what was confirmed, for example:
+
+```text
+PASS: explain (user_id index path confirmed; status filter and sort remain)
+```
+
+and failures should distinguish:
+- missing `user_id` index path
+- missing `status` filter
+- unexpected composite/indexed plan that no longer shows the intended pathology
+
+Keep ClickHouse and dominance logic unchanged in this task.
+
+- [ ] **Step 4: Run the focused verifier/oracle tests and verify they pass**
+
+Run the same commands from Step 2.
+
+Expected: green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add workloads/missing_index_todos/verifier.rb \
+  workloads/missing_index_todos/oracle.rb \
+  workloads/missing_index_todos/test/verifier_test.rb \
+  workloads/missing_index_todos/test/oracle_test.rb
+git commit -m "refactor: align tenant workload plan checks"
 ```
 
 ## Task 4: End-to-End Verification

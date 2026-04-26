@@ -19,7 +19,7 @@ This change fixes both issues together:
 1. reshape `missing-index-todos` into an explicitly tenant-shaped workload with user-scoped action semantics
 2. move fixture verification ownership entirely into the workload instead of keeping todo-specific checks in `load/lib/load`
 
-The primary missing-index oracle stays in place, but the workload becomes more realistic and the core load library becomes less todo-specific.
+The workload becomes more realistic and the core load library becomes less todo-specific, but the primary pathology contract changes shape: once the app is tenant-scoped, the bad query is no longer “no useful index at all.” It becomes “the app can only use `todos.user_id`, then must still filter `status` and sort inside that tenant slice.”
 
 ## 2. Goals and Non-Goals
 
@@ -37,7 +37,7 @@ The primary missing-index oracle stays in place, but the workload becomes more r
 
 1. Redesign `InvariantMonitor` in this round.
 2. Introduce a generic verifier framework in `load/lib/load`.
-3. Change the narrow oracle contract in this round.
+3. Keep the old seq-scan oracle contract in this round.
 4. Introduce a new top-level scale field such as `user_count` on `Load::Scale`.
 5. Keep the current unrealistic global action semantics for backward compatibility.
 
@@ -112,9 +112,10 @@ All major actions become user-scoped unless they are intentionally app-wide.
 The primary pathology is now:
 
 - “list one tenant’s open todos”
-- intentionally missing an index on the status-driven access pattern
+- planner can use the existing `todos.user_id` index to find that tenant slice
+- planner still has no better composite access path for `user_id + status + created_at DESC + id DESC`
 
-This is more realistic than listing all open todos across the whole app.
+This is more realistic than listing all open todos across the whole app, but it means the verifier/oracle must stop insisting on a pure seq scan. The intended anti-pattern is now “wrong index for the real tenant query,” not “no index at all.”
 
 ### 6.2 `list_recent_todos`
 
@@ -205,6 +206,16 @@ The resulting boundary should be:
   - own explain/count/search checks
   - own any workload-specific data readers or references
 
+For `missing-index-todos`, that verifier contract must explicitly match the tenant-scoped plan shape. The expected open-todos explain is now:
+
+- plan node on `todos` may be `Bitmap Heap Scan`, `Index Scan`, or similar
+- access path must rely on `index_todos_on_user_id`
+- `Index Cond` / `Recheck Cond` must mention `user_id`
+- a remaining `Filter` must still mention `status`
+- the plan must still sort for `created_at DESC, id DESC`
+
+That contract keeps the diagnosis exercise honest: the agent still has to identify that the query is under-indexed for its actual access pattern, but the verifier no longer lies about the planner shape.
+
 ## 9. Expected Code Shape
 
 After this change, the intended responsibility split is:
@@ -242,8 +253,9 @@ The implementation should add or update tests for:
 - two-step open-todo fetch behavior for `close_todo`
 - workload-provided verifier wiring from CLI/runner
 - removal of todo-specific verifier assumptions from core load code
+- workload-owned verifier/oracle checks matching the tenant-scoped indexed-by-user plan shape
 
-The existing oracle should remain green after the reshaping. The point is to make the traffic and verification boundaries more realistic, not to replace the primary pathology.
+The existing oracle intent should remain green after the reshaping, but its concrete plan assertions must change. The point is to keep the primary diagnosis target while updating it to the tenant-scoped access pattern the app now actually uses.
 
 ## 11. Rejected Alternatives
 
