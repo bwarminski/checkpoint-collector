@@ -7,7 +7,8 @@ module Load
   module Workloads
     module MissingIndexTodos
       class Verifier
-        INDEX_SCAN_NODE_TYPES = ["Index Scan", "Index Only Scan", "Bitmap Index Scan"].freeze
+        USER_ID_INDEX_NAME = "index_todos_on_user_id".freeze
+        EXPECTED_SORT_KEY = ["created_at DESC", "id DESC"].freeze
         SEARCH_PLAN_STABLE_KEYS = ["Node Type", "Relation Name", "Sort Key", "Filter", "Plans"].freeze
         COUNTS_PATH = "/api/todos/counts".freeze
         MISSING_INDEX_PATH = "/api/todos?user_id=1&status=open".freeze
@@ -100,18 +101,17 @@ module Load
 
         def verify_missing_index
           plan = @explain_reader.call(MISSING_INDEX_SQL)
-          todos_nodes = relation_nodes(plan, "todos")
-          rejected_node = todos_nodes.find { |node| INDEX_SCAN_NODE_TYPES.include?(node.fetch("Node Type")) }
-          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Seq Scan on todos, saw #{rejected_node.fetch("Node Type")}" if rejected_node
+          bitmap_heap_scan = find_missing_index_scan(plan)
+          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Limit -> Sort -> Bitmap Heap Scan on todos" unless bitmap_heap_scan
+          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Recheck Cond to include user_id" unless bitmap_heap_scan.fetch("Recheck Cond", "").to_s.include?("user_id")
+          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected status filter after tenant lookup" unless bitmap_heap_scan.fetch("Filter", "").to_s.include?("status")
 
-          seq_scan = todos_nodes.find do |node|
-            node.fetch("Node Type") == "Seq Scan" &&
-              node.fetch("Filter", "").include?("status") &&
-              node.fetch("Filter", "").include?("user_id")
+          index_scan = Array(bitmap_heap_scan["Plans"]).find { |node| node.fetch("Node Type") == "Bitmap Index Scan" }
+          unless index_scan&.fetch("Index Name", "") == USER_ID_INDEX_NAME
+            raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Bitmap Index Scan using #{USER_ID_INDEX_NAME}"
           end
-          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Seq Scan on todos with user and status filters" unless seq_scan
 
-          { name: "missing_index", ok: true, node_type: seq_scan.fetch("Node Type") }
+          { name: "missing_index", ok: true, node_type: bitmap_heap_scan.fetch("Node Type") }
         end
 
         def verify_counts_n_plus_one(base_url:)
@@ -145,13 +145,20 @@ module Load
           raise Load::VerificationError, "fixture verification failed for #{path}: expected 2xx response, saw #{response.code}"
         end
 
-        def relation_nodes(node, relation_name)
-          matches = []
-          matches << node if node["Relation Name"] == relation_name
-          Array(node["Plans"]).each do |child|
-            matches.concat(relation_nodes(child, relation_name))
+        def find_missing_index_scan(node)
+          return unless node.fetch("Node Type") == "Limit"
+
+          Array(node["Plans"]).each do |sort_node|
+            next unless sort_node.fetch("Node Type") == "Sort"
+            next unless sort_node.fetch("Sort Key", []) == EXPECTED_SORT_KEY
+
+            Array(sort_node["Plans"]).each do |child|
+              next unless child["Relation Name"] == "todos"
+              return child if child.fetch("Node Type") == "Bitmap Heap Scan"
+            end
           end
-          matches
+
+          nil
         end
 
         def plan_matches_reference?(actual:, reference:, keys: reference.keys)

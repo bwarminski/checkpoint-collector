@@ -75,6 +75,7 @@ class MissingIndexTodosVerifierTest < Minitest::Test
 
     assert_equal true, result.fetch(:ok)
     assert_equal %w[missing_index counts_n_plus_one search_rewrite], result.fetch(:checks).map { |check| check.fetch(:name) }
+    assert_equal "Bitmap Heap Scan", result.fetch(:checks).fetch(0).fetch(:node_type)
     assert_equal 1, stats_reset_calls
     assert_equal ["/api/todos/counts"], client.requests
     assert_equal 11, result.fetch(:checks).fetch(1).fetch(:calls)
@@ -110,10 +111,10 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     assert_equal 7, result.fetch(:checks).fetch(1).fetch(:calls)
   end
 
-  def test_verifier_fails_when_explain_shows_index_scan
+  def test_verifier_fails_when_missing_index_plan_does_not_use_user_id_index
     verifier = build_verifier(
       explain_reader: lambda do |sql|
-        sql.include?(%(status = 'open')) ? missing_index_plan(node_type: "Index Scan") : search_reference_plan
+        sql.include?(%(status = 'open')) ? missing_index_plan(index_name: "index_todos_on_status") : search_reference_plan
       end,
     )
 
@@ -121,7 +122,22 @@ class MissingIndexTodosVerifierTest < Minitest::Test
       verifier.call(base_url: "http://app.test")
     end
 
-    assert_includes error.message, "Seq Scan"
+    assert_includes error.message, "index_todos_on_user_id"
+    assert_includes error.message, "/api/todos"
+  end
+
+  def test_verifier_fails_when_missing_index_plan_does_not_filter_status_after_tenant_lookup
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan(filter: nil) : search_reference_plan
+      end,
+    )
+
+    error = assert_raises(Load::VerificationError) do
+      verifier.call(base_url: "http://app.test")
+    end
+
+    assert_includes error.message, "status"
     assert_includes error.message, "/api/todos"
   end
 
@@ -187,14 +203,28 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     end
   end
 
-  def missing_index_plan(node_type: "Seq Scan", filter: %(("todos"."user_id" = 1) AND ("todos"."status" = 'open'::text)))
+  def missing_index_plan(filter: %(("todos"."status" = 'open'::text)), recheck_cond: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
     {
-      "Node Type" => "Gather",
+      "Node Type" => "Limit",
       "Plans" => [
         {
-          "Node Type" => node_type,
-          "Relation Name" => "todos",
-          "Filter" => filter,
+          "Node Type" => "Sort",
+          "Sort Key" => ["created_at DESC", "id DESC"],
+          "Plans" => [
+            {
+              "Node Type" => "Bitmap Heap Scan",
+              "Relation Name" => "todos",
+              "Recheck Cond" => recheck_cond,
+              "Filter" => filter,
+              "Plans" => [
+                {
+                  "Node Type" => "Bitmap Index Scan",
+                  "Index Name" => index_name,
+                  "Index Cond" => %(("todos"."user_id" = 1)),
+                },
+              ],
+            },
+          ],
         },
       ],
     }

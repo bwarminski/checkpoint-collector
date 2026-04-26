@@ -8,32 +8,9 @@ require_relative "../../../load/test/test_helper"
 require_relative "../oracle"
 
 class MissingIndexTodosOracleTest < Minitest::Test
-  def test_oracle_tree_walk_finds_seq_scan_under_wrapper_nodes
+  def test_oracle_tree_walk_finds_tenant_bitmap_heap_scan_under_wrapper_nodes
     run_dir = write_run_record(query_ids: ["111", "222"])
-    explain_rows = [
-      {
-        "QUERY PLAN" => JSON.generate(
-          [
-            {
-              "Plan" => {
-                "Node Type" => "Gather",
-                "Plans" => [
-                  {
-                    "Node Type" => "Limit",
-                    "Plans" => [
-                      {
-                        "Node Type" => "Seq Scan",
-                        "Relation Name" => "todos",
-                      },
-                    ],
-                  },
-                ],
-              },
-            },
-          ]
-        ),
-      },
-    ]
+    explain_rows = [explain_row(plan: missing_index_plan)]
     clickhouse_calls = []
     oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
       pg: FakePg.new(explain_rows),
@@ -51,7 +28,9 @@ class MissingIndexTodosOracleTest < Minitest::Test
       clickhouse_url: "http://clickhouse:8123",
     )
 
-    assert_equal "Seq Scan", result.fetch(:plan).fetch("Node Type")
+    assert_equal "Bitmap Heap Scan", result.fetch(:plan).fetch("Node Type")
+    assert_equal %(("todos"."user_id" = 1)), result.fetch(:plan).fetch("Recheck Cond")
+    assert_equal %(("todos"."status" = 'open'::text)), result.fetch(:plan).fetch("Filter")
     assert_equal 600, result.fetch(:clickhouse).fetch("total_exec_count")
     assert_equal ["111", "222"], clickhouse_calls.first.fetch(:queryids)
     assert_equal "http://clickhouse:8123", clickhouse_calls.first.fetch(:clickhouse_url)
@@ -93,20 +72,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
 
   def test_oracle_reads_top_level_query_ids_only
     run_dir = write_run_record(query_ids: ["111", "222"])
-    explain_rows = [
-      {
-        "QUERY PLAN" => JSON.generate(
-          [
-            {
-              "Plan" => {
-                "Node Type" => "Seq Scan",
-                "Relation Name" => "todos",
-              },
-            },
-          ]
-        ),
-      },
-    ]
+    explain_rows = [explain_row(plan: missing_index_plan)]
     observed_queryids = nil
     oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
       pg: FakePg.new(explain_rows),
@@ -149,22 +115,31 @@ class MissingIndexTodosOracleTest < Minitest::Test
     end
   end
 
-  def test_oracle_fails_when_plan_relation_node_is_index_scan
+  def test_oracle_uses_tenant_scoped_explain_sql
     run_dir = write_run_record(query_ids: ["111"])
-    explain_rows = [
-      {
-        "QUERY PLAN" => JSON.generate(
-          [
-            {
-              "Plan" => {
-                "Node Type" => "Index Scan",
-                "Relation Name" => "todos",
-              },
-            },
-          ]
-        ),
-      },
-    ]
+    pg = FakePg.new([explain_row(plan: missing_index_plan)])
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg:,
+      clickhouse_query: ->(**) { { "total_exec_count" => "600", "mean_exec_time_ms" => "42.3" } },
+      clickhouse_topn_query: ->(**) { [{ "queryid" => "111", "total_exec_time_ms_estimate" => "900.0" }] },
+      sleeper: ->(*) {},
+    )
+
+    oracle.call(
+      run_dir:,
+      database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+      clickhouse_url: "http://clickhouse:8123",
+    )
+
+    executed_sql = pg.last_connection.executed_sqls.fetch(0)
+    assert_includes executed_sql, 'WHERE user_id = 1 AND status = \'open\''
+    assert_includes executed_sql, "ORDER BY created_at DESC, id DESC"
+    assert_includes executed_sql, "LIMIT 50"
+  end
+
+  def test_oracle_fails_when_plan_does_not_use_user_id_index_path
+    run_dir = write_run_record(query_ids: ["111"])
+    explain_rows = [explain_row(plan: missing_index_plan(index_name: "index_todos_on_status"))]
     oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
       pg: FakePg.new(explain_rows),
       clickhouse_query: ->(**) { { "total_exec_count" => "600" } },
@@ -179,7 +154,29 @@ class MissingIndexTodosOracleTest < Minitest::Test
       )
     end
 
-    assert_equal "FAIL: explain (expected Seq Scan, got Index Scan)", error.message
+    assert_includes error.message, "index_todos_on_user_id"
+    assert_includes error.message, "FAIL: explain"
+  end
+
+  def test_oracle_fails_when_plan_does_not_filter_status_after_tenant_lookup
+    run_dir = write_run_record(query_ids: ["111"])
+    explain_rows = [explain_row(plan: missing_index_plan(filter: nil))]
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg: FakePg.new(explain_rows),
+      clickhouse_query: ->(**) { { "total_exec_count" => "600" } },
+      sleeper: ->(*) {},
+    )
+
+    error = assert_raises(Load::Workloads::MissingIndexTodos::Oracle::Failure) do
+      oracle.call(
+        run_dir:,
+        database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+        clickhouse_url: "http://clickhouse:8123",
+      )
+    end
+
+    assert_includes error.message, "status"
+    assert_includes error.message, "FAIL: explain"
   end
 
   def test_oracle_builds_clickhouse_query_from_queryids_not_sql_like
@@ -204,20 +201,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
 
   def test_oracle_polls_clickhouse_until_total_exec_count_threshold_is_met
     run_dir = write_run_record(query_ids: ["111", "222"])
-    explain_rows = [
-      {
-        "QUERY PLAN" => JSON.generate(
-          [
-            {
-              "Plan" => {
-                "Node Type" => "Seq Scan",
-                "Relation Name" => "todos",
-              },
-            },
-          ]
-        ),
-      },
-    ]
+    explain_rows = [explain_row(plan: missing_index_plan)]
     snapshots = [
       { "total_exec_count" => "250", "mean_exec_time_ms" => "41.0" },
       { "total_exec_count" => "550", "mean_exec_time_ms" => "42.3" },
@@ -296,20 +280,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
 
   def test_run_exits_one_and_prints_clear_message_on_clickhouse_timeout
     run_dir = write_run_record(query_ids: ["111"])
-    explain_rows = [
-      {
-        "QUERY PLAN" => JSON.generate(
-          [
-            {
-              "Plan" => {
-                "Node Type" => "Seq Scan",
-                "Relation Name" => "todos",
-              },
-            },
-          ]
-        ),
-      },
-    ]
+    explain_rows = [explain_row(plan: missing_index_plan)]
     clock = AdvancingClock.new(Time.utc(2026, 4, 21, 0, 0, 0))
     stderr = StringIO.new
     oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
@@ -338,20 +309,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
   private
 
   def build_dominance_oracle(clickhouse_topn_rows:)
-    explain_rows = [
-      {
-        "QUERY PLAN" => JSON.generate(
-          [
-            {
-              "Plan" => {
-                "Node Type" => "Seq Scan",
-                "Relation Name" => "todos",
-              },
-            },
-          ]
-        ),
-      },
-    ]
+    explain_rows = [explain_row(plan: missing_index_plan)]
 
     Load::Workloads::MissingIndexTodos::Oracle.new(
       pg: FakePg.new(explain_rows),
@@ -364,6 +322,39 @@ class MissingIndexTodosOracleTest < Minitest::Test
       end,
       sleeper: ->(*) {},
     )
+  end
+
+  def explain_row(plan:)
+    {
+      "QUERY PLAN" => JSON.generate([{ "Plan" => plan }]),
+    }
+  end
+
+  def missing_index_plan(filter: %(("todos"."status" = 'open'::text)), recheck_cond: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+    {
+      "Node Type" => "Limit",
+      "Plans" => [
+        {
+          "Node Type" => "Sort",
+          "Sort Key" => ["created_at DESC", "id DESC"],
+          "Plans" => [
+            {
+              "Node Type" => "Bitmap Heap Scan",
+              "Relation Name" => "todos",
+              "Recheck Cond" => recheck_cond,
+              "Filter" => filter,
+              "Plans" => [
+                {
+                  "Node Type" => "Bitmap Index Scan",
+                  "Index Name" => index_name,
+                  "Index Cond" => %(("todos"."user_id" = 1)),
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
   end
 
   def write_run_record(query_ids: nil)
@@ -385,23 +376,29 @@ class MissingIndexTodosOracleTest < Minitest::Test
   end
 
   class FakePg
+    attr_reader :last_connection
+
     def initialize(rows, exec_params_rows = {})
       @rows = rows
       @exec_params_rows = exec_params_rows
     end
 
     def connect(*)
-      FakeConnection.new(@rows, @exec_params_rows)
+      @last_connection = FakeConnection.new(@rows, @exec_params_rows)
     end
   end
 
   class FakeConnection
+    attr_reader :executed_sqls
+
     def initialize(rows, exec_params_rows)
       @rows = rows
       @exec_params_rows = exec_params_rows
+      @executed_sqls = []
     end
 
-    def exec(*)
+    def exec(sql)
+      @executed_sqls << sql
       @rows
     end
 

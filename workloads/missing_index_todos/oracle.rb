@@ -13,9 +13,17 @@ module Load
       class Oracle
         CLICKHOUSE_CALL_THRESHOLD = 500
         DOMINANCE_RATIO_THRESHOLD = 3.0
-        INDEX_SCAN_NODE_TYPES = ["Index Scan", "Index Only Scan", "Bitmap Index Scan"].freeze
+        USER_ID_INDEX_NAME = "index_todos_on_user_id".freeze
+        EXPECTED_SORT_KEY = ["created_at DESC", "id DESC"].freeze
         CLICKHOUSE_TOPN_LIMIT = 10
-        EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM todos WHERE status = 'open'"
+        EXPLAIN_SQL = <<~SQL.freeze
+          EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+          SELECT *
+          FROM todos
+          WHERE user_id = 1 AND status = 'open'
+          ORDER BY created_at DESC, id DESC
+          LIMIT 50
+        SQL
 
         class Failure < StandardError
         end
@@ -109,27 +117,35 @@ module Load
           rows = connection.exec(EXPLAIN_SQL)
           payload = JSON.parse(rows.first.fetch("QUERY PLAN"))
           plan = payload.fetch(0).fetch("Plan")
-          todos_nodes = relation_nodes(plan, "todos")
-          raise Failure, "FAIL: explain (could not find todos in plan)" if todos_nodes.empty?
+          bitmap_heap_scan = find_missing_index_scan(plan)
+          raise Failure, "FAIL: explain (expected Limit -> Sort -> Bitmap Heap Scan on todos)" unless bitmap_heap_scan
+          raise Failure, "FAIL: explain (expected Recheck Cond to include user_id)" unless bitmap_heap_scan.fetch("Recheck Cond", "").to_s.include?("user_id")
+          raise Failure, "FAIL: explain (expected status filter after tenant lookup)" unless bitmap_heap_scan.fetch("Filter", "").to_s.include?("status")
 
-          rejected_node = todos_nodes.find { |node| INDEX_SCAN_NODE_TYPES.include?(node.fetch("Node Type")) }
-          raise Failure, "FAIL: explain (expected Seq Scan, got #{rejected_node.fetch("Node Type")})" if rejected_node
+          index_scan = Array(bitmap_heap_scan["Plans"]).find { |node| node.fetch("Node Type") == "Bitmap Index Scan" }
+          unless index_scan&.fetch("Index Name", "") == USER_ID_INDEX_NAME
+            raise Failure, "FAIL: explain (expected Bitmap Index Scan using #{USER_ID_INDEX_NAME})"
+          end
 
-          seq_scan = todos_nodes.find { |node| node.fetch("Node Type") == "Seq Scan" }
-          return seq_scan if seq_scan
-
-          raise Failure, "FAIL: explain (expected Seq Scan, got #{todos_nodes.first.fetch("Node Type")})"
+          bitmap_heap_scan
         ensure
           connection&.close
         end
 
-        def relation_nodes(node, relation_name)
-          matches = []
-          matches << node if node["Relation Name"] == relation_name
-          Array(node["Plans"]).each do |child|
-            matches.concat(relation_nodes(child, relation_name))
+        def find_missing_index_scan(node)
+          return unless node.fetch("Node Type") == "Limit"
+
+          Array(node["Plans"]).each do |sort_node|
+            next unless sort_node.fetch("Node Type") == "Sort"
+            next unless sort_node.fetch("Sort Key", []) == EXPECTED_SORT_KEY
+
+            Array(sort_node["Plans"]).each do |child|
+              next unless child["Relation Name"] == "todos"
+              return child if child.fetch("Node Type") == "Bitmap Heap Scan"
+            end
           end
-          matches
+
+          nil
         end
 
         def wait_for_clickhouse!(window:, queryids:, clickhouse_url:, timeout_seconds:)
