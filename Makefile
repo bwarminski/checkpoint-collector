@@ -1,6 +1,6 @@
 # ABOUTME: Defines local verification and benchmark operator shortcuts.
 # ABOUTME: Keeps destructive load commands explicit about their required environment.
-.PHONY: load-smoke verify-fixture load-soak load-soak-planetscale test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads
+.PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads load-soak-planetscale
 
 test: test-load test-adapters test-workloads
 
