@@ -42,7 +42,7 @@ module Load
           options = parse(argv)
           result = call(**options)
 
-          @stdout.puts("PASS: explain (#{result.fetch(:plan).fetch("Node Type")} on todos, plan node confirmed)")
+          @stdout.puts("PASS: explain (#{result.fetch(:plan).fetch("Index Name")} via #{result.fetch(:plan).fetch("Node Type")}; status filter; sort #{result.fetch(:plan).fetch("Sort Key").join(', ')})")
           @stdout.puts("PASS: clickhouse (#{result.fetch(:clickhouse).fetch("total_exec_count")} calls; mean #{result.fetch(:clickhouse).fetch("mean_exec_time_ms")}ms)")
           @stdout.puts(result.fetch(:dominance).fetch("message"))
           exit 0
@@ -117,35 +117,78 @@ module Load
           rows = connection.exec(EXPLAIN_SQL)
           payload = JSON.parse(rows.first.fetch("QUERY PLAN"))
           plan = payload.fetch(0).fetch("Plan")
-          bitmap_heap_scan = find_missing_index_scan(plan)
-          raise Failure, "FAIL: explain (expected Limit -> Sort -> Bitmap Heap Scan on todos)" unless bitmap_heap_scan
-          raise Failure, "FAIL: explain (expected Recheck Cond to include user_id)" unless bitmap_heap_scan.fetch("Recheck Cond", "").to_s.include?("user_id")
-          raise Failure, "FAIL: explain (expected status filter after tenant lookup)" unless bitmap_heap_scan.fetch("Filter", "").to_s.include?("status")
+          access_node = find_missing_index_access_node(plan)
+          raise Failure, "FAIL: explain (expected todos access under sort #{EXPECTED_SORT_KEY.join(', ')})" unless access_node
 
-          index_scan = Array(bitmap_heap_scan["Plans"]).find { |node| node.fetch("Node Type") == "Bitmap Index Scan" }
-          unless index_scan&.fetch("Index Name", "") == USER_ID_INDEX_NAME
-            raise Failure, "FAIL: explain (expected Bitmap Index Scan using #{USER_ID_INDEX_NAME})"
-          end
+          tenant_condition = access_tenant_condition(access_node)
+          raise Failure, "FAIL: explain (expected Index Cond or Recheck Cond to include user_id)" unless tenant_condition.include?("user_id")
+          raise Failure, "FAIL: explain (expected status filter after tenant lookup)" unless access_node.fetch("Filter", "").to_s.include?("status")
 
-          bitmap_heap_scan
+          index_name = access_index_name(access_node)
+          raise Failure, "FAIL: explain (expected user-scoped access via #{USER_ID_INDEX_NAME})" unless index_name == USER_ID_INDEX_NAME
+
+          {
+            "Node Type" => access_node.fetch("Node Type"),
+            "Index Name" => index_name,
+            "Sort Key" => EXPECTED_SORT_KEY,
+            "Filter" => access_node.fetch("Filter", "").to_s,
+            "tenant_condition" => tenant_condition,
+          }
         ensure
           connection&.close
         end
 
-        def find_missing_index_scan(node)
-          return unless node.fetch("Node Type") == "Limit"
+        def find_missing_index_access_node(node)
+          return unless node.is_a?(Hash)
 
-          Array(node["Plans"]).each do |sort_node|
-            next unless sort_node.fetch("Node Type") == "Sort"
-            next unless sort_node.fetch("Sort Key", []) == EXPECTED_SORT_KEY
+          if node["Node Type"] == "Sort" && node["Sort Key"] == EXPECTED_SORT_KEY
+            return find_todos_relation_node(node)
+          end
 
-            Array(sort_node["Plans"]).each do |child|
-              next unless child["Relation Name"] == "todos"
-              return child if child.fetch("Node Type") == "Bitmap Heap Scan"
-            end
+          Array(node["Plans"]).each do |child|
+            match = find_missing_index_access_node(child)
+            return match if match
           end
 
           nil
+        end
+
+        def find_todos_relation_node(node)
+          return node if node["Relation Name"] == "todos"
+
+          Array(node["Plans"]).each do |child|
+            match = find_todos_relation_node(child)
+            return match if match
+          end
+
+          nil
+        end
+
+        def access_tenant_condition(node)
+          index_condition = node.fetch("Index Cond", "").to_s
+          return index_condition unless index_condition.empty?
+
+          recheck_condition = node.fetch("Recheck Cond", "").to_s
+          return recheck_condition unless recheck_condition.empty?
+
+          Array(node["Plans"]).each do |child|
+            condition = access_tenant_condition(child)
+            return condition unless condition.empty?
+          end
+
+          ""
+        end
+
+        def access_index_name(node)
+          index_name = node.fetch("Index Name", "").to_s
+          return index_name unless index_name.empty?
+
+          Array(node["Plans"]).each do |child|
+            nested_index_name = access_index_name(child)
+            return nested_index_name unless nested_index_name.empty?
+          end
+
+          ""
         end
 
         def wait_for_clickhouse!(window:, queryids:, clickhouse_url:, timeout_seconds:)

@@ -87,6 +87,18 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     assert_includes explain_sqls.last, %(id DESC)
   end
 
+  def test_verifier_accepts_index_scan_that_proves_tenant_index_contract
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan(access_node_type: "Index Scan") : search_reference_plan
+      end,
+    )
+
+    result = verifier.call(base_url: "http://app.test")
+
+    assert_equal "Index Scan", result.fetch(:checks).fetch(0).fetch(:node_type)
+  end
+
   def test_verifier_uses_default_counts_calls_reader
     connection = FakePgConnection.new([{ "calls" => "7" }])
     pg = FakePg.new(connection)
@@ -138,6 +150,21 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     end
 
     assert_includes error.message, "status"
+    assert_includes error.message, "/api/todos"
+  end
+
+  def test_verifier_fails_when_missing_index_plan_does_not_prove_user_id_condition
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan(access_condition: nil) : search_reference_plan
+      end,
+    )
+
+    error = assert_raises(Load::VerificationError) do
+      verifier.call(base_url: "http://app.test")
+    end
+
+    assert_includes error.message, "user_id"
     assert_includes error.message, "/api/todos"
   end
 
@@ -203,31 +230,43 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     end
   end
 
-  def missing_index_plan(filter: %(("todos"."status" = 'open'::text)), recheck_cond: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+  def missing_index_plan(access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
     {
       "Node Type" => "Limit",
       "Plans" => [
         {
           "Node Type" => "Sort",
           "Sort Key" => ["created_at DESC", "id DESC"],
-          "Plans" => [
-            {
-              "Node Type" => "Bitmap Heap Scan",
-              "Relation Name" => "todos",
-              "Recheck Cond" => recheck_cond,
-              "Filter" => filter,
-              "Plans" => [
-                {
-                  "Node Type" => "Bitmap Index Scan",
-                  "Index Name" => index_name,
-                  "Index Cond" => %(("todos"."user_id" = 1)),
-                },
-              ],
-            },
-          ],
+          "Plans" => [missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)],
         },
       ],
     }
+  end
+
+  def missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)
+    if access_node_type == "Bitmap Heap Scan"
+      {
+        "Node Type" => access_node_type,
+        "Relation Name" => "todos",
+        "Recheck Cond" => access_condition,
+        "Filter" => filter,
+        "Plans" => [
+          {
+            "Node Type" => "Bitmap Index Scan",
+            "Index Name" => index_name,
+            "Index Cond" => access_condition,
+          },
+        ],
+      }
+    else
+      {
+        "Node Type" => access_node_type,
+        "Relation Name" => "todos",
+        "Index Name" => index_name,
+        "Index Cond" => access_condition,
+        "Filter" => filter,
+      }
+    end
   end
 
   def search_reference_plan

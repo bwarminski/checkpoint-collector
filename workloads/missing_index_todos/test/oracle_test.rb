@@ -29,11 +29,27 @@ class MissingIndexTodosOracleTest < Minitest::Test
     )
 
     assert_equal "Bitmap Heap Scan", result.fetch(:plan).fetch("Node Type")
-    assert_equal %(("todos"."user_id" = 1)), result.fetch(:plan).fetch("Recheck Cond")
+    assert_equal %(("todos"."user_id" = 1)), result.fetch(:plan).fetch("tenant_condition")
     assert_equal %(("todos"."status" = 'open'::text)), result.fetch(:plan).fetch("Filter")
     assert_equal 600, result.fetch(:clickhouse).fetch("total_exec_count")
     assert_equal ["111", "222"], clickhouse_calls.first.fetch(:queryids)
     assert_equal "http://clickhouse:8123", clickhouse_calls.first.fetch(:clickhouse_url)
+  end
+
+  def test_oracle_accepts_index_scan_that_proves_tenant_index_contract
+    result = build_dominance_oracle(
+      explain_rows: [explain_row(plan: missing_index_plan(access_node_type: "Index Scan"))],
+      clickhouse_topn_rows: [
+        { "queryid" => "primary", "total_calls" => "70000", "total_exec_time_ms_estimate" => "900.0" },
+      ],
+    ).call(
+      run_dir: write_run_record(query_ids: ["primary"]),
+      database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+      clickhouse_url: "http://clickhouse:8123",
+    )
+
+    assert_equal "Index Scan", result.fetch(:plan).fetch("Node Type")
+    assert_equal %(("todos"."user_id" = 1)), result.fetch(:plan).fetch("tenant_condition")
   end
 
   def test_oracle_fails_when_run_record_lacks_top_level_query_ids
@@ -179,6 +195,27 @@ class MissingIndexTodosOracleTest < Minitest::Test
     assert_includes error.message, "FAIL: explain"
   end
 
+  def test_oracle_fails_when_plan_does_not_prove_user_id_condition
+    run_dir = write_run_record(query_ids: ["111"])
+    explain_rows = [explain_row(plan: missing_index_plan(access_condition: nil))]
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg: FakePg.new(explain_rows),
+      clickhouse_query: ->(**) { { "total_exec_count" => "600" } },
+      sleeper: ->(*) {},
+    )
+
+    error = assert_raises(Load::Workloads::MissingIndexTodos::Oracle::Failure) do
+      oracle.call(
+        run_dir:,
+        database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+        clickhouse_url: "http://clickhouse:8123",
+      )
+    end
+
+    assert_includes error.message, "user_id"
+    assert_includes error.message, "FAIL: explain"
+  end
+
   def test_oracle_builds_clickhouse_query_from_queryids_not_sql_like
     oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
       pg: FakePg.new([]),
@@ -306,10 +343,37 @@ class MissingIndexTodosOracleTest < Minitest::Test
     assert_includes stderr.string, "FAIL: clickhouse (saw 10 calls before timeout)"
   end
 
+  def test_run_prints_explain_summary_for_tenant_index_contract
+    run_dir = write_run_record(query_ids: ["111"])
+    stdout = StringIO.new
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      stdout:,
+      pg: FakePg.new([explain_row(plan: missing_index_plan(access_node_type: "Index Scan"))]),
+      clickhouse_query: ->(**) { { "total_exec_count" => "600", "mean_exec_time_ms" => "42.3" } },
+      clickhouse_topn_query: ->(**) { [{ "queryid" => "111", "total_exec_time_ms_estimate" => "900.0" }] },
+      sleeper: ->(*) {},
+    )
+
+    error = assert_raises(SystemExit) do
+      oracle.run(
+        [
+          run_dir,
+          "--database-url", "postgresql://postgres:postgres@localhost:5432/fixture_01",
+          "--clickhouse-url", "http://clickhouse:8123",
+        ]
+      )
+    end
+
+    assert_equal 0, error.status
+    assert_includes stdout.string, "PASS: explain"
+    assert_includes stdout.string, "index_todos_on_user_id"
+    assert_includes stdout.string, "status filter"
+    assert_includes stdout.string, "created_at DESC, id DESC"
+  end
+
   private
 
-  def build_dominance_oracle(clickhouse_topn_rows:)
-    explain_rows = [explain_row(plan: missing_index_plan)]
+  def build_dominance_oracle(clickhouse_topn_rows:, explain_rows: [explain_row(plan: missing_index_plan)])
 
     Load::Workloads::MissingIndexTodos::Oracle.new(
       pg: FakePg.new(explain_rows),
@@ -330,31 +394,43 @@ class MissingIndexTodosOracleTest < Minitest::Test
     }
   end
 
-  def missing_index_plan(filter: %(("todos"."status" = 'open'::text)), recheck_cond: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
+  def missing_index_plan(access_node_type: "Bitmap Heap Scan", filter: %(("todos"."status" = 'open'::text)), access_condition: %(("todos"."user_id" = 1)), index_name: "index_todos_on_user_id")
     {
       "Node Type" => "Limit",
       "Plans" => [
         {
           "Node Type" => "Sort",
           "Sort Key" => ["created_at DESC", "id DESC"],
-          "Plans" => [
-            {
-              "Node Type" => "Bitmap Heap Scan",
-              "Relation Name" => "todos",
-              "Recheck Cond" => recheck_cond,
-              "Filter" => filter,
-              "Plans" => [
-                {
-                  "Node Type" => "Bitmap Index Scan",
-                  "Index Name" => index_name,
-                  "Index Cond" => %(("todos"."user_id" = 1)),
-                },
-              ],
-            },
-          ],
+          "Plans" => [missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)],
         },
       ],
     }
+  end
+
+  def missing_index_access_node(access_node_type:, filter:, access_condition:, index_name:)
+    if access_node_type == "Bitmap Heap Scan"
+      {
+        "Node Type" => access_node_type,
+        "Relation Name" => "todos",
+        "Recheck Cond" => access_condition,
+        "Filter" => filter,
+        "Plans" => [
+          {
+            "Node Type" => "Bitmap Index Scan",
+            "Index Name" => index_name,
+            "Index Cond" => access_condition,
+          },
+        ],
+      }
+    else
+      {
+        "Node Type" => access_node_type,
+        "Relation Name" => "todos",
+        "Index Name" => index_name,
+        "Index Cond" => access_condition,
+        "Filter" => filter,
+      }
+    end
   end
 
   def write_run_record(query_ids: nil)

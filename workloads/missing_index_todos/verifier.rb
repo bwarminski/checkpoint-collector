@@ -101,17 +101,18 @@ module Load
 
         def verify_missing_index
           plan = @explain_reader.call(MISSING_INDEX_SQL)
-          bitmap_heap_scan = find_missing_index_scan(plan)
-          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Limit -> Sort -> Bitmap Heap Scan on todos" unless bitmap_heap_scan
-          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Recheck Cond to include user_id" unless bitmap_heap_scan.fetch("Recheck Cond", "").to_s.include?("user_id")
-          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected status filter after tenant lookup" unless bitmap_heap_scan.fetch("Filter", "").to_s.include?("status")
+          access_node = find_missing_index_access_node(plan)
+          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected todos access under sort #{EXPECTED_SORT_KEY.join(', ')}" unless access_node
 
-          index_scan = Array(bitmap_heap_scan["Plans"]).find { |node| node.fetch("Node Type") == "Bitmap Index Scan" }
-          unless index_scan&.fetch("Index Name", "") == USER_ID_INDEX_NAME
-            raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Bitmap Index Scan using #{USER_ID_INDEX_NAME}"
+          tenant_condition = access_tenant_condition(access_node)
+          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected Index Cond or Recheck Cond to include user_id" unless tenant_condition.include?("user_id")
+          raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected status filter after tenant lookup" unless access_node.fetch("Filter", "").to_s.include?("status")
+
+          unless access_index_name(access_node) == USER_ID_INDEX_NAME
+            raise Load::VerificationError, "fixture verification failed for #{MISSING_INDEX_PATH}: expected user-scoped access via #{USER_ID_INDEX_NAME}"
           end
 
-          { name: "missing_index", ok: true, node_type: bitmap_heap_scan.fetch("Node Type") }
+          { name: "missing_index", ok: true, node_type: access_node.fetch("Node Type") }
         end
 
         def verify_counts_n_plus_one(base_url:)
@@ -145,20 +146,57 @@ module Load
           raise Load::VerificationError, "fixture verification failed for #{path}: expected 2xx response, saw #{response.code}"
         end
 
-        def find_missing_index_scan(node)
-          return unless node.fetch("Node Type") == "Limit"
+        def find_missing_index_access_node(node)
+          return unless node.is_a?(Hash)
 
-          Array(node["Plans"]).each do |sort_node|
-            next unless sort_node.fetch("Node Type") == "Sort"
-            next unless sort_node.fetch("Sort Key", []) == EXPECTED_SORT_KEY
+          if node["Node Type"] == "Sort" && node["Sort Key"] == EXPECTED_SORT_KEY
+            return find_todos_relation_node(node)
+          end
 
-            Array(sort_node["Plans"]).each do |child|
-              next unless child["Relation Name"] == "todos"
-              return child if child.fetch("Node Type") == "Bitmap Heap Scan"
-            end
+          Array(node["Plans"]).each do |child|
+            match = find_missing_index_access_node(child)
+            return match if match
           end
 
           nil
+        end
+
+        def find_todos_relation_node(node)
+          return node if node["Relation Name"] == "todos"
+
+          Array(node["Plans"]).each do |child|
+            match = find_todos_relation_node(child)
+            return match if match
+          end
+
+          nil
+        end
+
+        def access_tenant_condition(node)
+          index_condition = node.fetch("Index Cond", "").to_s
+          return index_condition unless index_condition.empty?
+
+          recheck_condition = node.fetch("Recheck Cond", "").to_s
+          return recheck_condition unless recheck_condition.empty?
+
+          Array(node["Plans"]).each do |child|
+            condition = access_tenant_condition(child)
+            return condition unless condition.empty?
+          end
+
+          ""
+        end
+
+        def access_index_name(node)
+          index_name = node.fetch("Index Name", "").to_s
+          return index_name unless index_name.empty?
+
+          Array(node["Plans"]).each do |child|
+            nested_index_name = access_index_name(child)
+            return nested_index_name unless nested_index_name.empty?
+          end
+
+          ""
         end
 
         def plan_matches_reference?(actual:, reference:, keys: reference.keys)
