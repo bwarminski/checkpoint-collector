@@ -78,7 +78,7 @@ module Load
         end
 
         def initialize(client_factory: nil, explain_reader: nil, stats_reset: nil, counts_calls_reader: nil, search_reference_reader: nil, database_url: ENV["DATABASE_URL"], pg: PG)
-          @client_factory = client_factory || ->(base_url) { Load::Client.new(base_url:) }
+          @client_factory = client_factory || ->(base_url) { Load::Client.new(base_url:, timeout_seconds: 30) }
           @explain_reader = explain_reader || self.class.build_explain_reader(database_url:, pg:)
           @stats_reset = stats_reset || self.class.build_stats_reset(database_url:, pg:)
           @counts_calls_reader = counts_calls_reader || self.class.build_counts_calls_reader(database_url:, pg:)

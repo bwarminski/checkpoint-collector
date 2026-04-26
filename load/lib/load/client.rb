@@ -25,9 +25,10 @@ module Load
       end
     end
 
-    def initialize(base_url:, http: Net::HTTP)
+    def initialize(base_url:, http: Net::HTTP, timeout_seconds: HTTP_TIMEOUT_SECONDS)
       @base_url = URI(base_url)
       @http = http
+      @timeout_seconds = timeout_seconds
       @connection = nil
     end
 
@@ -84,9 +85,9 @@ module Load
     end
 
     def configure_timeouts(http)
-      http.open_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:open_timeout=)
-      http.read_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:read_timeout=)
-      http.write_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:write_timeout=)
+      http.open_timeout = @timeout_seconds if http.respond_to?(:open_timeout=)
+      http.read_timeout = @timeout_seconds if http.respond_to?(:read_timeout=)
+      http.write_timeout = @timeout_seconds if http.respond_to?(:write_timeout=)
       http.keep_alive_timeout = 30 if http.respond_to?(:keep_alive_timeout=)
     end
 

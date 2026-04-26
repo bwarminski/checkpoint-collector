@@ -72,6 +72,19 @@ class ClientTest < Minitest::Test
     assert_equal "/two", connection.requests.last.path
   end
 
+  def test_client_accepts_custom_http_timeout
+    connection = FakeConnection.new
+    http = FakeHttp.new(connection)
+    client = Load::Client.new(base_url: "http://example.test:3000", http:, timeout_seconds: 17)
+
+    client.start
+
+    assert_equal 17, connection.open_timeout
+    assert_equal 17, connection.read_timeout
+    assert_equal 17, connection.write_timeout
+    assert_equal 30, connection.keep_alive_timeout
+  end
+
   def test_finish_is_safe_after_start_raises_before_session_begins
     connection = FakeConnection.new
     connection.define_singleton_method(:start) do
