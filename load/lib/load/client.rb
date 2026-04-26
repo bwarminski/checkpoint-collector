@@ -62,7 +62,6 @@ module Load
         @connection.request(request)
       elsif @http.respond_to?(:new)
         connection = build_connection
-        session = nil
         begin
           session = connection_session(connection)
           session.request(request)
