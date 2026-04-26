@@ -13,6 +13,7 @@ module Load
     Runtime = Data.define(:clock, :sleeper, :http, :stop_flag)
     Settings = Data.define(:readiness_path, :startup_grace_seconds, :metrics_interval_seconds, :workload_file, :app_root, :adapter_bin)
     InvariantState = Struct.new(:policy, :sampler, :interval_seconds, :consecutive_breaches, :thread_sleeping, :failure, keyword_init: true)
+    attr_reader :run_state
 
     MetricsSink = Data.define(:run_record) do
       def <<(line)
@@ -36,7 +37,7 @@ module Load
         return if @started
 
         @started = true
-        @runner.pin_window_start
+        @runner.run_state.pin_window_start(now: @runner.send(:current_time))
       end
 
       def record_error(**kwargs)
@@ -117,18 +118,26 @@ module Load
         thread_sleeping: false,
         failure: nil,
       )
-      @state_mutex = Mutex.new
+      @invariant_mutex = Mutex.new
+      @run_state = Load::RunState.new(
+        run_record:,
+        workload:,
+        adapter_bin: @settings.adapter_bin || @adapter_client.adapter_bin,
+        app_root: @settings.app_root,
+        readiness_path: @settings.readiness_path,
+        startup_grace_seconds: @settings.startup_grace_seconds,
+        metrics_interval_seconds: @settings.metrics_interval_seconds,
+        workload_file: workload_file,
+      )
       @tracking_buffers = []
-      @state = initial_state
-      @window_started = false
     end
 
     def run
       begin
-        @run_record.write_run(snapshot_state)
+        @run_state.write_initial
         adapter_describe = @adapter_client.describe
         validate_adapter_response!(adapter_describe, %w[name framework runtime], "describe")
-        write_state(adapter: {
+        @run_state.merge(adapter: {
           describe: adapter_describe,
           bin: @settings.adapter_bin || @adapter_client.adapter_bin,
           app_root: @settings.app_root,
@@ -136,11 +145,11 @@ module Load
 
         @adapter_client.prepare(app_root: @settings.app_root)
         reset_state = @adapter_client.reset_state(app_root: @settings.app_root, workload: @workload.name, scale: @workload.scale)
-        write_state(query_ids: Array(reset_state["query_ids"]).map(&:to_s)) if reset_state.is_a?(Hash) && reset_state["query_ids"]
+        @run_state.merge(query_ids: Array(reset_state["query_ids"]).map(&:to_s)) if reset_state.is_a?(Hash) && reset_state["query_ids"]
 
         start_response = @adapter_client.start(app_root: @settings.app_root)
         validate_adapter_response!(start_response, %w[pid base_url], "start")
-        write_state(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
+        @run_state.merge(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
 
         probe_readiness(start_response.fetch("base_url"))
         verify_fixture(base_url: start_response.fetch("base_url"))
@@ -148,16 +157,16 @@ module Load
 
         result = finish_run
       rescue InvariantSamplerFailure
-        write_state(outcome: outcome_payload(aborted: true, error_code: "invariant_sampler_failed"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "invariant_sampler_failed"))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue Load::FixtureVerifier::VerificationError => error
-        write_state(outcome: outcome_payload(aborted: true, error_code: "fixture_verification_failed").merge(error_message: error.message))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "fixture_verification_failed").merge(error_message: error.message))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue AdapterClient::AdapterError
-        write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "adapter_error"))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue Load::ReadinessGate::Timeout
-        write_state(outcome: outcome_payload(aborted: true, error_code: "readiness_timeout"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "readiness_timeout"))
         result = Load::ExitCodes::ADAPTER_ERROR
       ensure
         result = stop_adapter_safely(result)
@@ -175,7 +184,7 @@ module Load
     end
 
     def probe_readiness(base_url)
-      write_state(
+      @run_state.merge(
         window: {
           readiness: Load::ReadinessGate.new(
             base_url:,
@@ -302,10 +311,15 @@ module Load
     #      -> !breach  -> counter = 0 (enforce only; harmless elsewhere)
     def sample_invariants
       sample = @invariants.sampler.call
-      append_invariant_sample(sample)
+      @run_state.append_invariant_sample(
+        sampled_at: current_time,
+        breach: sample.breach?,
+        breaches: sample.breaches,
+        checks: sample.checks.map(&:to_record),
+      )
       return reset_invariant_breaches unless sample.breach?
 
-      append_warning(sample.to_warning)
+      @run_state.append_warning(sample.to_warning)
       emit_invariant_warning(sample) if @invariants.policy == :warn
       return if @invariants.policy == :warn
 
@@ -341,22 +355,19 @@ module Load
     end
 
     def finish_run
-      write_state(window: { end_ts: current_time })
-      if stop_reason == :invariant_breach || @window_started
-        write_state(outcome: final_outcome)
+      request_totals = aggregate_request_totals
+      if stop_reason == :invariant_breach
+        @run_state.finish(now: current_time, request_totals:, aborted: true, error_code: "invariant_breach")
+        return Load::ExitCodes::ADAPTER_ERROR
+      end
+
+      if @run_state.window_started?
+        @run_state.finish(now: current_time, request_totals:, aborted: stop_aborted?)
         return final_exit_code
       end
 
-      write_state(outcome: outcome_payload(aborted: true, error_code: "no_successful_requests"))
+      @run_state.finish(now: current_time, request_totals:, aborted: true, error_code: "no_successful_requests")
       Load::ExitCodes::NO_SUCCESSFUL_REQUESTS
-    end
-
-    def final_outcome
-      if stop_reason == :invariant_breach
-        outcome_payload(aborted: true, error_code: "invariant_breach")
-      else
-        outcome_payload(aborted: stop_aborted?)
-      end
     end
 
     def final_exit_code
@@ -393,56 +404,8 @@ module Load
       TrackingBuffer.new(self)
     end
 
-    def pin_window_start
-      @state_mutex.synchronize do
-        return if @window_started
-
-        @window_started = true
-        @state = deep_merge(@state, window: { start_ts: current_time })
-        @run_record.write_run(snapshot_state)
-      end
-    end
-
     def current_time
       @runtime.clock.call
-    end
-
-    public :pin_window_start
-
-    def initial_state
-      {
-        run_id: File.basename(@run_record.run_dir),
-        schema_version: 2,
-        workload: {
-          name: @workload.name,
-          file: workload_file,
-          scale: @workload.scale.to_h,
-          load_plan: @workload.load_plan.to_h,
-          actions: @workload.actions.map { |entry| { class: entry.action_class.name, weight: entry.weight } },
-        },
-        adapter: {
-          describe: nil,
-          bin: @settings.adapter_bin || @adapter_client.adapter_bin,
-          app_root: @settings.app_root,
-          base_url: nil,
-          pid: nil,
-        },
-        window: {
-          start_ts: nil,
-          end_ts: nil,
-          readiness: {
-            path: @settings.readiness_path,
-            probe_duration_ms: nil,
-            probe_attempts: nil,
-          },
-          startup_grace_seconds: @settings.startup_grace_seconds,
-          metrics_interval_seconds: @settings.metrics_interval_seconds,
-        },
-        outcome: outcome_payload(aborted: false),
-        query_ids: [],
-        warnings: [],
-        invariant_samples: [],
-      }
     end
 
     def workload_file
@@ -456,41 +419,26 @@ module Load
       expanded.start_with?(cwd) ? expanded.delete_prefix(cwd) : expanded
     end
 
-    def outcome_payload(aborted:, error_code: nil)
-      request_totals = aggregate_request_totals
-      {
-        requests_total: request_totals.fetch(:total),
-        requests_ok: request_totals.fetch(:ok),
-        requests_error: request_totals.fetch(:error),
-        aborted:,
-        error_code:,
-      }.compact
-    end
-
-    def snapshot_state
-      deep_copy(@state)
-    end
-
     def mark_invariant_thread_sleeping(value)
-      @state_mutex.synchronize do
+      @invariant_mutex.synchronize do
         @invariants.thread_sleeping = value
       end
     end
 
     def invariant_thread_sleeping?
-      @state_mutex.synchronize do
+      @invariant_mutex.synchronize do
         @invariants.thread_sleeping
       end
     end
 
     def record_invariant_failure(error)
-      @state_mutex.synchronize do
+      @invariant_mutex.synchronize do
         @invariants.failure ||= error
       end
     end
 
     def raise_invariant_failure_if_present
-      failure = @state_mutex.synchronize do
+      failure = @invariant_mutex.synchronize do
         error = @invariants.failure
         @invariants.failure = nil
         error
@@ -501,43 +449,18 @@ module Load
     end
 
     def stop_adapter_safely(result)
-      pid = @state.dig(:adapter, :pid)
+      pid = @run_state.snapshot.dig(:adapter, :pid)
       return result unless pid
 
       @adapter_client.stop(pid:)
       result
     rescue AdapterClient::AdapterError
       if result.nil? || result == Load::ExitCodes::SUCCESS
-        write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "adapter_error"))
         return Load::ExitCodes::ADAPTER_ERROR
       end
 
       result
-    end
-
-    def write_state(fragment)
-      @state_mutex.synchronize do
-        @state = deep_merge(@state, fragment)
-        @run_record.write_run(snapshot_state)
-      end
-    end
-
-    def append_warning(payload)
-      @state_mutex.synchronize do
-        warnings = @state.fetch(:warnings).dup
-        warnings << deep_copy(payload)
-        @state = deep_merge(@state, warnings:)
-        @run_record.write_run(snapshot_state)
-      end
-    end
-
-    def append_invariant_sample(sample)
-      @state_mutex.synchronize do
-        invariant_samples = @state.fetch(:invariant_samples).dup
-        invariant_samples << deep_copy(sample.to_record(sampled_at: current_time))
-        @state = deep_merge(@state, invariant_samples:)
-        @run_record.write_run(snapshot_state)
-      end
     end
 
     def register_tracking_buffer(buffer)

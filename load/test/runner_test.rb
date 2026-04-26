@@ -955,14 +955,19 @@ class RunnerTest < Minitest::Test
     buffer.record_ok(action: :list, latency_ns: 1, status: 200)
     buffer.record_error(action: :list, latency_ns: 1, error_class: "RuntimeError")
 
-    runner.send(:write_state, outcome: runner.send(:outcome_payload, aborted: false))
+    runner.run_state.merge(outcome: {
+      requests_total: 3,
+      requests_ok: 2,
+      requests_error: 1,
+      aborted: false,
+    })
     assert_equal first_start, run_record.window.fetch(:start_ts)
     assert_equal 3, run_record.outcome.fetch(:requests_total)
     assert_equal 2, run_record.outcome.fetch(:requests_ok)
     assert_equal 1, run_record.outcome.fetch(:requests_error)
   end
 
-  def test_tracking_buffer_does_not_need_state_mutex_for_non_first_success
+  def test_tracking_buffer_pins_window_only_once
     run_record = FakeRunRecord.new
     runner = Load::Runner.new(
       workload: FakeWorkload.new,
@@ -974,19 +979,12 @@ class RunnerTest < Minitest::Test
     )
     buffer = Load::Runner::TrackingBuffer.new(runner)
     buffer.record_ok(action: :list, latency_ns: 1, status: 200)
-    completed = Queue.new
-    thread = nil
 
-    runner.instance_variable_get(:@state_mutex).synchronize do
-      thread = Thread.new do
-        buffer.record_ok(action: :list, latency_ns: 1, status: 200)
-        completed << true
-      end
-      sleep 0.05
-      assert_equal 1, completed.size
-    end
+    assert_equal 1, run_record.writes.length
 
-    thread.join
+    buffer.record_ok(action: :list, latency_ns: 1, status: 200)
+
+    assert_equal 1, run_record.writes.length
   end
 
   def test_runner_completes_when_http_request_hangs_after_stop
@@ -1142,7 +1140,7 @@ class RunnerTest < Minitest::Test
       startup_grace_seconds: 0.0,
     )
 
-    assert_equal 2, runner.send(:initial_state).fetch(:schema_version)
+    assert_equal 2, runner.run_state.snapshot.fetch(:schema_version)
   end
 
   def test_workload_invariant_sampler_defaults_to_nil
