@@ -59,4 +59,10 @@ class ScaleTest < Minitest::Test
 
     assert_equal "extra cannot contain duplicate key after normalization: OPEN_FRACTION", error.message
   end
+
+  def test_scale_normalizes_extra_keys_to_symbols
+    scale = Load::Scale.new(rows_per_table: 10, extra: { "user_count" => 100 })
+
+    assert_equal 100, scale.extra.fetch(:user_count)
+  end
 end

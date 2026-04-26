@@ -10,7 +10,7 @@ module Load
       duplicate = normalized.find { |_, keys| keys.length > 1 }&.first
       raise ArgumentError, "extra cannot contain duplicate key after normalization: #{duplicate}" if duplicate
 
-      super
+      super(rows_per_table:, seed:, extra: extra.transform_keys(&:to_sym))
     end
 
     def env_pairs
