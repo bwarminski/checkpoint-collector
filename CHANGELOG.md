@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.0.0] — 2026-04-26
+
+**PlanetScale reset/soak.** Adds an explicit remote reset strategy for the Rails adapter and a stats-only mode for the collector so `bin/load soak` can target an existing PlanetScale Postgres branch. Local Docker behavior is unchanged.
+
+### Added
+
+- **`BENCH_ADAPTER_RESET_STRATEGY=local|remote` reset strategy.** `local` (default) keeps template-clone behavior. `remote` skips the template cache, runs `db:schema:load` + `db/seeds.rb` against the existing database, ensures `pg_stat_statements`, captures workload query IDs, and resets stats. Schema-load and seed failures surface their stderr in the JSON error contract.
+- **`COLLECTOR_DISABLE_LOG_INGESTION` collector flag.** When set, the collector skips `POSTGRES_LOG_PATH` reads and `postgres_logs` writes while still polling `pg_stat_statements` and writing `query_events`. The `log_ingestion_enabled` runtime kwarg is the in-process equivalent.
+- **`make load-soak-planetscale` operator target.** Validates `DATABASE_URL` and `BENCH_ADAPTER_PG_ADMIN_URL`, runs `bin/load soak --workload missing-index-todos --invariants warn --startup-grace-seconds 60` with `BENCH_ADAPTER_RESET_STRATEGY=remote`. Slower Rails boot on PlanetScale and planner-stat estimate drift drove the grace and policy choices; both are documented in the README.
+- **PlanetScale Soak README section.** Covers `pg_stat_statements` dashboard activation, `verify-full` + explicit CA bundle, direct vs pooled connection guidance, the reset/reseed checkpoint, and stats-only collector usage.
+
+### Changed
+
+- **Invariant sampler tracking opt-out is best-effort.** `Load::Workloads::MissingIndexTodos::InvariantSampler` issues `SET pg_stat_statements.track = 'none'` on its dedicated connection and tolerates `PG::InsufficientPrivilege` so PlanetScale-style restricted roles do not fail soak runs.
+- **Verifier HTTP timeout.** `Load::Workloads::MissingIndexTodos::Verifier` uses a 30s `Load::Client` timeout for pre-flight checks; PlanetScale `/api/todos/counts` regularly exceeds the 5s default during cold start.
+- **`Load::Client` accepts `timeout_seconds:`.** Clients can now override the default 5s read/open/write timeout per use case.
+
+### Fixed
+
+- **`close_todo` response parsing.** The action now reads `items` from the `{"items":[...]}` envelope returned by `/api/todos`; previously it parsed the body as a bare array and crashed under live soak traffic.
+- **`make` PHONY contract.** New PlanetScale targets are listed under `.PHONY` so they remain phony alongside the existing operator shortcuts.
+
+### Deferred
+
+- Branch-per-run automation (covered by `pscale` or PlanetScale API).
+- PlanetScale Cluster Logs / Query Insights / `pginsights` as a remote query-log evidence source.
+
 ## [0.4.0.0] — 2026-04-26
 
 **Tenant-shaped mixed missing-index workload.** Expands `missing-index-todos` from a single-action probe into a tenant-scoped seven-action mixed shape, moves fixture verification ownership into the workload, adds soak-mode invariant sampling, and a dominance assertion in the oracle so the bad plan stays attributable end-to-end.
