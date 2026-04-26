@@ -327,6 +327,10 @@ BENCH_ADAPTER_PG_ADMIN_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
 make load-soak-planetscale
 ```
 
+PlanetScale-backed Rails startup can take longer than the local Docker path
+after reset/reseed. The `load-soak-planetscale` target uses
+`--startup-grace-seconds 60`.
+
 Run the collector against PlanetScale in stats-only mode:
 
 ```bash

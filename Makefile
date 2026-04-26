@@ -33,4 +33,4 @@ load-soak:
 load-soak-planetscale:
 	@test -n "$$DATABASE_URL" || (echo "DATABASE_URL is required" >&2; exit 1)
 	@test -n "$$BENCH_ADAPTER_PG_ADMIN_URL" || (echo "BENCH_ADAPTER_PG_ADMIN_URL is required" >&2; exit 1)
-	BENCH_ADAPTER_RESET_STRATEGY=remote bin/load soak --workload missing-index-todos --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo
+	BENCH_ADAPTER_RESET_STRATEGY=remote bin/load soak --workload missing-index-todos --startup-grace-seconds 60 --adapter adapters/rails/bin/bench-adapter --app-root /home/bjw/db-specialist-demo
