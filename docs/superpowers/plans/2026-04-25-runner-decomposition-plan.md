@@ -1145,10 +1145,10 @@ Expected: one line reporting `0 failures, 0 errors`.
 - 50x stability gate on cooperative monitor shutdown:
 
 ```bash
-for i in $(seq 1 50); do
-  BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/invariant_monitor_test.rb \
-    --name test_monitor_stop_unblocks_thread_during_sleep 2>&1 | tail -3
-done | grep -E "errors|failures" | sort -u
+  for i in $(seq 1 50); do
+    BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby load/test/invariant_monitor_test.rb \
+      --name test_stop_unblocks_sleeping_thread 2>&1 | tail -3
+  done | grep -E "errors|failures" | sort -u
 ```
 
 Expected: one line reporting `0 failures, 0 errors`.
