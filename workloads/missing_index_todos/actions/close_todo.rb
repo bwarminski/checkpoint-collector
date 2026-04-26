@@ -26,7 +26,7 @@ module Load
 
           def open_todo_ids
             response = client.get("/api/todos?user_id=#{sample_user_id}&status=open")
-            JSON.parse(response.body.to_s).map { |todo| todo.fetch("id") }
+            JSON.parse(response.body.to_s).fetch("items").map { |todo| todo.fetch("id") }
           end
 
           def sample_user_id

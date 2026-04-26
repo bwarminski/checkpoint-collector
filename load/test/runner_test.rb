@@ -1755,7 +1755,7 @@ class RunnerTest < Minitest::Test
         Response.new("200", "")
       when %r{\A/api/todos\?user_id=(\d+)&status=open\z}
         user_id = Regexp.last_match(1).to_i
-        Response.new("200", JSON.generate([{ "id" => user_id }]))
+        Response.new("200", JSON.generate({ items: [{ "id" => user_id }] }))
       when %r{\A/api/todos/(\d+)\z}
         @closed_todo_ids << Regexp.last_match(1).to_i
         Response.new("200", "")
