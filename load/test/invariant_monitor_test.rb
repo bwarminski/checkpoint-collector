@@ -87,6 +87,27 @@ class InvariantMonitorTest < Minitest::Test
     refute thread.alive?
   end
 
+  def test_stop_ignores_thread_error_when_target_thread_exits_during_shutdown
+    thread = ExitingThread.new
+    monitor = Load::InvariantMonitor.new(
+      sampler: -> { healthy_sample },
+      policy: :enforce,
+      interval_seconds: 60.0,
+      stop_flag: Load::Runner::InternalStopFlag.new,
+      sleeper: ->(*) {},
+      on_sample: ->(*) {},
+      on_warning: ->(*) {},
+      on_breach_stop: ->(*) {},
+      stderr: StringIO.new,
+    )
+    monitor.instance_variable_set(:@sleeping, true)
+
+    monitor.stop(thread)
+
+    assert_equal 1, thread.raise_calls
+    assert_equal 1, thread.join_calls
+  end
+
   def test_sampler_failure_propagates_and_clears_after_stop_raises
     stops = []
     monitor = Load::InvariantMonitor.new(
@@ -121,5 +142,28 @@ class InvariantMonitorTest < Minitest::Test
     Load::Runner::InvariantSample.new(
       [Load::Runner::InvariantCheck.new("open_count", 10, 5, nil)],
     )
+  end
+
+  class ExitingThread
+    attr_reader :raise_calls, :join_calls
+
+    def initialize
+      @raise_calls = 0
+      @join_calls = 0
+    end
+
+    def alive?
+      true
+    end
+
+    def raise(*)
+      @raise_calls += 1
+      Kernel.raise ThreadError, "thread exited during shutdown"
+    end
+
+    def join(*)
+      @join_calls += 1
+      true
+    end
   end
 end
