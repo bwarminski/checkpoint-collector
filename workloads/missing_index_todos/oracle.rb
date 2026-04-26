@@ -6,6 +6,7 @@ require "optparse"
 require "pg"
 require "time"
 require "uri"
+require_relative "plan_contract"
 
 module Load
   module Workloads
@@ -13,9 +14,6 @@ module Load
       class Oracle
         CLICKHOUSE_CALL_THRESHOLD = 500
         DOMINANCE_RATIO_THRESHOLD = 3.0
-        USER_ID_INDEX_NAME = "index_todos_on_user_id".freeze
-        EXPECTED_SORT_KEY = %w[created_at desc id desc].freeze
-        SORT_NODE_TYPES = ["Sort", "Incremental Sort", "Gather Merge"].freeze
         CLICKHOUSE_TOPN_LIMIT = 10
         EXPLAIN_SQL = <<~SQL.freeze
           EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
@@ -118,78 +116,27 @@ module Load
           rows = connection.exec(EXPLAIN_SQL)
           payload = JSON.parse(rows.first.fetch("QUERY PLAN"))
           plan = payload.fetch(0).fetch("Plan")
-          access_node = find_missing_index_access_node(plan)
-          raise Failure, "FAIL: explain (expected todos access under sort #{EXPECTED_SORT_KEY.join(', ')})" unless access_node
+          match = PlanContract.match(plan)
+          raise Failure, explain_failure_message(match.fetch(:reason)) unless match.fetch(:ok)
 
-          tenant_condition = matching_access_condition(access_node) { |condition| condition.include?("user_id") }
-          raise Failure, "FAIL: explain (expected Index Cond or Recheck Cond to include user_id)" unless tenant_condition.include?("user_id")
-          raise Failure, "FAIL: explain (expected status filter after tenant lookup)" unless access_node.fetch("Filter", "").to_s.include?("status")
-
-          raise Failure, "FAIL: explain (expected user-scoped access via #{USER_ID_INDEX_NAME})" unless subtree_includes_index_name?(access_node, USER_ID_INDEX_NAME)
-
-          {
-            "Node Type" => access_node.fetch("Node Type"),
-            "Index Name" => USER_ID_INDEX_NAME,
-            "Sort Key" => ["created_at DESC", "id DESC"],
-            "Filter" => access_node.fetch("Filter", "").to_s,
-            "tenant_condition" => tenant_condition,
-          }
+          match.fetch(:details)
         ensure
           connection&.close
         end
 
-        def find_missing_index_access_node(node, sort_confirmed: false)
-          return unless node.is_a?(Hash)
-
-          sort_confirmed ||= sort_matches_expected?(node)
-          return node if sort_confirmed && node["Relation Name"] == "todos"
-
-          Array(node["Plans"]).each do |child|
-            match = find_missing_index_access_node(child, sort_confirmed:)
-            return match if match
+        def explain_failure_message(reason)
+          case reason
+          when :sort_missing
+            "FAIL: explain (expected todos access under sort #{PlanContract::EXPECTED_SORT_DESCRIPTION})"
+          when :user_id_missing
+            "FAIL: explain (expected Index Cond or Recheck Cond to include user_id = 1)"
+          when :status_missing
+            "FAIL: explain (expected status = 'open' filter after tenant lookup)"
+          when :index_missing
+            "FAIL: explain (expected user-scoped access via #{PlanContract::USER_ID_INDEX_NAME})"
+          else
+            raise "unknown explain failure reason: #{reason}"
           end
-
-          nil
-        end
-
-        def matching_access_condition(node, &matcher)
-          [node.fetch("Index Cond", "").to_s, node.fetch("Recheck Cond", "").to_s].each do |condition|
-            return condition if !condition.empty? && matcher.call(condition)
-          end
-
-          Array(node["Plans"]).each do |child|
-            condition = matching_access_condition(child, &matcher)
-            return condition unless condition.empty?
-          end
-
-          ""
-        end
-
-        def subtree_includes_index_name?(node, expected_index_name)
-          return true if node.fetch("Index Name", "").to_s == expected_index_name
-
-          Array(node["Plans"]).any? do |child|
-            subtree_includes_index_name?(child, expected_index_name)
-          end
-        end
-
-        def sort_matches_expected?(node)
-          SORT_NODE_TYPES.include?(node["Node Type"]) &&
-            normalize_sort_key(node["Sort Key"]) == EXPECTED_SORT_KEY
-        end
-
-        def normalize_sort_key(sort_key)
-          Array(sort_key).flat_map do |key|
-            normalize_sort_key_entry(key)
-          end
-        end
-
-        def normalize_sort_key_entry(key)
-          normalized = key.to_s.downcase.delete('"')
-          identifier = normalized.scan(/([a-z_]+)\s+desc\b/).flatten.last
-          return [] if identifier.nil? || identifier.empty?
-
-          [identifier, "desc"]
         end
 
         def wait_for_clickhouse!(window:, queryids:, clickhouse_url:, timeout_seconds:)

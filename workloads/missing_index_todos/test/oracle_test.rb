@@ -232,7 +232,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
       )
     end
 
-    assert_includes error.message, "status"
+    assert_includes error.message, "status = 'open'"
     assert_includes error.message, "FAIL: explain"
   end
 
@@ -253,7 +253,49 @@ class MissingIndexTodosOracleTest < Minitest::Test
       )
     end
 
-    assert_includes error.message, "user_id"
+    assert_includes error.message, "user_id = 1"
+    assert_includes error.message, "FAIL: explain"
+  end
+
+  def test_oracle_fails_when_access_condition_only_mentions_other_user_id
+    run_dir = write_run_record(query_ids: ["111"])
+    explain_rows = [explain_row(plan: missing_index_plan(access_condition: %(("todos"."other_user_id" = 1))))]
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg: FakePg.new(explain_rows),
+      clickhouse_query: ->(**) { { "total_exec_count" => "600" } },
+      sleeper: ->(*) {},
+    )
+
+    error = assert_raises(Load::Workloads::MissingIndexTodos::Oracle::Failure) do
+      oracle.call(
+        run_dir:,
+        database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+        clickhouse_url: "http://clickhouse:8123",
+      )
+    end
+
+    assert_includes error.message, "user_id = 1"
+    assert_includes error.message, "FAIL: explain"
+  end
+
+  def test_oracle_fails_when_filter_only_mentions_status_detail
+    run_dir = write_run_record(query_ids: ["111"])
+    explain_rows = [explain_row(plan: missing_index_plan(filter: %(("todos"."status_detail" = 'open'::text))))]
+    oracle = Load::Workloads::MissingIndexTodos::Oracle.new(
+      pg: FakePg.new(explain_rows),
+      clickhouse_query: ->(**) { { "total_exec_count" => "600" } },
+      sleeper: ->(*) {},
+    )
+
+    error = assert_raises(Load::Workloads::MissingIndexTodos::Oracle::Failure) do
+      oracle.call(
+        run_dir:,
+        database_url: "postgresql://postgres:postgres@localhost:5432/fixture_01",
+        clickhouse_url: "http://clickhouse:8123",
+      )
+    end
+
+    assert_includes error.message, "status = 'open'"
     assert_includes error.message, "FAIL: explain"
   end
 
@@ -274,7 +316,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
       )
     end
 
-    assert_includes error.message, "created_at, desc, id, desc"
+    assert_includes error.message, "created_at DESC, id DESC"
     assert_includes error.message, "FAIL: explain"
   end
 
@@ -295,7 +337,7 @@ class MissingIndexTodosOracleTest < Minitest::Test
       )
     end
 
-    assert_includes error.message, "created_at, desc, id, desc"
+    assert_includes error.message, "created_at DESC, id DESC"
     assert_includes error.message, "FAIL: explain"
   end
 

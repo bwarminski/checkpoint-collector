@@ -173,7 +173,7 @@ class MissingIndexTodosVerifierTest < Minitest::Test
       verifier.call(base_url: "http://app.test")
     end
 
-    assert_includes error.message, "status"
+    assert_includes error.message, "status = 'open'"
     assert_includes error.message, "/api/todos"
   end
 
@@ -188,7 +188,37 @@ class MissingIndexTodosVerifierTest < Minitest::Test
       verifier.call(base_url: "http://app.test")
     end
 
-    assert_includes error.message, "user_id"
+    assert_includes error.message, "user_id = 1"
+    assert_includes error.message, "/api/todos"
+  end
+
+  def test_verifier_fails_when_access_condition_only_mentions_other_user_id
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan(access_condition: %(("todos"."other_user_id" = 1))) : search_reference_plan
+      end,
+    )
+
+    error = assert_raises(Load::VerificationError) do
+      verifier.call(base_url: "http://app.test")
+    end
+
+    assert_includes error.message, "user_id = 1"
+    assert_includes error.message, "/api/todos"
+  end
+
+  def test_verifier_fails_when_filter_only_mentions_status_detail
+    verifier = build_verifier(
+      explain_reader: lambda do |sql|
+        sql.include?(%(status = 'open')) ? missing_index_plan(filter: %(("todos"."status_detail" = 'open'::text))) : search_reference_plan
+      end,
+    )
+
+    error = assert_raises(Load::VerificationError) do
+      verifier.call(base_url: "http://app.test")
+    end
+
+    assert_includes error.message, "status = 'open'"
     assert_includes error.message, "/api/todos"
   end
 
