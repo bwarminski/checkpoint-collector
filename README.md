@@ -100,6 +100,34 @@ The compose collector runs inside the Docker network, so its default
 `COLLECTOR_CLICKHOUSE_URL` is `http://clickhouse:8123`. Host-side commands use
 `CLICKHOUSE_URL=http://localhost:8123` instead.
 
+### Collector Validation
+
+Use collector validation before a soak when you need to prove the collector is
+polling the intended Postgres target and writing fresh ClickHouse rows.
+
+For a local Docker Postgres target from the host:
+
+```bash
+POSTGRES_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+CLICKHOUSE_URL=http://localhost:8123 \
+make validate-collector-postgres
+```
+
+For PlanetScale from the host:
+
+```bash
+BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL" \
+CLICKHOUSE_URL=http://localhost:8123 \
+make validate-collector-planetscale
+```
+
+Both targets run `bin/collector-validate`, which issues a harmless
+`collector_target_validation` marker query, runs one collector pass, and fails
+unless ClickHouse receives fresh `collector_state` and marker `query_events`
+rows. `validate-collector-planetscale` forces
+`COLLECTOR_DISABLE_LOG_INGESTION=1` because PlanetScale does not expose the
+Docker Postgres log file.
+
 ## Load Runner
 
 The top-level entrypoint is `bin/load run`, which combines a workload, an

@@ -63,6 +63,15 @@ class LoadSmokeTargetTest < Minitest::Test
     assert_includes readme, "docker compose up -d --force-recreate collector"
   end
 
+  def test_readme_documents_collector_validation_targets
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+
+    assert_includes readme, "### Collector Validation"
+    assert_includes readme, "make validate-collector-postgres"
+    assert_includes readme, "make validate-collector-planetscale"
+    assert_includes readme, "bin/collector-validate"
+  end
+
   def test_planetscale_docs_define_canonical_url_without_makefile_ssl_params
     readme = File.read(File.expand_path("../../README.md", __dir__))
     makefile = File.read(File.expand_path("../../Makefile", __dir__))
