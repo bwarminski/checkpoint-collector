@@ -58,6 +58,63 @@ bin/load soak --workload missing-index-todos \
   --app-root /home/bjw/db-specialist-demo
 ```
 
+## Before Ship Verification
+
+Run this set before shipping changes that touch the runner, adapter, collector,
+workload, or operator paths.
+
+Start from a fresh local stack when you need full environment confidence:
+
+```bash
+docker compose down --volumes --remove-orphans
+docker compose up -d --build --force-recreate
+docker compose ps
+```
+
+Run the code-level suites:
+
+```bash
+make test
+BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir["collector/test/*_test.rb"].sort.each { |path| load path }'
+```
+
+Run the opt-in Rails adapter integration suite:
+
+```bash
+make test-adapters-integration
+```
+
+Validate collector wiring against local Docker Postgres and ClickHouse:
+
+```bash
+POSTGRES_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+CLICKHOUSE_URL=http://localhost:8123 \
+make validate-collector-postgres
+```
+
+Run the local end-to-end smoke path:
+
+```bash
+make load-smoke
+```
+
+When validating PlanetScale-specific changes, also run these with the canonical
+PlanetScale URL exported:
+
+```bash
+BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL" \
+CLICKHOUSE_URL=http://localhost:8123 \
+make validate-collector-planetscale
+
+DATABASE_URL="$PLANETSCALE_DATABASE_URL" \
+BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL" \
+make load-soak-planetscale
+```
+
+`load-soak-planetscale` is continuous; stop it with `Ctrl-C` after the run has
+started, the collector has completed at least one poll, and the run record has
+the evidence you need.
+
 ### Docker Compose Collector Modes
 
 The compose collector defaults to the local Docker path: it reads

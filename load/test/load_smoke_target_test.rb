@@ -72,6 +72,19 @@ class LoadSmokeTargetTest < Minitest::Test
     assert_includes readme, "bin/collector-validate"
   end
 
+  def test_readme_documents_before_ship_verification
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+
+    assert_includes readme, "## Before Ship Verification"
+    assert_includes readme, "make test"
+    assert_includes readme, "BUNDLE_GEMFILE=collector/Gemfile bundle exec ruby -e 'Dir[\"collector/test/*_test.rb\"].sort.each { |path| load path }'"
+    assert_includes readme, "make test-adapters-integration"
+    assert_includes readme, "make validate-collector-postgres"
+    assert_includes readme, "make load-smoke"
+    assert_includes readme, "make validate-collector-planetscale"
+    assert_includes readme, "make load-soak-planetscale"
+  end
+
   def test_planetscale_docs_define_canonical_url_without_makefile_ssl_params
     readme = File.read(File.expand_path("../../README.md", __dir__))
     makefile = File.read(File.expand_path("../../Makefile", __dir__))
