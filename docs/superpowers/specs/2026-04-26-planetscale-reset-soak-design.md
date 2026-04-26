@@ -33,7 +33,7 @@ PlanetScale Postgres changes those assumptions. The first PlanetScale pass will 
 PlanetScale soak uses the same top-level command shape as local soak:
 
 ```bash
-DATABASE_URL=postgresql://...:6432/... \
+DATABASE_URL=postgresql://...:5432/... \
 BENCH_ADAPTER_PG_ADMIN_URL=postgresql://...:5432/... \
 POSTGRES_URL=postgresql://...:5432/... \
 COLLECTOR_DISABLE_LOG_INGESTION=1 \
@@ -42,7 +42,7 @@ bin/load soak --workload missing-index-todos \
   --app-root /home/bjw/db-specialist-demo
 ```
 
-`DATABASE_URL` is the app runtime connection. For PlanetScale soak, use PgBouncer on port `6432`.
+`DATABASE_URL` is the app runtime connection. The validated checkpoint uses a direct connection on port `5432`.
 
 `BENCH_ADAPTER_PG_ADMIN_URL` is the direct connection used by adapter setup and stats operations. For PlanetScale this should use port `5432`.
 

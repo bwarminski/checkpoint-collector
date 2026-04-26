@@ -329,7 +329,8 @@ make load-soak-planetscale
 
 PlanetScale-backed Rails startup can take longer than the local Docker path
 after reset/reseed. The `load-soak-planetscale` target uses
-`--startup-grace-seconds 60`.
+`--startup-grace-seconds 60` and `--invariants warn`, which records invariant
+samples without aborting on PlanetScale planner-stat estimate drift.
 
 Run the collector against PlanetScale in stats-only mode:
 
