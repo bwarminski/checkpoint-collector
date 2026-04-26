@@ -1,6 +1,35 @@
 # Changelog
 
-## [0.3.0.0] — 2026-04-24
+## [0.4.0.0] — 2026-04-26
+
+**Tenant-shaped mixed missing-index workload.** Expands `missing-index-todos` from a single-action probe into a tenant-scoped seven-action mixed shape, moves fixture verification ownership into the workload, adds soak-mode invariant sampling, and a dominance assertion in the oracle so the bad plan stays attributable end-to-end.
+
+### Added
+
+- **Mixed workload actions, tenant-shaped.** `CreateTodo`, `CloseTodo`, `DeleteCompletedTodos`, `FetchCounts`, `ListRecentTodos`, `SearchTodos` join `ListOpenTodos`. Weights `[68,12,7,7,3,2,3]` keep tenant-scoped `GET /api/todos?status=open` dominant on `pg_stat_statements`. All actions sample `user_id` per call from `Workload.scale.extra["USER_COUNT"]`; `CloseTodo` fetches one tenant's open todos and closes one of the returned candidates (no-op success when the tenant has none).
+- **`USER_COUNT` scale knob.** Workload-specific extra that decouples tenant population from todo volume. Adapter seeds exactly `USER_COUNT` users and distributes todos across them while preserving `OPEN_FRACTION`.
+- **Workload-owned fixture verifier.** Pre-flight check that asserts the tenant-scoped EXPLAIN shape (BitmapHeap/Index access via `index_todos_on_user_id`, residual `status` filter, sort by `created_at DESC, id DESC`), the `/api/todos/counts` N+1 fan-out, and the search EXPLAIN tree shape against `fixtures/mixed-todo-app/search-explain.json`. Wired into `bin/load run` (finite + continuous) and `bin/load verify-fixture`.
+- **`Workload#verifier` and `Workload#invariant_sampler` hooks.** Workloads now own their domain-specific verifier and sampler construction. The core load library no longer carries todo-specific knowledge.
+- **Soak-mode invariant sampling.** Polls `open_count` and `total_count` on a dedicated PG connection (`SET LOCAL pg_stat_statements.track = 'none'`) every 60s. Three consecutive breaches of the open/total floor/ceiling abort the run with `error_code: invariant_breach`; samples land in `run.json#invariant_samples`.
+- **Dominance assertion.** Oracle ranks ClickHouse `query_intervals` by `total_exec_count * avg_exec_time_ms` and requires the primary queryid to be ≥3× the next challenger.
+- **`bin/load verify-fixture`.** Standalone CLI command that runs adapter `describe → prepare → reset_state → start → readiness → verify → stop`.
+
+### Changed
+
+- **`run.json` schema_version 1 → 2.** `invariant_samples` entries no longer store fixture-specific top-level fields like `open_count`, `total_count`, `open_floor`, `total_floor`, and `total_ceiling`. They now store a workload-agnostic `checks` array of `{name, actual, min, max, breach, breaches}` records. Downstream tooling reading `run.json` should bump its expected schema version.
+- **Pathology contract is tenant-scoped.** The bad query is no longer "no useful index at all" — it's "the app uses `index_todos_on_user_id` to find one tenant slice, then must still filter `status` and sort inside that slice." Verifier and oracle reflect this access pattern.
+- **Pre-flight gate ordering.** Runner executes `probe_readiness → verify_fixture → start_workers`. Soak runs share the gate.
+- **Reset-state queryid fingerprint.** Adapter warms the tenant-scoped query shape so `pg_stat_statements` resolves a stable queryid the oracle reuses on lookup fallback.
+- **Runner internals decomposed.** `Load::Runner` becomes a coordinator over `RunState`, `LoadExecution`, and `InvariantMonitor`. `RunState` owns `run.json` schema and persistence; `LoadExecution` owns the worker/reporter/drain window; `InvariantMonitor` owns sampling thread and breach policy with nested `Config`/`Sink`/`State` helpers. Public CLI and workload contracts unchanged.
+- **`Scale#extra` for workload-specific knobs.** Generic `Load::Scale` no longer carries todo-specific fields. Workload env propagates through `Scale.extra`, validated against a reserved-key list and uppercased on the way to the adapter.
+- **Search EXPLAIN comparison.** Verifier matches against a stable subset of plan keys (`Node Type`, `Relation Name`, `Sort Key`, `Filter`, `Plans`) so volatile costs/widths don't flap.
+
+### Fixed
+
+- **Stop-reason coalescing.** `InternalStopFlag#trigger` preserves the first reason so a SIGTERM during a breach window doesn't mask `:invariant_breach`.
+- **Tenant-scoped queryid capture.** Adapter's warm query previously fingerprinted a non-tenant query shape that didn't match production traffic; the warm now matches the real workload, so the oracle attributes correctly on lookup fallback.
+
+
 
 **Load runner MVP.** Replaces the fixture harness with a generic Ruby load runner, a narrow Rails bench adapter, and one concrete `missing-index-todos` workload that reproduces the Seq-Scan pathology through normal app traffic.
 

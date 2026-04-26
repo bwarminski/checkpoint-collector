@@ -6,3 +6,5 @@ tmp/
 .idea/
 __pycache__/
 runs/
+.codex
+node_modules/

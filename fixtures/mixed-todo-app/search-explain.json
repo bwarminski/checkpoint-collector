@@ -1,0 +1,28 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Sort Key": ["created_at DESC", "id DESC"],
+          "Plans": [
+            {
+              "Node Type": "Bitmap Heap Scan",
+              "Relation Name": "todos",
+              "Recheck Cond": "(user_id = 1)",
+              "Filter": "((title)::text ~~ '%foo%'::text)",
+              "Plans": [
+                {
+                  "Node Type": "Bitmap Index Scan",
+                  "Index Name": "index_todos_on_user_id",
+                  "Index Cond": "(user_id = 1)"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

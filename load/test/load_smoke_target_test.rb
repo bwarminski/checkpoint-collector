@@ -17,7 +17,7 @@ class LoadSmokeTargetTest < Minitest::Test
     makefile = File.read(File.expand_path("../../Makefile", __dir__))
 
     assert_includes makefile,
-      ".PHONY: load-smoke test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads"
+      ".PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads"
     assert_includes makefile, "test-adapters-integration: test-adapters-fixture-integration test-adapters-demo-integration"
     assert_includes makefile, "test-adapters-fixture-integration:"
     assert_includes makefile, "test-adapters-demo-integration:"
@@ -27,5 +27,19 @@ class LoadSmokeTargetTest < Minitest::Test
     assert_includes makefile, "DB_SPECIALIST_DEMO_PATH=/home/bjw/db-specialist-demo"
     assert_includes makefile, "DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo"
     assert_includes makefile, "BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres"
+  end
+
+  def test_makefile_exposes_verify_fixture_and_soak_targets
+    makefile = File.read(File.expand_path("../../Makefile", __dir__))
+
+    assert_includes makefile, "verify-fixture:"
+    assert_includes makefile, "load-soak:"
+  end
+
+  def test_readme_documents_verify_fixture_and_soak_commands
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+
+    assert_includes readme, "bin/load verify-fixture"
+    assert_includes readme, "bin/load soak"
   end
 end

@@ -1,94 +1,150 @@
 # ABOUTME: Orchestrates adapter lifecycle, readiness probing, and worker execution.
 # ABOUTME: Writes run state as workers report the first successful response.
 require "net/http"
+require "pg"
 require "thread"
 require "time"
 
 module Load
   class Runner
-    WORKER_DRAIN_TIMEOUT_SECONDS = 1.0
-    Runtime = Data.define(:clock, :sleeper, :http, :stop_flag)
-    Settings = Data.define(:readiness_path, :startup_grace_seconds, :metrics_interval_seconds, :workload_file, :app_root, :adapter_bin)
+    DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS = 60.0
+    Runtime = Data.define(:clock, :sleeper, :http, :stop_flag) do
+      def self.default
+        new(
+          -> { Time.now.utc },
+          ->(seconds) { sleep(seconds) },
+          Net::HTTP,
+          InternalStopFlag.new,
+        )
+      end
+    end
+    Config = Data.define(:readiness_path, :startup_grace_seconds, :metrics_interval_seconds, :workload_file, :app_root, :adapter_bin, :mode, :verifier) do
+      def initialize(readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, mode: :finite, verifier: nil)
+        super
+      end
+    end
+    InvariantConfig = Data.define(:policy, :sampler, :sample_interval_seconds, :database_url, :pg) do
+      def initialize(policy: :enforce, sampler: nil, sample_interval_seconds: Runner::DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS, database_url: ENV["DATABASE_URL"], pg: PG)
+        super
+      end
+    end
+    attr_reader :run_state
 
-    MetricsSink = Data.define(:run_record) do
-      def <<(line)
-        run_record.append_metrics(line)
+    InvariantCheck = Data.define(:name, :actual, :min, :max) do
+      def breaches
+        [].tap do |messages|
+          messages << "#{name} #{actual} is below min #{min}" if !min.nil? && actual < min
+          messages << "#{name} #{actual} is above max #{max}" if !max.nil? && actual > max
+        end
+      end
+
+      def breach?
+        !breaches.empty?
+      end
+
+      def to_record
+        { name:, actual:, min:, max:, breach: breach?, breaches: }
       end
     end
 
-    class TrackingBuffer < Load::Metrics::Buffer
-      def initialize(runner)
-        super()
-        @runner = runner
-        @started = false
-        @request_totals = { total: 0, ok: 0, error: 0 }
-        @runner.send(:register_tracking_buffer, self)
+    InvariantSample = Data.define(:checks) do
+      def breaches
+        checks.flat_map(&:breaches)
       end
 
-      def record_ok(**kwargs)
-        super(**kwargs)
-        @request_totals[:total] += 1
-        @request_totals[:ok] += 1
-        return if @started
-
-        @started = true
-        @runner.pin_window_start
+      def breach?
+        !breaches.empty?
       end
 
-      def record_error(**kwargs)
-        super(**kwargs)
-        @request_totals[:total] += 1
-        @request_totals[:error] += 1
+      def healthy?
+        !breach?
       end
 
-      def request_totals
-        @request_totals.dup
+      def to_warning
+        { type: "invariant_breach", message: breaches.join("; "), checks: checks.map(&:to_record) }
+      end
+
+      def to_record(sampled_at:)
+        { sampled_at:, checks: checks.map(&:to_record), breach: breach?, breaches: }
       end
     end
 
-    def initialize(workload:, adapter_client:, run_record:, clock:, sleeper:, http: Net::HTTP, readiness_path: "/up", startup_grace_seconds: 15, metrics_interval_seconds: 5, workload_file: nil, app_root: nil, adapter_bin: nil, stop_flag: nil)
+    def initialize(workload:, adapter_client:, run_record:, runtime: Runtime.default, config: Config.new, invariant_config: InvariantConfig.new, stderr: $stderr)
       @workload = workload
       @adapter_client = adapter_client
       @run_record = run_record
-      @runtime = Runtime.new(clock, sleeper, http, stop_flag || InternalStopFlag.new)
-      @settings = Settings.new(readiness_path, startup_grace_seconds, metrics_interval_seconds, workload_file, app_root, adapter_bin)
-      @state_mutex = Mutex.new
-      @tracking_buffers = []
-      @state = initial_state
-      @window_started = false
+      @runtime = runtime
+      @config = config
+      @invariant_config = invariant_config
+      @stderr = stderr
+      sampler = resolve_invariant_sampler
+      validate_invariant_sampler!(sampler)
+      @run_state = Load::RunState.new(
+        run_record:,
+        workload:,
+        adapter_bin: @config.adapter_bin || @adapter_client.adapter_bin,
+        app_root: @config.app_root,
+        readiness_path: @config.readiness_path,
+        startup_grace_seconds: @config.startup_grace_seconds,
+        metrics_interval_seconds: @config.metrics_interval_seconds,
+        workload_file: @config.workload_file,
+      )
+      @invariant_monitor = Load::InvariantMonitor.new(
+        sampler: sampler,
+        config: Load::InvariantMonitor::Config.new(
+          policy: @invariant_config.policy,
+          interval_seconds: @invariant_config.sample_interval_seconds,
+        ),
+        stop_flag: @runtime.stop_flag,
+        sleeper: @runtime.sleeper,
+        sink: Load::InvariantMonitor::Sink.new(
+          on_sample: ->(sample) { @run_state.append_invariant_sample(**sample.to_record(sampled_at: current_time)) },
+          on_warning: ->(warning) { @run_state.append_warning(warning) },
+          on_breach_stop: ->(reason) { trigger_stop(reason) },
+          stderr: @stderr,
+        ),
+      )
     end
 
     def run
+      request_totals = { total: 0, ok: 0, error: 0 }
       begin
-        @run_record.write_run(snapshot_state)
+        @run_state.write_initial
         adapter_describe = @adapter_client.describe
         validate_adapter_response!(adapter_describe, %w[name framework runtime], "describe")
-        write_state(adapter: {
+        @run_state.merge(adapter: {
           describe: adapter_describe,
-          bin: @settings.adapter_bin || @adapter_client.adapter_bin,
-          app_root: @settings.app_root,
+          bin: @config.adapter_bin || @adapter_client.adapter_bin,
+          app_root: @config.app_root,
         })
 
-        @adapter_client.prepare(app_root: @settings.app_root)
-        reset_state = @adapter_client.reset_state(app_root: @settings.app_root, workload: @workload.name, scale: @workload.scale)
-        write_state(query_ids: Array(reset_state["query_ids"]).map(&:to_s)) if reset_state.is_a?(Hash) && reset_state["query_ids"]
+        @adapter_client.prepare(app_root: @config.app_root)
+        reset_state = @adapter_client.reset_state(app_root: @config.app_root, workload: @workload.name, scale: @workload.scale)
+        @run_state.merge(query_ids: Array(reset_state["query_ids"]).map(&:to_s)) if reset_state.is_a?(Hash) && reset_state["query_ids"]
 
-        start_response = @adapter_client.start(app_root: @settings.app_root)
+        start_response = @adapter_client.start(app_root: @config.app_root)
         validate_adapter_response!(start_response, %w[pid base_url], "start")
-        write_state(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
+        @run_state.merge(adapter: { pid: start_response.fetch("pid"), base_url: start_response.fetch("base_url") })
 
         probe_readiness(start_response.fetch("base_url"))
-        start_workers(start_response.fetch("base_url"))
+        verify_fixture(base_url: start_response.fetch("base_url"))
+        request_totals = run_execution(start_response.fetch("base_url"))
 
-        result = finish_run
+        result = finish_run(request_totals)
+      rescue Load::InvariantMonitor::Failure
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "invariant_sampler_failed"))
+        result = Load::ExitCodes::ADAPTER_ERROR
+      rescue Load::VerificationError => error
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "fixture_verification_failed").merge(error_message: error.message))
+        result = Load::ExitCodes::ADAPTER_ERROR
       rescue AdapterClient::AdapterError
-        write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "adapter_error"))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue Load::ReadinessGate::Timeout
-        write_state(outcome: outcome_payload(aborted: true, error_code: "readiness_timeout"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "readiness_timeout"))
         result = Load::ExitCodes::ADAPTER_ERROR
       ensure
-        result = stop_adapter_safely(result)
+        result = stop_adapter_safely(result, request_totals)
       end
 
       result
@@ -96,13 +152,19 @@ module Load
 
     private
 
+    def verify_fixture(base_url:)
+      return unless @config.verifier
+
+      @config.verifier.call(base_url:)
+    end
+
     def probe_readiness(base_url)
-      write_state(
+      @run_state.merge(
         window: {
           readiness: Load::ReadinessGate.new(
             base_url:,
-            readiness_path: @settings.readiness_path,
-            startup_grace_seconds: @settings.startup_grace_seconds,
+            readiness_path: @config.readiness_path,
+            startup_grace_seconds: @config.startup_grace_seconds,
             clock: @runtime.clock,
             sleeper: @runtime.sleeper,
             http: @runtime.http,
@@ -111,205 +173,84 @@ module Load
       )
     end
 
-    def start_workers(base_url)
-      plan = @workload.load_plan
-      rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @runtime.clock, sleeper: @runtime.sleeper)
-      entries = @workload.actions
-      seed = plan.seed.nil? ? @workload.scale.seed : plan.seed
+    def run_execution(base_url)
+      execution = nil
+      invariant_thread = nil
+      request_totals = { total: 0, ok: 0, error: 0 }
 
-      workers = Array.new(plan.workers) do |index|
-        Load::Worker.new(
-          worker_id: index + 1,
-          selector: Load::Selector.new(entries: entries, rng: Random.new(seed + index)),
-          buffer: tracking_buffer,
-          client: Load::Client.new(base_url: base_url, http: @runtime.http),
-          ctx: { base_url: base_url },
-          rng: Random.new(seed + index),
-          rate_limiter: rate_limiter,
-          stop_flag: @runtime.stop_flag,
+      begin
+        execution = Load::LoadExecution.new(
+          workload: @workload,
+          base_url:,
+          runtime: @runtime,
+          metrics_interval_seconds: @config.metrics_interval_seconds,
+          run_record: @run_record,
+          on_first_success: -> { @run_state.pin_window_start(now: current_time) },
         )
+        invariant_thread = @config.mode == :continuous ? @invariant_monitor.start : nil
+        request_totals = execution.run(mode: @config.mode, duration_seconds: @workload.load_plan.duration_seconds)
+      ensure
+        request_totals = execution.request_totals if execution
+        @invariant_monitor.stop(invariant_thread)
       end
 
-      reporter = Load::Reporter.new(
-        workers:,
-        interval_seconds: @settings.metrics_interval_seconds,
-        sink: MetricsSink.new(@run_record),
-        clock: @runtime.clock,
-        sleeper: @runtime.sleeper,
-      )
-      reporter.start
-      threads = workers.map { |worker| Thread.new { worker.run } }
-      wait_for_window_end(plan.duration_seconds)
-      drain_workers(threads)
-      reporter.stop
+      request_totals
     end
 
-    def wait_for_window_end(duration_seconds)
-      deadline = current_time + duration_seconds
+    def trigger_stop(reason)
+      return unless @runtime.stop_flag.respond_to?(:trigger)
 
-      until @runtime.stop_flag.call
-        remaining = deadline - current_time
-        if remaining <= 0
-          @runtime.stop_flag.trigger(:timeout) if @runtime.stop_flag.respond_to?(:trigger)
-          break
-        end
-
-        Thread.pass
-        next if @runtime.stop_flag.call
-
-        remaining = deadline - current_time
-        next if remaining <= 0
-
-        @runtime.sleeper.call([1.0, remaining].min)
-      end
+      @runtime.stop_flag.trigger(reason)
     end
 
-    def drain_workers(threads)
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + WORKER_DRAIN_TIMEOUT_SECONDS
-
-      threads.each do |thread|
-        remaining = [deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0].max
-        thread.join(remaining)
-        next unless thread.alive?
-
-        thread.kill
-        thread.join
-      end
-    end
-
-    def finish_run
-      write_state(window: { end_ts: current_time })
-      if @window_started
-        write_state(outcome: outcome_payload(aborted: stop_aborted?))
-        return Load::ExitCodes::SUCCESS
+    def finish_run(request_totals)
+      if stop_reason == :invariant_breach
+        @run_state.finish(now: current_time, request_totals:, aborted: true, error_code: "invariant_breach")
+        return Load::ExitCodes::ADAPTER_ERROR
       end
 
-      write_state(outcome: outcome_payload(aborted: true, error_code: "no_successful_requests"))
+      if @run_state.window_started?
+        @run_state.finish(now: current_time, request_totals:, aborted: stop_aborted?)
+        return final_exit_code
+      end
+
+      @run_state.finish(now: current_time, request_totals:, aborted: true, error_code: "no_successful_requests")
       Load::ExitCodes::NO_SUCCESSFUL_REQUESTS
     end
 
+    def final_exit_code
+      return Load::ExitCodes::ADAPTER_ERROR if stop_reason == :invariant_breach
+
+      Load::ExitCodes::SUCCESS
+    end
+
     def stop_aborted?
-      return false unless @runtime.stop_flag.respond_to?(:reason)
-
-      %i[sigint sigterm].include?(@runtime.stop_flag.reason)
+      %i[sigint sigterm].include?(stop_reason)
     end
 
-    def tracking_buffer
-      TrackingBuffer.new(self)
-    end
+    def stop_reason
+      return nil unless @runtime.stop_flag.respond_to?(:reason)
 
-    def pin_window_start
-      snapshot = nil
-      @state_mutex.synchronize do
-        return if @window_started
-
-        @window_started = true
-        @state = deep_merge(@state, window: { start_ts: current_time })
-        snapshot = snapshot_state
-      end
-      @run_record.write_run(snapshot)
+      @runtime.stop_flag.reason
     end
 
     def current_time
       @runtime.clock.call
     end
 
-    public :pin_window_start
-
-    def initial_state
-      {
-        run_id: File.basename(@run_record.run_dir),
-        schema_version: 1,
-        workload: {
-          name: @workload.name,
-          file: workload_file,
-          scale: @workload.scale.to_h,
-          load_plan: @workload.load_plan.to_h,
-          actions: @workload.actions.map { |entry| { class: entry.action_class.name, weight: entry.weight } },
-        },
-        adapter: {
-          describe: nil,
-          bin: @settings.adapter_bin || @adapter_client.adapter_bin,
-          app_root: @settings.app_root,
-          base_url: nil,
-          pid: nil,
-        },
-        window: {
-          start_ts: nil,
-          end_ts: nil,
-          readiness: {
-            path: @settings.readiness_path,
-            probe_duration_ms: nil,
-            probe_attempts: nil,
-          },
-          startup_grace_seconds: @settings.startup_grace_seconds,
-          metrics_interval_seconds: @settings.metrics_interval_seconds,
-        },
-        outcome: outcome_payload(aborted: false),
-        query_ids: [],
-      }
-    end
-
-    def workload_file
-      return @settings.workload_file if @settings.workload_file
-
-      path = @workload.class.instance_method(:name).source_location&.first
-      return nil unless path
-
-      expanded = File.expand_path(path)
-      cwd = "#{Dir.pwd}/"
-      expanded.start_with?(cwd) ? expanded.delete_prefix(cwd) : expanded
-    end
-
-    def outcome_payload(aborted:, error_code: nil)
-      request_totals = aggregate_request_totals
-      {
-        requests_total: request_totals.fetch(:total),
-        requests_ok: request_totals.fetch(:ok),
-        requests_error: request_totals.fetch(:error),
-        aborted:,
-        error_code:,
-      }.compact
-    end
-
-    def snapshot_state
-      deep_copy(@state)
-    end
-
-    def stop_adapter_safely(result)
-      pid = @state.dig(:adapter, :pid)
+    def stop_adapter_safely(result, request_totals)
+      pid = @run_state.snapshot.dig(:adapter, :pid)
       return result unless pid
 
       @adapter_client.stop(pid:)
       result
     rescue AdapterClient::AdapterError
       if result.nil? || result == Load::ExitCodes::SUCCESS
-        write_state(outcome: outcome_payload(aborted: true, error_code: "adapter_error"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "adapter_error"))
         return Load::ExitCodes::ADAPTER_ERROR
       end
 
       result
-    end
-
-    def write_state(fragment)
-      snapshot = nil
-      @state_mutex.synchronize do
-        @state = deep_merge(@state, fragment)
-        snapshot = snapshot_state
-      end
-      @run_record.write_run(snapshot)
-    end
-
-    def register_tracking_buffer(buffer)
-      @tracking_buffers << buffer
-    end
-
-    def aggregate_request_totals
-      @tracking_buffers.each_with_object({ total: 0, ok: 0, error: 0 }) do |buffer, totals|
-        buffer.request_totals.each do |key, value|
-          totals[key] += value
-        end
-      end
     end
 
     def validate_adapter_response!(response, required_keys, response_name)
@@ -320,25 +261,19 @@ module Load
       raise AdapterClient::AdapterError, "invalid adapter #{response_name} response"
     end
 
-    def deep_merge(left, right)
-      left.merge(right) do |_, left_value, right_value|
-        if left_value.is_a?(Hash) && right_value.is_a?(Hash)
-          deep_merge(left_value, right_value)
-        else
-          right_value
-        end
-      end
+    def resolve_invariant_sampler
+      return @invariant_config.sampler if @invariant_config.policy == :off
+      return @invariant_config.sampler if @invariant_config.sampler
+
+      @workload.invariant_sampler(database_url: @invariant_config.database_url, pg: @invariant_config.pg)
     end
 
-    def deep_copy(value)
-      case value
-      when Hash
-        value.each_with_object({}) { |(key, inner_value), copy| copy[key] = deep_copy(inner_value) }
-      when Array
-        value.map { |inner_value| deep_copy(inner_value) }
-      else
-        value
-      end
+    def validate_invariant_sampler!(sampler)
+      return unless @config.mode == :continuous
+      return if @invariant_config.policy == :off
+      return unless sampler.nil?
+
+      raise AdapterClient::AdapterError, "continuous mode requires the workload to provide an invariant sampler"
     end
 
     class InternalStopFlag
@@ -349,7 +284,7 @@ module Load
       end
 
       def trigger(reason)
-        @reason = reason
+        @reason ||= reason
       end
 
       def call

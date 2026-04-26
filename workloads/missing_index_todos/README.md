@@ -31,6 +31,10 @@ ruby workloads/missing_index_todos/oracle.rb runs/<latest> \
   --clickhouse-url http://localhost:8123
 ```
 
+Here, "oracle" means the workload-local verifier for a completed run. It reads
+the run directory, checks whether the intended pathology was reproduced, and
+returns a concrete `PASS` or `FAIL`.
+
 The oracle:
 
 - tree-walks `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` and requires a `Seq Scan` on `todos`

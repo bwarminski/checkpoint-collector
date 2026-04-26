@@ -30,6 +30,10 @@ module Load
       File.rename(temp_path, run_path)
     end
 
+    def read_run_json
+      JSON.parse(File.read(run_path))
+    end
+
     def append_metrics(payload)
       append_jsonl(metrics_path, payload)
     end

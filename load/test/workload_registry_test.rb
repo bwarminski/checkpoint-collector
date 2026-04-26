@@ -9,7 +9,7 @@ class WorkloadRegistryTest < Minitest::Test
     end
 
     def scale
-      Load::Scale.new(rows_per_table: 1, open_fraction: 0.0, seed: 1)
+      Load::Scale.new(rows_per_table: 1, seed: 1)
     end
 
     def actions

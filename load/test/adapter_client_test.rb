@@ -10,7 +10,7 @@ class AdapterClientTest < Minitest::Test
     client.reset_state(
       app_root: "/tmp/app",
       workload: "missing-index-todos",
-      scale: Load::Scale.new(rows_per_table: 10_000_000, open_fraction: 0.002, seed: 42),
+      scale: Load::Scale.new(rows_per_table: 10_000_000, extra: { open_fraction: 0.002 }, seed: 42),
     )
 
     assert_equal ["--json", "reset-state", "--app-root", "/tmp/app", "--workload", "missing-index-todos", "--seed", "42", "--env", "ROWS_PER_TABLE=10000000", "--env", "OPEN_FRACTION=0.002"], capture.argv

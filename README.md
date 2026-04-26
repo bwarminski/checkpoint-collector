@@ -46,6 +46,18 @@ stack. Use `make test` to verify the branch logic; use `make load-smoke` to see
 whether the current dataset, app settings, and workload shape still behave
 acceptably together.
 
+The operator commands map directly to `bin/load`:
+
+```bash
+bin/load verify-fixture --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+
+bin/load soak --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
 ## Load Runner
 
 The top-level entrypoint is `bin/load run`, which combines a workload, an
@@ -62,6 +74,206 @@ bin/load run --workload missing-index-todos \
 `make load-smoke` runs that command against `~/db-specialist-demo`. It assumes
 `docker compose up -d` is already running in this repo and the demo app is
 available for the adapter to prepare, seed, start, and stop during the run.
+
+### Run Modes
+
+`bin/load` has three operator-facing modes. They use the same workload and
+adapter contract, but they answer different questions.
+
+#### `bin/load run`
+
+Use `run` for a finite benchmark window. This is the mode behind
+`make load-smoke`.
+
+Invariant sampling defaults to `enforce` for `run`. In that mode, three
+consecutive breached samples abort the run. Use `--invariants warn` to keep
+sampling and record warnings without stopping the run, or `--invariants off`
+to disable invariant sampling for that run.
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+bin/load run --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+Intent:
+
+- prove the current fixture still reproduces the missing-index path
+- produce one bounded run directory under `runs/`
+- feed the workload-local oracle a stable `run.json` and `query_ids` set
+
+What it writes:
+
+- `run.json`
+- `metrics.jsonl`
+- `adapter-commands.jsonl`
+
+What success looks like:
+
+- the command exits `0`
+- `run.json` has a full window with `start_ts` and `end_ts`
+- the oracle passes against the produced run directory
+
+What "oracle" means here:
+
+- the oracle is the workload-specific verifier that judges whether a completed run reproduced the intended pathology
+- it is not the load generator itself; it reads the run artifacts after `bin/load run` finishes
+- for `missing-index-todos`, the oracle checks the target query family's plan shape and ClickHouse evidence, then returns `PASS` or `FAIL`
+
+Sample finite-run artifact:
+
+```json
+{
+  "run_id": "20260425T155137Z-missing-index-todos",
+  "outcome": {
+    "requests_total": 1086,
+    "requests_ok": 1060,
+    "requests_error": 26,
+    "aborted": false
+  },
+  "query_ids": ["-6140164853592117657"],
+  "warnings": [],
+  "invariant_samples": []
+}
+```
+
+Sample oracle output:
+
+```text
+PASS: explain (Seq Scan on todos, plan node confirmed)
+PASS: clickhouse (720 calls; mean 38.1ms)
+PASS: dominance (4.54x over next queryid)
+```
+
+#### `bin/load soak`
+
+Use `soak` for a long-running diagnosis session. It keeps generating traffic
+until you interrupt it or the invariant sampler aborts because the dataset has
+drifted out of the designed regime.
+
+Invariant sampling defaults to `enforce` for `soak` too. `warn` keeps sampling
+and records warnings without stopping the run; `off` disables invariant
+sampling entirely for that run. `off` does not bypass the workload's pre-flight
+fixture verification, so `missing-index-todos` still requires `DATABASE_URL`
+for `soak` and `run`.
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+bin/load soak --workload missing-index-todos --invariants warn \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+Intent:
+
+- keep background traffic flowing for live diagnosis
+- preserve the same mixed query families as `run`
+- record invariant samples so long-running drift is visible in the run record
+
+What it writes:
+
+- `run.json`
+- `metrics.jsonl`
+- `adapter-commands.jsonl`
+- `run.json.invariant_samples`
+
+Healthy soak behavior:
+
+- the command keeps running until you send `SIGINT`/`SIGTERM`
+- `run.json` is updated throughout the run
+- `invariant_samples` stays empty until the first 60s sample lands, then grows
+  one entry per sample
+
+Invariant-breach stop behavior:
+
+- three consecutive breach samples stop the run with non-zero exit
+- `run.json.outcome.error_code` becomes `"invariant_breach"`
+- `warnings` and `invariant_samples` both show the breach trail
+
+Sample degraded-soak artifact:
+
+```json
+{
+  "run_id": "20260425T154248Z-missing-index-todos",
+  "outcome": {
+    "requests_total": 4842,
+    "requests_ok": 4790,
+    "requests_error": 52,
+    "aborted": true,
+    "error_code": "invariant_breach"
+  },
+  "warnings": [
+    {
+      "type": "invariant_breach",
+      "message": "open_count 0 is below open_floor 30000; total_count 0 is below total_floor 80000"
+    }
+  ],
+  "invariant_samples": [
+    {
+      "sampled_at": "2026-04-25 15:44:02 UTC",
+      "open_count": 0,
+      "total_count": 0,
+      "breach": true
+    }
+  ]
+}
+```
+
+#### `bin/load verify-fixture`
+
+Use `verify-fixture` when you want the fast pre-flight pathology check without
+running a benchmark window. This is also the gate that `run` and `soak` execute
+before workers start for `missing-index-todos`.
+
+`--invariants` does not apply here. `verify-fixture` uses the shared
+pre-flight verifier path and rejects runner-only flags.
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+BENCH_ADAPTER_PG_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres \
+bin/load verify-fixture --workload missing-index-todos \
+  --adapter adapters/rails/bin/bench-adapter \
+  --app-root /home/bjw/db-specialist-demo
+```
+
+Intent:
+
+- confirm the app still exposes the three expected pathologies
+- fail early before a benchmark run starts if the fixture has silently rotted
+
+What it does:
+
+- runs adapter `describe`, `prepare`, `reset-state`, `start`, readiness, verify,
+  and `stop`
+- does not create worker traffic
+- does not write a run directory
+
+What success looks like:
+
+- exit `0`
+- no output on success by default
+
+What failure looks like:
+
+- exit `2`
+- stderr explains which fixture contract failed
+
+Representative failure shape:
+
+```text
+fixture verification failed for /api/todos/counts: expected at least 10 count calls for 10 users, saw 2
+```
+
+#### Quick Comparison
+
+| Mode | Runs workers | Writes run dir | Uses oracle later | Uses invariant sampler |
+|---|---|---|---|---|
+| `run` | yes | yes | yes | no |
+| `soak` | yes | yes | usually no, unless you inspect it later | yes |
+| `verify-fixture` | no | no | no | no |
 
 ## Manual Exploration
 
@@ -195,7 +407,103 @@ Useful signals:
   - a very long `reset-state` usually means template rebuild or large seed work
   - a short `start` plus many request failures means the app booted, but the endpoint could not keep up with the workload
 
-### 6. Compare app time vs database time
+### 6. Check which query family dominated in ClickHouse
+
+When the oracle fails on dominance, or when the run feels slower than you
+expected, the next question is not "was Postgres slow?" It is "which query
+family actually consumed the most total time during the run window?"
+
+The process is:
+
+1. read the run window and target `query_ids` from `run.json`
+2. ask ClickHouse for the top queryids in that window by estimated total exec
+   time
+3. compare the workload's target queryid against the top challengers
+4. if a challenger is winning, resolve the query text in `pg_stat_statements`
+
+Start from the run record:
+
+```bash
+latest=$(ls -1dt runs/* | head -n1)
+sed -n '1,220p' "$latest/run.json"
+```
+
+The fields you need are:
+
+- `window.start_ts`
+- `window.end_ts`
+- `query_ids`
+
+Then ask ClickHouse for the top queryids in that run window:
+
+```bash
+docker compose exec clickhouse clickhouse-client --query "
+  SELECT
+    toString(queryid) AS queryid,
+    toString(sum(total_exec_count)) AS total_calls,
+    toString(round(sum(total_exec_count * avg_exec_time_ms), 1)) AS total_exec_time_ms_estimate
+  FROM query_intervals
+  WHERE interval_ended_at BETWEEN parseDateTime64BestEffort('2026-04-26 13:11:29 UTC')
+    AND parseDateTime64BestEffort('2026-04-26 13:12:29 UTC') + INTERVAL 90 SECOND
+  GROUP BY queryid
+  ORDER BY sum(total_exec_count * avg_exec_time_ms) DESC
+  LIMIT 10
+"
+```
+
+Representative output from this branch while diagnosing dominance drift:
+
+```text
+queryid               total_calls  total_exec_time_ms_estimate
+7354691429047661116  1000         6020.9
+-3708805788459505815  161         209.9
+```
+
+That told us the intended target query was not actually winning. The dominant
+family was the counts-side N+1:
+
+- `7354691429047661116` -> `SELECT COUNT(*) FROM "todos" WHERE "todos"."user_id" = $1`
+- `-3708805788459505815` -> tenant-scoped open todos
+
+Once you know the top queryid, resolve it in Postgres:
+
+```bash
+docker compose exec postgres psql -U postgres -d checkpoint_demo -P pager=off -c "
+  select
+    queryid::text,
+    calls,
+    round(mean_exec_time::numeric, 1) as mean_exec_time_ms,
+    left(query, 160) as query
+  from pg_stat_statements
+  where queryid in (7354691429047661116, -3708805788459505815)
+  order by total_exec_time desc;
+"
+```
+
+Representative output:
+
+```text
+      queryid       | calls | mean_exec_time_ms | query
+--------------------+-------+-------------------+------------------------------------------------------------
+7354691429047661116 | 1000  | 6.0               | SELECT COUNT(*) FROM "todos" WHERE "todos"."user_id" = $1
+-3708805788459505815 | 161  | 1.3               | SELECT "todos".* FROM "todos" WHERE "todos"."user_id" = $1
+```
+
+How to interpret it:
+
+- if the workload `query_ids` are at the top, the oracle should usually pass
+  dominance unless the margin is too small
+- if a different queryid is winning, the run is telling you the workload shape
+  has shifted, not that the oracle is wrong
+- `total_exec_time_ms_estimate` is more important than call count here; a query
+  with fewer calls can still dominate if each call is much more expensive
+
+On this branch, that process is how we discovered that `/api/todos/counts` was
+still load-bearing during tuning. It led to lowering `user_count` and setting
+`FetchCounts` weight to `0` so the tenant open-todos path stayed dominant for
+the current gate.
+
+### 7. Compare app time vs database time
 
 If requests time out but you suspect the database is still fine, compare the app
 path with the database's view of the query:
@@ -213,7 +521,7 @@ If Postgres shows sub-second or low-single-digit-second execution while the HTTP
 client times out, the bottleneck is probably in app-side queueing, object
 materialization, or JSON rendering rather than the SQL itself.
 
-### 7. Stop the app when finished
+### 8. Stop the app when finished
 
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
