@@ -168,9 +168,7 @@ module Load
     def start
       return self if @connection
 
-      connection = build_connection
-      connection.start
-      @connection = connection
+      @connection = connection_session(build_connection)
       self
     end
 
@@ -194,10 +192,10 @@ module Load
       elsif @http.respond_to?(:new)
         connection = build_connection
         begin
-          connection.start
-          connection.request(request)
+          session = connection_session(connection)
+          session.request(request)
         ensure
-          connection&.finish
+          session.finish if session
         end
       else
         @http.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
@@ -211,6 +209,10 @@ module Load
 
     def uri_for(path)
       URI.join(@base_url.to_s.end_with?("/") ? @base_url.to_s : "#{@base_url}/", path.sub(/\A\//, ""))
+    end
+
+    def connection_session(connection)
+      connection.start || connection
     end
 
     def configure_timeouts(http)
@@ -247,24 +249,7 @@ require "uri"
 module RailsAdapter
   module Commands
     class ResetState
-      QUERY_IDS_SCRIPT = {
-        "missing-index-todos" => <<~RUBY.strip,
-          require "json"
-          user = User.first or raise("expected a seeded user")
-          user.todos.with_status("open").ordered_by_created_desc.page(1, 50).load
-          connection = ActiveRecord::Base.connection
-          query_ids = [
-            %(SELECT "todos".* FROM "todos" WHERE "todos"."user_id" = $1 AND "todos"."status" = $2 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $3 OFFSET $4),
-          ].flat_map do |query_text|
-            connection.exec_query(
-              "SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = \#{connection.quote(query_text)}"
-            ).rows.flatten
-          end.uniq
-          $stdout.write(JSON.generate(query_ids: query_ids))
-        RUBY
-      }.freeze
-
-      def initialize(app_root:, seed:, env_pairs:, workload: nil, command_runner: RailsAdapter::CommandRunner.new, template_cache: RailsAdapter::TemplateCache.new, reset_strategy: ENV.fetch("BENCH_ADAPTER_RESET_STRATEGY", "local"), clock: -> { Time.now.to_f })
+      def initialize(app_root:, seed:, env_pairs:, workload: nil, command_runner: RailsAdapter::CommandRunner.new, template_cache: RailsAdapter::TemplateCache.new, reset_strategy: ENV.fetch("BENCH_ADAPTER_RESET_STRATEGY", "local"), workload_root: File.join(RailsAdapter::REPO_ROOT, "workloads"), clock: -> { Time.now.to_f })
         @app_root = app_root
         @workload = workload
         @seed = seed
@@ -272,6 +257,7 @@ module RailsAdapter
         @command_runner = command_runner
         @template_cache = template_cache
         @reset_strategy = reset_strategy
+        @workload_root = workload_root
         @clock = clock
       end
 
@@ -334,16 +320,6 @@ module RailsAdapter
 
         load_dataset = RailsAdapter::Commands::LoadDataset.new(
           app_root: @app_root,
-```
-
-Remote reset deliberately avoids the local template database cache. For a managed database, the reset is `db:schema:load` followed by the same seed loader used locally. The review follow-up made all reset failures append stderr or nested result details, because PlanetScale integration failures are otherwise impossible to diagnose from the adapter JSON alone.
-
-```bash
-sed -n '95,178p' adapters/rails/lib/rails_adapter/commands/reset_state.rb
-```
-
-```output
-          app_root: @app_root,
           workload: @workload,
           seed: @seed,
           env_pairs: @env_pairs,
@@ -359,6 +335,16 @@ sed -n '95,178p' adapters/rails/lib/rails_adapter/commands/reset_state.rb
           "runner",
           %(ActiveRecord::Base.connection.execute("SELECT pg_stat_statements_reset()")),
           env: rails_env,
+          chdir: @app_root,
+```
+
+Remote reset deliberately avoids the local template database cache. For a managed database, the reset is `db:schema:load` followed by the same seed loader used locally. The review follow-up made all reset failures append stderr or nested result details, because PlanetScale integration failures are otherwise impossible to diagnose from the adapter JSON alone.
+
+```bash
+sed -n '95,178p' adapters/rails/lib/rails_adapter/commands/reset_state.rb
+```
+
+```output
           chdir: @app_root,
           command_name: "reset-state",
         )
@@ -378,20 +364,30 @@ sed -n '95,178p' adapters/rails/lib/rails_adapter/commands/reset_state.rb
       end
 
       def capture_query_ids
-        script = QUERY_IDS_SCRIPT[@workload]
-        return nil unless script
+        path = query_ids_script_path
+        return nil unless path
 
         result = @command_runner.capture3(
           "bin/rails",
           "runner",
-          script,
+          path,
           env: rails_env,
           chdir: @app_root,
           command_name: "reset-state",
         )
         raise command_failure_message("query id capture failed", result.stderr) unless result.success?
 
-        JSON.parse(result.stdout).fetch("query_ids")
+        query_ids = JSON.parse(result.stdout).fetch("query_ids")
+        raise TypeError, "query_ids must be an array" unless query_ids.is_a?(Array)
+
+        query_ids
+      end
+
+      def query_ids_script_path
+        return nil unless @workload
+
+        path = File.join(@workload_root, @workload.tr("-", "_"), "rails", "reset_state_query_ids.rb")
+        File.exist?(path) ? path : nil
       end
 
       def command_failure_message(message, detail)
@@ -427,6 +423,9 @@ sed -n '95,178p' adapters/rails/lib/rails_adapter/commands/reset_state.rb
       def seed_env
         @seed_env ||= @env_pairs.merge("SEED" => @seed.to_s)
       end
+    end
+  end
+end
 ```
 
 The reset tests define the contract. The remote strategy test proves command order and that the template cache is bypassed. The failure tests prove operators see both the phase label and the underlying stderr/result message.
@@ -436,97 +435,97 @@ sed -n '42,132p' adapters/rails/test/reset_state_test.rb
 ```
 
 ```output
+    assert_equal 1, cache.clone_calls
     assert_includes runner.argv_history, ["bin/rails", "db:drop"]
     assert_includes runner.argv_history, ["bin/rails", "db:create", "db:schema:load"]
   end
 
   def test_reset_state_remote_strategy_skips_template_cache_and_runs_schema_seed_and_stats_steps
-    query_ids_json = %({"query_ids":["111"]})
-    runner = FakeCommandRunner.new(
-      results: {
-        ["bin/rails", "runner", RailsAdapter::Commands::ResetState::QUERY_IDS_SCRIPT.fetch("missing-index-todos")] => FakeResult.new(status: 0, stdout: query_ids_json, stderr: ""),
-      },
-    )
-    cache = FakeTemplateCache.new
-    command = RailsAdapter::Commands::ResetState.new(
-      app_root: "/tmp/demo",
-      workload: "missing-index-todos",
-      seed: 42,
-      env_pairs: { "ROWS_PER_TABLE" => "100000", "OPEN_FRACTION" => "0.6", "USER_COUNT" => "100" },
-      command_runner: runner,
-      template_cache: cache,
-      reset_strategy: "remote",
-      clock: fake_clock(0.0, 1.0),
-    )
+    Dir.mktmpdir do |workload_root|
+      script_body = query_ids_script_body
+      script_path = write_workload_query_ids_script(root: workload_root, workload: "missing-index-todos", body: script_body)
+      query_ids_json = %({"query_ids":["111"]})
+      runner = FakeCommandRunner.new(
+        results: {
+          ["bin/rails", "runner", script_path] => FakeResult.new(status: 0, stdout: query_ids_json, stderr: ""),
+        },
+      )
+      cache = FakeTemplateCache.new
+      command = RailsAdapter::Commands::ResetState.new(
+        app_root: "/tmp/demo",
+        workload: "missing-index-todos",
+        seed: 42,
+        env_pairs: { "ROWS_PER_TABLE" => "100000", "OPEN_FRACTION" => "0.6", "USER_COUNT" => "100" },
+        command_runner: runner,
+        template_cache: cache,
+        reset_strategy: "remote",
+        workload_root:,
+        clock: fake_clock(0.0, 1.0),
+      )
 
-    result = command.call
+      result = command.call
 
-    assert result.fetch("ok"), result.inspect
-    assert_equal ["111"], result.fetch("query_ids")
-    assert_equal 0, cache.build_calls
-    assert_equal 0, cache.clone_calls
-    assert_equal [
-      ["bin/rails", "db:schema:load"],
-      ["bin/rails", "runner", %(load Rails.root.join("db/seeds.rb").to_s)],
-      ["bin/rails", "runner", %(ActiveRecord::Base.connection.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"))],
-      ["bin/rails", "runner", RailsAdapter::Commands::ResetState::QUERY_IDS_SCRIPT.fetch("missing-index-todos")],
-      ["bin/rails", "runner", %(ActiveRecord::Base.connection.execute("SELECT pg_stat_statements_reset()"))],
-    ], runner.argv_history
+      assert result.fetch("ok"), result.inspect
+      assert_equal ["111"], result.fetch("query_ids")
+      assert_equal 0, cache.build_calls
+      assert_equal 0, cache.clone_calls
+      assert_equal [
+        ["bin/rails", "db:schema:load"],
+        ["bin/rails", "runner", %(load Rails.root.join("db/seeds.rb").to_s)],
+        ["bin/rails", "runner", %(ActiveRecord::Base.connection.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"))],
+        ["bin/rails", "runner", script_path],
+        ["bin/rails", "runner", %(ActiveRecord::Base.connection.execute("SELECT pg_stat_statements_reset()"))],
+      ], runner.argv_history
+    end
+  end
+
+  def test_reset_state_skips_query_id_capture_when_workload_script_is_absent
+    Dir.mktmpdir do |workload_root|
+      runner = FakeCommandRunner.new
+      command = RailsAdapter::Commands::ResetState.new(
+        app_root: "/tmp/demo",
+        workload: "fixture-workload",
+        seed: 42,
+        env_pairs: {},
+        command_runner: runner,
+        template_cache: FakeTemplateCache.new,
+        reset_strategy: "remote",
+        workload_root:,
+        clock: fake_clock(0.0, 1.0),
+      )
+
+      result = command.call
+
+      assert result.fetch("ok"), result.inspect
+      refute result.key?("query_ids")
+      refute runner.argv_history.any? { |argv| argv.first(2) == ["bin/rails", "runner"] && argv.fetch(2).include?("query_ids") }
+    end
+  end
+
+  def test_reset_state_skips_query_id_capture_when_workload_is_nil
+    Dir.mktmpdir do |workload_root|
+      runner = FakeCommandRunner.new
+      command = RailsAdapter::Commands::ResetState.new(
+        app_root: "/tmp/demo",
+        seed: 42,
+        env_pairs: {},
+        command_runner: runner,
+        template_cache: FakeTemplateCache.new(template_exists: true),
+        reset_strategy: "remote",
+        workload_root:,
+        clock: fake_clock(0.0, 1.0),
+      )
+
+      result = command.call
+
+      assert result.fetch("ok"), result.inspect
+      refute result.key?("query_ids")
+    end
   end
 
   def test_reset_state_remote_strategy_reports_schema_load_failure
     runner = FakeCommandRunner.new(
       results: {
-        ["bin/rails", "db:schema:load"] => FakeResult.new(status: 1, stdout: "", stderr: "schema failed"),
-      },
-    )
-    command = RailsAdapter::Commands::ResetState.new(
-      app_root: "/tmp/demo",
-      workload: "missing-index-todos",
-      seed: 42,
-      env_pairs: {},
-      command_runner: runner,
-      template_cache: FakeTemplateCache.new,
-      reset_strategy: "remote",
-      clock: fake_clock(0.0, 1.0),
-    )
-
-    result = command.call
-
-    refute result.fetch("ok")
-    assert_equal "reset_failed", result.fetch("error").fetch("code")
-    assert_includes result.fetch("error").fetch("message"), "schema load failed"
-    assert_includes result.fetch("error").fetch("message"), "schema failed"
-  end
-
-  def test_reset_state_remote_strategy_reports_seed_failure_details
-    runner = FakeCommandRunner.new(
-      results: {
-        ["bin/rails", "runner", %(load Rails.root.join("db/seeds.rb").to_s)] => FakeResult.new(status: 1, stdout: "", stderr: "seed failed"),
-      },
-    )
-    command = RailsAdapter::Commands::ResetState.new(
-      app_root: "/tmp/demo",
-      workload: "missing-index-todos",
-      seed: 42,
-      env_pairs: {},
-      command_runner: runner,
-      template_cache: FakeTemplateCache.new,
-      reset_strategy: "remote",
-      clock: fake_clock(0.0, 1.0),
-    )
-
-    result = command.call
-
-    refute result.fetch("ok")
-    assert_equal "reset_failed", result.fetch("error").fetch("code")
-    assert_includes result.fetch("error").fetch("message"), "seed failed"
-    assert_includes result.fetch("error").fetch("message"), "seed runner failed"
-  end
-
-  def test_reset_state_rebuilds_template_when_seed_env_changes
-    runner = FakeCommandRunner.new
-    cache = SeedAwareTemplateCache.new
 ```
 
 Before workers start, the missing-index workload verifier still runs against the live app. The default client now has a 30 second timeout because the PlanetScale `/api/todos/counts` preflight was slow enough after reset that the old five second default could fail the integration before the workload began.
