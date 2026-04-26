@@ -305,6 +305,10 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     assert_equal "search_rewrite", result.fetch(:checks).last.fetch(:name)
   end
 
+  def test_search_reference_fixture_matches_current_tenant_bitmap_plan
+    assert_equal current_search_reference_plan, search_reference_plan
+  end
+
   private
 
   def build_verifier(explain_reader: nil, counts_calls_reader: nil, counts_body: counts_body_for_users(2))
@@ -453,7 +457,7 @@ class MissingIndexTodosVerifierTest < Minitest::Test
           "Sort Key" => ["created_at DESC", "id DESC"],
           "Plans" => [
             {
-              "Node Type" => "Seq Scan",
+              "Node Type" => "Bitmap Heap Scan",
               "Parent Relationship" => "Inner",
               "Parallel Aware" => true,
               "Async Capable" => true,
@@ -463,7 +467,22 @@ class MissingIndexTodosVerifierTest < Minitest::Test
               "Total Cost" => 222.22,
               "Plan Rows" => 33,
               "Plan Width" => 55,
-              "Filter" => "(((title)::text ~~ '%foo%'::text) AND (user_id = 1))",
+              "Recheck Cond" => "(user_id = 1)",
+              "Filter" => "((title)::text ~~ '%foo%'::text)",
+              "Plans" => [
+                {
+                  "Node Type" => "Bitmap Index Scan",
+                  "Parent Relationship" => "Outer",
+                  "Parallel Aware" => true,
+                  "Async Capable" => true,
+                  "Index Name" => "index_todos_on_user_id",
+                  "Index Cond" => "(user_id = 1)",
+                  "Startup Cost" => 99.99,
+                  "Total Cost" => 100.01,
+                  "Plan Rows" => 77,
+                  "Plan Width" => 0,
+                },
+              ],
             },
           ],
         },
@@ -483,5 +502,32 @@ class MissingIndexTodosVerifierTest < Minitest::Test
 
   def search_reference_path
     File.expand_path("../../../fixtures/mixed-todo-app/search-explain.json", __dir__)
+  end
+
+  def current_search_reference_plan
+    {
+      "Node Type" => "Limit",
+      "Plans" => [
+        {
+          "Node Type" => "Sort",
+          "Sort Key" => ["created_at DESC", "id DESC"],
+          "Plans" => [
+            {
+              "Node Type" => "Bitmap Heap Scan",
+              "Relation Name" => "todos",
+              "Recheck Cond" => "(user_id = 1)",
+              "Filter" => "((title)::text ~~ '%foo%'::text)",
+              "Plans" => [
+                {
+                  "Node Type" => "Bitmap Index Scan",
+                  "Index Name" => "index_todos_on_user_id",
+                  "Index Cond" => "(user_id = 1)",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
   end
 end
