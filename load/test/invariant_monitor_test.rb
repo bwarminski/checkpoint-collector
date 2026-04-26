@@ -4,6 +4,36 @@ require "stringio"
 require_relative "test_helper"
 
 class InvariantMonitorTest < Minitest::Test
+  def test_state_increment_breaches_returns_new_count
+    state = Load::InvariantMonitor::State.new
+
+    assert_equal 1, state.increment_breaches
+    assert_equal 2, state.increment_breaches
+  end
+
+  def test_sink_delegates_sample_warning_stderr_warning_and_breach_stop
+    samples = []
+    warnings = []
+    stops = []
+    stderr = StringIO.new
+    sink = Load::InvariantMonitor::Sink.new(
+      on_sample: ->(sample) { samples << sample.to_h },
+      on_warning: ->(warning) { warnings << warning },
+      on_breach_stop: ->(reason) { stops << reason },
+      stderr:,
+    )
+
+    sink.sample(healthy_sample)
+    sink.warning(type: "invariant_breach")
+    sink.stderr_warning("warning: invariant breach")
+    sink.breach_stop(:invariant_breach)
+
+    assert_equal [healthy_sample.to_h], samples
+    assert_equal [{ type: "invariant_breach" }], warnings
+    assert_equal "warning: invariant breach\n", stderr.string
+    assert_equal [:invariant_breach], stops
+  end
+
   def test_enforce_policy_resets_breach_count_after_healthy_sample
     stops = []
     monitor = build_monitor(
