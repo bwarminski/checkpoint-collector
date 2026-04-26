@@ -262,6 +262,34 @@ class ResetStateTest < Minitest::Test
     end
   end
 
+  def test_reset_state_reports_when_workload_query_id_script_outputs_null_query_ids
+    Dir.mktmpdir do |workload_root|
+      script_body = query_ids_script_body
+      script_path = write_workload_query_ids_script(root: workload_root, workload: "missing-index-todos", body: script_body)
+      runner = FakeCommandRunner.new(
+        results: {
+          ["bin/rails", "runner", script_path] => FakeResult.new(status: 0, stdout: %({"query_ids":null}), stderr: ""),
+        },
+      )
+      command = RailsAdapter::Commands::ResetState.new(
+        app_root: "/tmp/demo",
+        workload: "missing-index-todos",
+        seed: 42,
+        env_pairs: {},
+        command_runner: runner,
+        template_cache: FakeTemplateCache.new(template_exists: true),
+        workload_root:,
+        clock: fake_clock(0.0, 1.0),
+      )
+
+      result = command.call
+
+      refute result.fetch("ok")
+      assert_equal "reset_failed", result.fetch("error").fetch("code")
+      assert_includes result.fetch("error").fetch("message"), "query_ids must be an array"
+    end
+  end
+
   def test_reset_state_rebuilds_template_when_seed_env_changes
     runner = FakeCommandRunner.new
     cache = SeedAwareTemplateCache.new

@@ -124,7 +124,10 @@ module RailsAdapter
         )
         raise command_failure_message("query id capture failed", result.stderr) unless result.success?
 
-        JSON.parse(result.stdout).fetch("query_ids")
+        query_ids = JSON.parse(result.stdout).fetch("query_ids")
+        raise TypeError, "query_ids must be an array" unless query_ids.is_a?(Array)
+
+        query_ids
       end
 
       def query_ids_script_path
