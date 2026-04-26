@@ -137,8 +137,9 @@ module Load
       rescue Load::VerificationError => error
         @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "fixture_verification_failed").merge(error_message: error.message))
         result = Load::ExitCodes::ADAPTER_ERROR
-      rescue AdapterClient::AdapterError
-        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "adapter_error"))
+      rescue AdapterClient::AdapterError => error
+        @stderr.puts(error.message) unless error.message.empty?
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "adapter_error").merge(error_message: error.message))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue Load::ReadinessGate::Timeout
         @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "readiness_timeout"))

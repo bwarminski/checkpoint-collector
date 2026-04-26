@@ -59,7 +59,7 @@ module Load
         stdout_json:,
         stderr: redact_text(stderr.to_s),
       )
-      raise AdapterError, stderr unless status.success?
+      raise AdapterError, adapter_error_message(stdout_json, stderr) unless status.success?
 
       stdout_json
     rescue JSON::ParserError => error
@@ -100,6 +100,15 @@ module Load
     def redact_text(text)
       redacted = text.gsub(%r{(://[^:\s]+:)[^@\s]+@}, '\1[REDACTED]@')
       redacted.gsub(/((?:\A|[\s,])(?:[A-Z0-9_]*?(?:URL|PASSWORD|TOKEN|KEY|SECRET)))=([^\s,]+)/, '\1=[REDACTED]')
+    end
+
+    def adapter_error_message(stdout_json, stderr)
+      parts = [stderr.to_s.strip]
+      error = stdout_json.fetch("error", {})
+      details = error.fetch("details", {})
+      parts << error.fetch("message", nil)
+      parts << details.fetch("stderr", nil)
+      redact_text(parts.compact.map(&:to_s).map(&:strip).reject(&:empty?).join("\n"))
     end
 
     def sensitive_key?(key)
