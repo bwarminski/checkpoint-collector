@@ -7,48 +7,10 @@ require "time"
 
 module Load
   class Runner
-    WORKER_DRAIN_TIMEOUT_SECONDS = 1.0
-    CONTINUOUS_POLL_SECONDS = 0.1
     DEFAULT_INVARIANT_SAMPLE_INTERVAL_SECONDS = 60.0
     Runtime = Data.define(:clock, :sleeper, :http, :stop_flag)
     Settings = Data.define(:readiness_path, :startup_grace_seconds, :metrics_interval_seconds, :workload_file, :app_root, :adapter_bin)
     attr_reader :run_state
-
-    MetricsSink = Data.define(:run_record) do
-      def <<(line)
-        run_record.append_metrics(line)
-      end
-    end
-
-    class TrackingBuffer < Load::Metrics::Buffer
-      def initialize(runner)
-        super()
-        @runner = runner
-        @started = false
-        @request_totals = { total: 0, ok: 0, error: 0 }
-        @runner.send(:register_tracking_buffer, self)
-      end
-
-      def record_ok(**kwargs)
-        super(**kwargs)
-        @request_totals[:total] += 1
-        @request_totals[:ok] += 1
-        return if @started
-
-        @started = true
-        @runner.run_state.pin_window_start(now: @runner.send(:current_time))
-      end
-
-      def record_error(**kwargs)
-        super(**kwargs)
-        @request_totals[:total] += 1
-        @request_totals[:error] += 1
-      end
-
-      def request_totals
-        @request_totals.dup
-      end
-    end
 
     InvariantCheck = Data.define(:name, :actual, :min, :max) do
       def breaches
@@ -127,10 +89,10 @@ module Load
         on_breach_stop: ->(reason) { trigger_stop(reason) },
         stderr: @stderr,
       )
-      @tracking_buffers = []
     end
 
     def run
+      request_totals = { total: 0, ok: 0, error: 0 }
       begin
         @run_state.write_initial
         adapter_describe = @adapter_client.describe
@@ -151,23 +113,23 @@ module Load
 
         probe_readiness(start_response.fetch("base_url"))
         verify_fixture(base_url: start_response.fetch("base_url"))
-        start_workers(start_response.fetch("base_url"))
+        request_totals = run_execution(start_response.fetch("base_url"))
 
-        result = finish_run
+        result = finish_run(request_totals)
       rescue Load::InvariantMonitor::Failure
-        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "invariant_sampler_failed"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "invariant_sampler_failed"))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue Load::FixtureVerifier::VerificationError => error
-        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "fixture_verification_failed").merge(error_message: error.message))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "fixture_verification_failed").merge(error_message: error.message))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue AdapterClient::AdapterError
-        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "adapter_error"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "adapter_error"))
         result = Load::ExitCodes::ADAPTER_ERROR
       rescue Load::ReadinessGate::Timeout
-        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "readiness_timeout"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "readiness_timeout"))
         result = Load::ExitCodes::ADAPTER_ERROR
       ensure
-        result = stop_adapter_safely(result)
+        result = stop_adapter_safely(result, request_totals)
       end
 
       result
@@ -196,83 +158,28 @@ module Load
       )
     end
 
-    def start_workers(base_url)
-      reporter = nil
-      threads = []
+    def run_execution(base_url)
+      execution = nil
       invariant_thread = nil
-      plan = @workload.load_plan
-      rate_limiter = Load::RateLimiter.new(rate_limit: plan.rate_limit, clock: @runtime.clock, sleeper: @runtime.sleeper)
-      entries = @workload.actions
-      seed = plan.seed.nil? ? @workload.scale.seed : plan.seed
-      workers = Array.new(plan.workers) do |index|
-        Load::Worker.new(
-          worker_id: index + 1,
-          selector: Load::Selector.new(entries: entries, rng: Random.new(seed + index)),
-          buffer: tracking_buffer,
-          client: Load::Client.new(base_url: base_url, http: @runtime.http),
-          ctx: { base_url: base_url, scale: @workload.scale },
-          rng: Random.new(seed + index),
-          rate_limiter: rate_limiter,
-          stop_flag: @runtime.stop_flag,
-        )
-      end
+      request_totals = { total: 0, ok: 0, error: 0 }
 
-      reporter = Load::Reporter.new(
-        workers:,
-        interval_seconds: @settings.metrics_interval_seconds,
-        sink: MetricsSink.new(@run_record),
-        clock: @runtime.clock,
-        sleeper: @runtime.sleeper,
-      )
-      reporter.start
-      threads = workers.map { |worker| Thread.new { worker.run } }
-      invariant_thread = @mode == :continuous ? @invariant_monitor.start : nil
-      execute_window(plan.duration_seconds)
-    ensure
-      invariant_failure = nil
       begin
+        execution = Load::LoadExecution.new(
+          workload: @workload,
+          base_url:,
+          runtime: @runtime,
+          metrics_interval_seconds: @settings.metrics_interval_seconds,
+          run_record: @run_record,
+          on_first_success: -> { @run_state.pin_window_start(now: current_time) },
+        )
+        invariant_thread = @mode == :continuous ? @invariant_monitor.start : nil
+        request_totals = execution.run(mode: @mode, duration_seconds: @workload.load_plan.duration_seconds)
+      ensure
+        request_totals = execution.request_totals if execution
         @invariant_monitor.stop(invariant_thread)
-      rescue Load::InvariantMonitor::Failure => error
-        invariant_failure = error
       end
-      drain_workers(threads)
-      reporter.stop
-      raise invariant_failure if invariant_failure
-    end
 
-    def execute_window(duration_seconds)
-      if @mode == :continuous
-        wait_for_stop_signal
-      else
-        wait_for_window_end(duration_seconds)
-      end
-    end
-
-    def wait_for_window_end(duration_seconds)
-      deadline = current_time + duration_seconds
-
-      until @runtime.stop_flag.call
-        remaining = deadline - current_time
-        if remaining <= 0
-          @runtime.stop_flag.trigger(:timeout) if @runtime.stop_flag.respond_to?(:trigger)
-          break
-        end
-
-        Thread.pass
-        next if @runtime.stop_flag.call
-
-        remaining = deadline - current_time
-        next if remaining <= 0
-
-        @runtime.sleeper.call([1.0, remaining].min)
-      end
-    end
-
-    def wait_for_stop_signal
-      until @runtime.stop_flag.call
-        Thread.pass
-        @runtime.sleeper.call(CONTINUOUS_POLL_SECONDS)
-      end
+      request_totals
     end
 
     def trigger_stop(reason)
@@ -281,21 +188,7 @@ module Load
       @runtime.stop_flag.trigger(reason)
     end
 
-    def drain_workers(threads)
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + WORKER_DRAIN_TIMEOUT_SECONDS
-
-      threads.each do |thread|
-        remaining = [deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0].max
-        thread.join(remaining)
-        next unless thread.alive?
-
-        thread.kill
-        thread.join
-      end
-    end
-
-    def finish_run
-      request_totals = aggregate_request_totals
+    def finish_run(request_totals)
       if stop_reason == :invariant_breach
         @run_state.finish(now: current_time, request_totals:, aborted: true, error_code: "invariant_breach")
         return Load::ExitCodes::ADAPTER_ERROR
@@ -326,10 +219,6 @@ module Load
       @runtime.stop_flag.reason
     end
 
-    def tracking_buffer
-      TrackingBuffer.new(self)
-    end
-
     def current_time
       @runtime.clock.call
     end
@@ -345,7 +234,7 @@ module Load
       expanded.start_with?(cwd) ? expanded.delete_prefix(cwd) : expanded
     end
 
-    def stop_adapter_safely(result)
+    def stop_adapter_safely(result, request_totals)
       pid = @run_state.snapshot.dig(:adapter, :pid)
       return result unless pid
 
@@ -353,23 +242,11 @@ module Load
       result
     rescue AdapterClient::AdapterError
       if result.nil? || result == Load::ExitCodes::SUCCESS
-        @run_state.merge(outcome: @run_state.outcome_payload(request_totals: aggregate_request_totals, aborted: true, error_code: "adapter_error"))
+        @run_state.merge(outcome: @run_state.outcome_payload(request_totals:, aborted: true, error_code: "adapter_error"))
         return Load::ExitCodes::ADAPTER_ERROR
       end
 
       result
-    end
-
-    def register_tracking_buffer(buffer)
-      @tracking_buffers << buffer
-    end
-
-    def aggregate_request_totals
-      @tracking_buffers.each_with_object({ total: 0, ok: 0, error: 0 }) do |buffer, totals|
-        buffer.request_totals.each do |key, value|
-          totals[key] += value
-        end
-      end
     end
 
     def validate_adapter_response!(response, required_keys, response_name)
