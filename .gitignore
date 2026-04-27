@@ -8,3 +8,4 @@ __pycache__/
 runs/
 .codex
 node_modules/
+adapters/rails/test/fixtures/demo_app/log/benchmark.log

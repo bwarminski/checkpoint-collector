@@ -21,7 +21,7 @@ class MissingIndexTodosInvariantSamplerTest < Minitest::Test
 
     refute pg.shared_connection_used?, "sampler must not reuse the workload connection"
     assert_equal true, pg.connection.closed?
-    assert_includes pg.connection.session_sql, "SET LOCAL pg_stat_statements.track = 'none'"
+    assert_includes pg.connection.session_sql, Load::Workloads::MissingIndexTodos::InvariantSampler::DISABLE_TRACKING_SQL
     assert_equal ["open_count", "total_count"], sample.checks.map(&:name)
     assert_equal true, sample.healthy?
   end
@@ -44,18 +44,54 @@ class MissingIndexTodosInvariantSamplerTest < Minitest::Test
     assert_equal "connect failed", error.message
   end
 
+  def test_sampler_returns_counts_when_tracking_cannot_be_disabled
+    stderr = StringIO.new
+    pg = FakePg.new(
+      open_count: 35_000,
+      total_count: 100_000,
+      raise_tracking_permission: true,
+    )
+    sampler = Load::Workloads::MissingIndexTodos::InvariantSampler.new(
+      pg:,
+      database_url: "postgres://localhost/checkpoint_collector",
+      open_floor: 30_000,
+      total_floor: 80_000,
+      total_ceiling: 200_000,
+      stderr:,
+    )
+
+    sample = sampler.call
+    second_sample = sampler.call
+
+    assert_includes pg.connection.session_sql, Load::Workloads::MissingIndexTodos::InvariantSampler::DISABLE_TRACKING_SQL
+    assert_includes pg.connection.session_sql, Load::Workloads::MissingIndexTodos::InvariantSampler::OPEN_COUNT_SQL
+    assert_includes pg.connection.session_sql, Load::Workloads::MissingIndexTodos::InvariantSampler::TOTAL_COUNT_SQL
+    assert_equal ["open_count", "total_count"], sample.checks.map(&:name)
+    assert_equal [35_000, 100_000], sample.checks.map(&:actual)
+    assert_equal true, sample.healthy?
+    assert_equal ["open_count", "total_count"], second_sample.checks.map(&:name)
+    assert_equal 1, stderr.string.lines.count
+    assert_includes stderr.string, "warning: unable to disable pg_stat_statements tracking"
+  end
+
   class FakePg
     attr_reader :connection
 
-    def initialize(open_count:, total_count:)
+    def initialize(open_count:, total_count:, raise_tracking_permission: false)
       @open_count = open_count
       @total_count = total_count
+      @raise_tracking_permission = raise_tracking_permission
       @shared_connection_used = false
       @connection = nil
     end
 
     def connect(database_url)
-      @connection = FakePgConnection.new(database_url:, open_count: @open_count, total_count: @total_count)
+      @connection = FakePgConnection.new(
+        database_url:,
+        open_count: @open_count,
+        total_count: @total_count,
+        raise_tracking_permission: @raise_tracking_permission,
+      )
     end
 
     def shared_connection
@@ -70,17 +106,20 @@ class MissingIndexTodosInvariantSamplerTest < Minitest::Test
   class FakePgConnection
     attr_reader :session_sql
 
-    def initialize(database_url:, open_count:, total_count:)
+    def initialize(database_url:, open_count:, total_count:, raise_tracking_permission:)
       @database_url = database_url
       @open_count = open_count
       @total_count = total_count
+      @raise_tracking_permission = raise_tracking_permission
       @session_sql = []
       @closed = false
     end
 
     def exec(sql)
       @session_sql << sql
-      if sql.include?("COUNT(*)") && sql.include?("FROM todos")
+      if @raise_tracking_permission && sql.include?("pg_stat_statements.track")
+        raise PG::InsufficientPrivilege, "permission denied to set parameter \"pg_stat_statements.track\""
+      elsif sql.include?("COUNT(*)") && sql.include?("FROM todos")
         [{ "count" => @open_count.to_s }]
       elsif sql.include?("FROM pg_class")
         [{ "count" => @total_count.to_s }]

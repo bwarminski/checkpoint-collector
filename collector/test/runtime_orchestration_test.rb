@@ -108,9 +108,78 @@ class RuntimeOrchestrationTest < Minitest::Test
     assert_equal ["checkpoint_demo", "checkpoint_demo"], clickhouse_service.database_params
   end
 
+  def test_run_once_pass_can_skip_log_ingestion_while_collecting_stats
+    events = []
+    clickhouse_service = FakeClickhouseService.new(events: events)
+    observed_offsets = []
+    stats_connections = []
+    clickhouse_connections = []
+
+    runtime = build_runtime(
+      events: events,
+      clickhouse_service: clickhouse_service,
+      observed_offsets: observed_offsets,
+      stats_connections: stats_connections,
+      clickhouse_connections: clickhouse_connections,
+      log_reader: lambda do |_, byte_offset|
+        observed_offsets << byte_offset
+        raise "log reader should not be called"
+      end,
+      log_ingestion_enabled: false,
+    )
+
+    runtime.run_once_pass
+
+    assert_equal [], observed_offsets
+    assert_equal [
+      [:stats_exec, 1, Collector::STATS_SQL],
+      [:stats_exec, 1, Collector::INFO_SQL],
+      [:insert, 1, "query_events"],
+      [:stats_close, 1],
+    ], events
+  end
+
+  def test_runtime_uses_environment_default_for_log_ingestion
+    events = []
+    clickhouse_service = FakeClickhouseService.new(events: events)
+    observed_offsets = []
+
+    with_env("COLLECTOR_DISABLE_LOG_INGESTION" => "1") do
+      runtime = build_runtime(
+        events: events,
+        clickhouse_service: clickhouse_service,
+        observed_offsets: observed_offsets,
+        stats_connections: [],
+        clickhouse_connections: [],
+        log_reader: lambda do |_, byte_offset|
+          observed_offsets << byte_offset
+          raise "log reader should not be called"
+        end,
+        use_log_ingestion_default: true,
+      )
+
+      runtime.run_once_pass
+    end
+
+    assert_equal [], observed_offsets
+    assert_equal [
+      [:stats_exec, 1, Collector::STATS_SQL],
+      [:stats_exec, 1, Collector::INFO_SQL],
+      [:insert, 1, "query_events"],
+      [:stats_close, 1],
+    ], events
+  end
+
+  def test_executable_entrypoint_uses_runtime_log_ingestion_default
+    source = File.read(File.expand_path("../bin/collector", __dir__))
+    executable_block = source.split('if $PROGRAM_NAME == __FILE__', 2).fetch(1)
+
+    refute_includes executable_block, "log_ingestion_enabled:"
+  end
+
   private
 
-  def build_runtime(events:, clickhouse_service:, observed_offsets:, stats_connections:, clickhouse_connections:, log_reader:, clickhouse_url: "http://clickhouse:8123")
+  def build_runtime(events:, clickhouse_service:, observed_offsets:, stats_connections:, clickhouse_connections:, log_reader:, clickhouse_url: "http://clickhouse:8123", log_ingestion_enabled: true, use_log_ingestion_default: false)
     pg = FakePg.new do |url|
       connection = StatsConnection.new(
         id: stats_connections.length + 1,
@@ -135,7 +204,7 @@ class RuntimeOrchestrationTest < Minitest::Test
       end
     end
 
-    CollectorRuntime.new(
+    runtime_args = {
       interval_seconds: 5,
       postgres_url: "postgresql://postgres:postgres@postgres:5432/checkpoint_demo",
       clickhouse_url: clickhouse_url,
@@ -148,7 +217,22 @@ class RuntimeOrchestrationTest < Minitest::Test
       state_store_class: ClickhouseLogStateStore,
       state_store_transport: clickhouse_service.method(:call),
       log_reader: log_reader,
-    )
+    }
+    runtime_args[:log_ingestion_enabled] = log_ingestion_enabled unless use_log_ingestion_default
+    CollectorRuntime.new(**runtime_args)
+  end
+
+  def with_env(overrides)
+    previous = overrides.transform_values { nil }
+    overrides.each_key { |key| previous[key] = ENV[key] }
+    overrides.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    previous.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
   end
 
   class FakePg

@@ -642,9 +642,10 @@ class RunnerTest < Minitest::Test
 
   def test_runner_records_adapter_metadata_before_prepare_fails
     run_record = FakeRunRecord.new
+    stderr = StringIO.new
     adapter = FakeAdapterClient.new(
       describe_response: { "name" => "rails-postgres-adapter", "framework" => "rails", "runtime" => "ruby-3.3" },
-      prepare_error: Load::AdapterClient::AdapterError.new("boom"),
+      prepare_error: Load::AdapterClient::AdapterError.new("benchmark database is unreachable\nSSL error: certificate verify failed"),
       adapter_bin: "adapters/rails/bin/bench-adapter",
     )
     runner = build_runner(
@@ -653,12 +654,15 @@ class RunnerTest < Minitest::Test
       run_record:,
       runtime: fake_runtime(sleeper: ->(*) {}),
       config: fake_config(adapter_bin: "adapters/rails/bin/bench-adapter"),
+      stderr:,
     )
 
     exit_code = runner.run
 
     assert_equal 1, exit_code
     assert_equal "adapter_error", run_record.outcome.fetch(:error_code)
+    assert_includes run_record.outcome.fetch(:error_message), "benchmark database is unreachable"
+    assert_includes stderr.string, "SSL error: certificate verify failed"
     assert_equal "rails-postgres-adapter", run_record.adapter.fetch(:describe).fetch("name")
     assert_equal "adapters/rails/bin/bench-adapter", run_record.adapter.fetch(:bin)
     assert_nil run_record.adapter.fetch(:app_root)
@@ -1755,7 +1759,7 @@ class RunnerTest < Minitest::Test
         Response.new("200", "")
       when %r{\A/api/todos\?user_id=(\d+)&status=open\z}
         user_id = Regexp.last_match(1).to_i
-        Response.new("200", JSON.generate([{ "id" => user_id }]))
+        Response.new("200", JSON.generate({ items: [{ "id" => user_id }] }))
       when %r{\A/api/todos/(\d+)\z}
         @closed_todo_ids << Regexp.last_match(1).to_i
         Response.new("200", "")

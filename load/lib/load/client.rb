@@ -25,9 +25,10 @@ module Load
       end
     end
 
-    def initialize(base_url:, http: Net::HTTP)
+    def initialize(base_url:, http: Net::HTTP, timeout_seconds: HTTP_TIMEOUT_SECONDS)
       @base_url = URI(base_url)
       @http = http
+      @timeout_seconds = timeout_seconds
       @connection = nil
     end
 
@@ -38,9 +39,7 @@ module Load
     def start
       return self if @connection
 
-      connection = build_connection
-      connection.start
-      @connection = connection
+      @connection = connection_session(build_connection)
       self
     end
 
@@ -64,10 +63,10 @@ module Load
       elsif @http.respond_to?(:new)
         connection = build_connection
         begin
-          connection.start
-          connection.request(request)
+          session = connection_session(connection)
+          session.request(request)
         ensure
-          connection&.finish
+          session.finish if session
         end
       else
         @http.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
@@ -83,10 +82,14 @@ module Load
       URI.join(@base_url.to_s.end_with?("/") ? @base_url.to_s : "#{@base_url}/", path.sub(/\A\//, ""))
     end
 
+    def connection_session(connection)
+      connection.start || connection
+    end
+
     def configure_timeouts(http)
-      http.open_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:open_timeout=)
-      http.read_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:read_timeout=)
-      http.write_timeout = HTTP_TIMEOUT_SECONDS if http.respond_to?(:write_timeout=)
+      http.open_timeout = @timeout_seconds if http.respond_to?(:open_timeout=)
+      http.read_timeout = @timeout_seconds if http.respond_to?(:read_timeout=)
+      http.write_timeout = @timeout_seconds if http.respond_to?(:write_timeout=)
       http.keep_alive_timeout = 30 if http.respond_to?(:keep_alive_timeout=)
     end
 

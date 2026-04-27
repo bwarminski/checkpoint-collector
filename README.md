@@ -17,6 +17,7 @@ make load-smoke
 - `make test-load`
 - `make test-adapters`
 - `make test-workloads`
+- `make test-collector`
 - `make test-adapters-integration` when you want the opt-in Rails integration coverage
 
 Those targets cover the load runner, the Rails adapter, and the
@@ -57,6 +58,132 @@ bin/load soak --workload missing-index-todos \
   --adapter adapters/rails/bin/bench-adapter \
   --app-root /home/bjw/db-specialist-demo
 ```
+
+## Before Ship Verification
+
+Run this set before shipping changes that touch the runner, adapter, collector,
+workload, or operator paths.
+
+Start from a fresh local stack when you need full environment confidence:
+
+```bash
+docker compose down --volumes --remove-orphans
+docker compose up -d --build --force-recreate
+docker compose ps
+```
+
+Run the code-level suites:
+
+```bash
+make test
+```
+
+Run the opt-in Rails adapter integration suite:
+
+```bash
+make test-adapters-integration
+```
+
+Validate collector wiring against local Docker Postgres and ClickHouse:
+
+```bash
+POSTGRES_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+CLICKHOUSE_URL=http://localhost:8123 \
+make validate-collector-postgres
+```
+
+Run the local end-to-end smoke path:
+
+```bash
+make load-smoke
+```
+
+When validating PlanetScale-specific changes, also run these with the canonical
+PlanetScale URL exported:
+
+```bash
+BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL" \
+CLICKHOUSE_URL=http://localhost:8123 \
+make validate-collector-planetscale
+
+DATABASE_URL="$PLANETSCALE_DATABASE_URL" \
+BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL" \
+make load-soak-planetscale
+```
+
+`load-soak-planetscale` is continuous; stop it with `Ctrl-C` after the run has
+started, the collector has completed at least one poll, and the run record has
+the evidence you need.
+
+### Docker Compose Collector Modes
+
+The compose collector defaults to the local Docker path: it reads
+`postgresql://postgres:postgres@postgres:5432/checkpoint_demo`, writes to
+`http://clickhouse:8123`, and ingests the mounted Postgres JSON log volume.
+
+```bash
+docker compose up -d --build
+```
+
+Use shell variables when the collector container should poll a different
+Postgres target or ClickHouse endpoint:
+
+```bash
+COLLECTOR_POSTGRES_URL='postgresql://postgres:postgres@postgres:5432/checkpoint_demo' \
+COLLECTOR_CLICKHOUSE_URL=http://clickhouse:8123 \
+COLLECTOR_INTERVAL_SECONDS=5 \
+docker compose up -d --force-recreate collector
+```
+
+For stats-only mode, pass `COLLECTOR_DISABLE_LOG_INGESTION=1`. This keeps
+`pg_stat_statements` polling enabled but skips reading the mounted Postgres log
+file.
+
+```bash
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+docker compose up -d --force-recreate collector
+```
+
+For PlanetScale from the compose collector, point `COLLECTOR_POSTGRES_URL` at
+the complete PlanetScale direct URL and keep stats-only mode enabled:
+
+```bash
+COLLECTOR_POSTGRES_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+docker compose up -d --force-recreate collector
+```
+
+The compose collector runs inside the Docker network, so its default
+`COLLECTOR_CLICKHOUSE_URL` is `http://clickhouse:8123`. Host-side commands use
+`CLICKHOUSE_URL=http://localhost:8123` instead.
+
+### Collector Validation
+
+Use collector validation before a soak when you need to prove the collector is
+polling the intended Postgres target and writing fresh ClickHouse rows.
+
+For a local Docker Postgres target from the host:
+
+```bash
+POSTGRES_URL=postgres://postgres:postgres@localhost:5432/checkpoint_demo \
+CLICKHOUSE_URL=http://localhost:8123 \
+make validate-collector-postgres
+```
+
+For PlanetScale from the host:
+
+```bash
+BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL" \
+CLICKHOUSE_URL=http://localhost:8123 \
+make validate-collector-planetscale
+```
+
+Both targets run `bin/collector-validate`, which issues a harmless
+`collector_target_validation` marker query, runs one collector pass, and fails
+unless ClickHouse receives fresh `collector_state` and marker `query_events`
+rows. `validate-collector-planetscale` forces
+`COLLECTOR_DISABLE_LOG_INGESTION=1` because PlanetScale does not expose the
+Docker Postgres log file.
 
 ## Load Runner
 
@@ -274,6 +401,104 @@ fixture verification failed for /api/todos/counts: expected at least 10 count ca
 | `run` | yes | yes | yes | no |
 | `soak` | yes | yes | usually no, unless you inspect it later | yes |
 | `verify-fixture` | no | no | no | no |
+
+## PlanetScale Soak
+
+PlanetScale soak targets an existing benchmark branch and resets that branch
+before workers start. This is destructive to the target database; do not point
+these commands at production.
+
+Before running it, enable `pg_stat_statements` for the PlanetScale branch in
+the dashboard, apply the extension change, and run this in the benchmark
+database:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+```
+
+The current checkpoint uses direct database connections only. PlanetScale direct
+and pooled hosts are different operational paths, but for this direct-only
+checkpoint all Postgres URLs should use port `5432`.
+
+Canonical PlanetScale connection URL format:
+
+```bash
+postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt
+```
+
+Export the complete URL, including the `sslmode` and `sslrootcert` query params.
+The load runner, Rails adapter, and collector pass these URLs through; they do
+not append or normalize SSL parameters. On this machine, libpq 18.0.1 failed
+certificate verification with `sslrootcert=system`, while the explicit CA bundle
+path worked.
+
+```bash
+export PLANETSCALE_DATABASE_URL='postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'
+export DATABASE_URL="$PLANETSCALE_DATABASE_URL"
+export BENCH_ADAPTER_PG_ADMIN_URL="$PLANETSCALE_DATABASE_URL"
+export POSTGRES_URL="$PLANETSCALE_DATABASE_URL"
+```
+
+Reset and reseed the PlanetScale branch:
+
+```bash
+DATABASE_URL="$DATABASE_URL" \
+BENCH_ADAPTER_PG_ADMIN_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+BENCH_ADAPTER_RESET_STRATEGY=remote \
+adapters/rails/bin/bench-adapter --json reset-state \
+  --app-root /home/bjw/db-specialist-demo \
+  --workload missing-index-todos \
+  --seed 42 \
+  --env ROWS_PER_TABLE=100000 \
+  --env OPEN_FRACTION=0.6 \
+  --env USER_COUNT=100
+```
+
+Run soak:
+
+```bash
+DATABASE_URL="$DATABASE_URL" \
+BENCH_ADAPTER_PG_ADMIN_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+make load-soak-planetscale
+```
+
+PlanetScale-backed Rails startup can take longer than the local Docker path
+after reset/reseed. The `load-soak-planetscale` target uses
+`--startup-grace-seconds 60` and `--invariants warn`, which records invariant
+samples without aborting on PlanetScale planner-stat estimate drift.
+
+Run the collector against PlanetScale in stats-only mode:
+
+```bash
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+POSTGRES_URL="$POSTGRES_URL" \
+CLICKHOUSE_URL=http://localhost:8123 \
+BUNDLE_GEMFILE=collector/Gemfile \
+bundle exec ruby collector/bin/collector
+```
+
+To run the Docker Compose collector against PlanetScale instead, use the
+compose mode documented above:
+
+```bash
+COLLECTOR_POSTGRES_URL="$BENCH_ADAPTER_PG_ADMIN_URL" \
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+docker compose up -d --force-recreate collector
+```
+
+For a one-pass checkpoint, load the collector entrypoint explicitly:
+
+```bash
+COLLECTOR_DISABLE_LOG_INGESTION=1 \
+POSTGRES_URL="$POSTGRES_URL" \
+CLICKHOUSE_URL=http://localhost:8123 \
+BUNDLE_GEMFILE=collector/Gemfile \
+bundle exec ruby -e 'load "./collector/bin/collector"; CollectorRuntime.new(interval_seconds: 5, postgres_url: ENV.fetch("POSTGRES_URL"), clickhouse_url: ENV.fetch("CLICKHOUSE_URL")).run_once_pass'
+```
+
+Branch-per-run automation and PlanetScale Logs/Insights ingestion are future
+work. The first PlanetScale implementation uses `pg_stat_statements` query
+evidence.
 
 ## Manual Exploration
 

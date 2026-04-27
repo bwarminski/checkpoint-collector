@@ -17,7 +17,10 @@ class LoadSmokeTargetTest < Minitest::Test
     makefile = File.read(File.expand_path("../../Makefile", __dir__))
 
     assert_includes makefile,
-      ".PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads"
+      ".PHONY: load-smoke verify-fixture load-soak test test-load test-adapters test-adapters-fixture-integration test-adapters-demo-integration test-adapters-integration test-workloads test-collector load-soak-planetscale validate-collector-postgres validate-collector-planetscale"
+    assert_includes makefile, "test: test-load test-adapters test-workloads test-collector"
+    assert_includes makefile, "test-collector:"
+    assert_includes makefile, 'Dir["collector/test/*_test.rb"].sort.each'
     assert_includes makefile, "test-adapters-integration: test-adapters-fixture-integration test-adapters-demo-integration"
     assert_includes makefile, "test-adapters-fixture-integration:"
     assert_includes makefile, "test-adapters-demo-integration:"
@@ -36,10 +39,65 @@ class LoadSmokeTargetTest < Minitest::Test
     assert_includes makefile, "load-soak:"
   end
 
+  def test_makefile_exposes_collector_validation_targets
+    makefile = File.read(File.expand_path("../../Makefile", __dir__))
+
+    assert_includes makefile, "validate-collector-postgres"
+    assert_includes makefile, "validate-collector-planetscale"
+    assert_includes makefile, "bin/collector-validate"
+    assert_includes makefile, "COLLECTOR_DISABLE_LOG_INGESTION=1"
+    assert_includes makefile, "$${BENCH_ADAPTER_PG_ADMIN_URL:-$${POSTGRES_URL"
+  end
+
   def test_readme_documents_verify_fixture_and_soak_commands
     readme = File.read(File.expand_path("../../README.md", __dir__))
 
     assert_includes readme, "bin/load verify-fixture"
     assert_includes readme, "bin/load soak"
+  end
+
+  def test_readme_documents_compose_collector_modes
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+
+    assert_includes readme, "### Docker Compose Collector Modes"
+    assert_includes readme, "COLLECTOR_POSTGRES_URL"
+    assert_includes readme, "COLLECTOR_CLICKHOUSE_URL"
+    assert_includes readme, "COLLECTOR_DISABLE_LOG_INGESTION=1"
+    assert_includes readme, "docker compose up -d --force-recreate collector"
+  end
+
+  def test_readme_documents_collector_validation_targets
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+
+    assert_includes readme, "### Collector Validation"
+    assert_includes readme, "make validate-collector-postgres"
+    assert_includes readme, "make validate-collector-planetscale"
+    assert_includes readme, "bin/collector-validate"
+  end
+
+  def test_readme_documents_before_ship_verification
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+
+    assert_includes readme, "## Before Ship Verification"
+    assert_includes readme, "make test"
+    assert_includes readme, "make test-collector"
+    before_ship = readme[/## Before Ship Verification.*?### Docker Compose Collector Modes/m]
+    refute_includes before_ship, 'Dir["collector/test/*_test.rb"].sort.each'
+    assert_includes readme, "make test-adapters-integration"
+    assert_includes readme, "make validate-collector-postgres"
+    assert_includes readme, "make load-smoke"
+    assert_includes readme, "make validate-collector-planetscale"
+    assert_includes readme, "make load-soak-planetscale"
+  end
+
+  def test_planetscale_docs_define_canonical_url_without_makefile_ssl_params
+    readme = File.read(File.expand_path("../../README.md", __dir__))
+    makefile = File.read(File.expand_path("../../Makefile", __dir__))
+
+    assert_includes readme, "Canonical PlanetScale connection URL format"
+    assert_includes readme, "postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt"
+    planetscale_target = makefile[/load-soak-planetscale:.*?(?=\n\S|\z)/m]
+    refute_includes planetscale_target, "sslrootcert"
+    refute_includes planetscale_target, "sslmode"
   end
 end

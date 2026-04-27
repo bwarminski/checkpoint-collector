@@ -6,39 +6,26 @@ require "uri"
 module RailsAdapter
   module Commands
     class ResetState
-      QUERY_IDS_SCRIPT = {
-        "missing-index-todos" => <<~RUBY.strip,
-          require "json"
-          user = User.first or raise("expected a seeded user")
-          user.todos.with_status("open").ordered_by_created_desc.page(1, 50).load
-          connection = ActiveRecord::Base.connection
-          query_ids = [
-            %(SELECT "todos".* FROM "todos" WHERE "todos"."user_id" = $1 AND "todos"."status" = $2 ORDER BY "todos"."created_at" DESC, "todos"."id" DESC LIMIT $3 OFFSET $4),
-          ].flat_map do |query_text|
-            connection.exec_query(
-              "SELECT DISTINCT queryid::text AS queryid FROM pg_stat_statements WHERE query = \#{connection.quote(query_text)}"
-            ).rows.flatten
-          end.uniq
-          $stdout.write(JSON.generate(query_ids: query_ids))
-        RUBY
-      }.freeze
-
-      def initialize(app_root:, seed:, env_pairs:, workload: nil, command_runner: RailsAdapter::CommandRunner.new, template_cache: RailsAdapter::TemplateCache.new, clock: -> { Time.now.to_f })
+      def initialize(app_root:, seed:, env_pairs:, workload: nil, command_runner: RailsAdapter::CommandRunner.new, template_cache: RailsAdapter::TemplateCache.new, reset_strategy: ENV.fetch("BENCH_ADAPTER_RESET_STRATEGY", "local"), workload_root: File.join(RailsAdapter::REPO_ROOT, "workloads"), clock: -> { Time.now.to_f })
         @app_root = app_root
         @workload = workload
         @seed = seed
         @env_pairs = env_pairs
         @command_runner = command_runner
         @template_cache = template_cache
+        @reset_strategy = reset_strategy
+        @workload_root = workload_root
         @clock = clock
       end
 
       def call
-        if @template_cache.template_exists?(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
-          @template_cache.clone_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+        case @reset_strategy
+        when "local"
+          reset_local
+        when "remote"
+          reset_remote
         else
-          build_template
-          @template_cache.build_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+          raise ArgumentError, "unknown reset strategy: #{@reset_strategy}"
         end
 
         ensure_pg_stat_statements
@@ -51,12 +38,24 @@ module RailsAdapter
 
       private
 
-      def build_template
-        drop = @command_runner.capture3("bin/rails", "db:drop", env: rails_env, chdir: @app_root, command_name: "reset-state")
-        raise "db:drop failed" unless drop.success?
+      def reset_local
+        if @template_cache.template_exists?(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+          @template_cache.clone_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+        else
+          build_template
+          @template_cache.build_template(database_name: database_name, app_root: @app_root, env_pairs: seed_env)
+        end
+      end
 
-        migrate = RailsAdapter::Commands::Migrate.new(app_root: @app_root, command_runner: @command_runner).call
-        raise "db:create db:schema:load failed" unless migrate.fetch("ok")
+      def reset_remote
+        schema = @command_runner.capture3(
+          "bin/rails",
+          "db:schema:load",
+          env: rails_env,
+          chdir: @app_root,
+          command_name: "reset-state",
+        )
+        raise command_failure_message("schema load failed", schema.stderr) unless schema.success?
 
         load_dataset = RailsAdapter::Commands::LoadDataset.new(
           app_root: @app_root,
@@ -66,7 +65,25 @@ module RailsAdapter
           command_runner: @command_runner,
           clock: @clock,
         ).call
-        raise "seed runner failed" unless load_dataset.fetch("ok")
+        raise result_failure_message("seed failed", load_dataset) unless load_dataset.fetch("ok")
+      end
+
+      def build_template
+        drop = @command_runner.capture3("bin/rails", "db:drop", env: rails_env, chdir: @app_root, command_name: "reset-state")
+        raise command_failure_message("db:drop failed", drop.stderr) unless drop.success?
+
+        migrate = RailsAdapter::Commands::Migrate.new(app_root: @app_root, command_runner: @command_runner).call
+        raise result_failure_message("db:create db:schema:load failed", migrate) unless migrate.fetch("ok")
+
+        load_dataset = RailsAdapter::Commands::LoadDataset.new(
+          app_root: @app_root,
+          workload: @workload,
+          seed: @seed,
+          env_pairs: @env_pairs,
+          command_runner: @command_runner,
+          clock: @clock,
+        ).call
+        raise result_failure_message("seed runner failed", load_dataset) unless load_dataset.fetch("ok")
       end
 
       def reset_pg_stat_statements
@@ -78,7 +95,7 @@ module RailsAdapter
           chdir: @app_root,
           command_name: "reset-state",
         )
-        raise "pg_stat_statements_reset failed" unless result.success?
+        raise command_failure_message("pg_stat_statements_reset failed", result.stderr) unless result.success?
       end
 
       def ensure_pg_stat_statements
@@ -90,24 +107,49 @@ module RailsAdapter
           chdir: @app_root,
           command_name: "reset-state",
         )
-        raise "pg_stat_statements extension failed" unless result.success?
+        raise command_failure_message("pg_stat_statements extension failed", result.stderr) unless result.success?
       end
 
       def capture_query_ids
-        script = QUERY_IDS_SCRIPT[@workload]
-        return nil unless script
+        path = query_ids_script_path
+        return nil unless path
 
         result = @command_runner.capture3(
           "bin/rails",
           "runner",
-          script,
+          path,
           env: rails_env,
           chdir: @app_root,
           command_name: "reset-state",
         )
-        raise "query id capture failed" unless result.success?
+        raise command_failure_message("query id capture failed", result.stderr) unless result.success?
 
-        JSON.parse(result.stdout).fetch("query_ids")
+        query_ids = JSON.parse(result.stdout).fetch("query_ids")
+        raise TypeError, "query_ids must be an array" unless query_ids.is_a?(Array)
+
+        query_ids
+      end
+
+      def query_ids_script_path
+        return nil unless @workload
+
+        path = File.join(@workload_root, @workload.tr("-", "_"), "rails", "reset_state_query_ids.rb")
+        File.exist?(path) ? path : nil
+      end
+
+      def command_failure_message(message, detail)
+        detail = detail.to_s.strip
+        detail.empty? ? message : "#{message}: #{detail}"
+      end
+
+      def result_failure_message(message, result)
+        error = result.fetch("error")
+        details = error.fetch("details", {})
+        [
+          message,
+          error.fetch("message", nil),
+          details.fetch("stderr", nil),
+        ].compact.map(&:to_s).map(&:strip).reject(&:empty?).join(": ")
       end
 
       def database_name

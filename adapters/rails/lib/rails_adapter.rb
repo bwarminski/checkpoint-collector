@@ -15,4 +15,6 @@ require_relative "rails_adapter/commands/start"
 require_relative "rails_adapter/commands/stop"
 
 module RailsAdapter
+  ROOT = File.expand_path("..", __dir__)
+  REPO_ROOT = File.expand_path("../..", ROOT)
 end

@@ -147,6 +147,30 @@ class MissingIndexTodosVerifierTest < Minitest::Test
     assert_equal 7, result.fetch(:checks).fetch(1).fetch(:calls)
   end
 
+  def test_default_client_factory_uses_longer_http_timeout
+    calls = []
+    counts_body = JSON.generate(counts_body_for_users(3))
+    original_new = Load::Client.method(:new)
+    Load::Client.define_singleton_method(:new) do |**kwargs|
+      calls << kwargs
+      FakeClient.new(
+        "/api/todos/counts" => FakeResponse.new("200", counts_body),
+      )
+    end
+    verifier = Load::Workloads::MissingIndexTodos::Verifier.new(
+      explain_reader: lambda { |sql| sql.include?(%(status = 'open')) ? missing_index_plan : search_reference_plan },
+      stats_reset: -> {},
+      counts_calls_reader: -> { 3 },
+      search_reference_reader: -> { search_reference_plan },
+    )
+
+    verifier.call(base_url: "http://app.test")
+
+    assert_equal [{ base_url: "http://app.test", timeout_seconds: 30 }], calls
+  ensure
+    Load::Client.define_singleton_method(:new, original_new)
+  end
+
   def test_verifier_fails_when_missing_index_plan_does_not_use_user_id_index
     verifier = build_verifier(
       explain_reader: lambda do |sql|

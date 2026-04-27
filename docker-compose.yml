@@ -40,8 +40,11 @@ services:
       clickhouse:
         condition: service_healthy
     environment:
-      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/checkpoint_demo
-      CLICKHOUSE_URL: http://clickhouse:8123
+      - POSTGRES_URL=${COLLECTOR_POSTGRES_URL:-postgresql://postgres:postgres@postgres:5432/checkpoint_demo}
+      - CLICKHOUSE_URL=${COLLECTOR_CLICKHOUSE_URL:-http://clickhouse:8123}
+      - COLLECTOR_INTERVAL_SECONDS=${COLLECTOR_INTERVAL_SECONDS:-5}
+      - POSTGRES_LOG_PATH=${POSTGRES_LOG_PATH:-/var/log/postgresql/postgresql}
+      - COLLECTOR_DISABLE_LOG_INGESTION
     volumes:
       - postgres_logs:/var/log/postgresql:ro
 

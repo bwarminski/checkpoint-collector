@@ -63,6 +63,28 @@ class AdapterClientTest < Minitest::Test
     assert_equal false, line.fetch(:stdout_json).fetch("ok")
   end
 
+  def test_adapter_client_raises_structured_stdout_error_when_stderr_is_empty
+    capture = FakeCapture3.new(
+      stdout: JSON.generate(
+        "ok" => false,
+        "command" => "prepare",
+        "error" => {
+          "code" => "db_unreachable",
+          "message" => "benchmark database is unreachable",
+          "details" => { "stderr" => "SSL error: certificate verify failed" },
+        },
+      ),
+      stderr: "",
+      exit_status: 1,
+    )
+    client = Load::AdapterClient.new(adapter_bin: "adapters/rails/bin/bench-adapter", capture3: capture)
+
+    error = assert_raises(Load::AdapterClient::AdapterError) { client.prepare(app_root: "/tmp/app") }
+
+    assert_includes error.message, "benchmark database is unreachable"
+    assert_includes error.message, "SSL error: certificate verify failed"
+  end
+
   def test_adapter_client_redacts_secrets_from_logged_args_and_stderr
     capture = FakeCapture3.new(
       stdout: %({"ok":false,"command":"reset-state"}),

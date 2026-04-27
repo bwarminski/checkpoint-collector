@@ -17,7 +17,7 @@ class MissingIndexTodosActionsTest < Minitest::Test
   def test_actions_issue_expected_requests
     client = FakeClient.new(
       get_responses: {
-        "/api/todos?user_id=103&status=open" => Response.new("200", JSON.generate([{ "id" => 123 }]))
+        "/api/todos?user_id=103&status=open" => Response.new("200", JSON.generate({ items: [{ "id" => 123 }] }))
       }
     )
     scale = Load::Scale.new(rows_per_table: 100_000, extra: { user_count: 1_000 }, seed: 42)
@@ -63,7 +63,24 @@ class MissingIndexTodosActionsTest < Minitest::Test
   def test_close_todo_fetches_a_users_open_todos_before_closing_one
     client = FakeClient.new(
       get_responses: {
-        "/api/todos?user_id=3&status=open" => Response.new("200", JSON.generate([{ "id" => 17 }, { "id" => 23 }]))
+        "/api/todos?user_id=3&status=open" => Response.new("200", JSON.generate({ items: [{ "id" => 17 }, { "id" => 23 }] }))
+      }
+    )
+    scale = Load::Scale.new(rows_per_table: 100_000, extra: { user_count: 3 }, seed: 42)
+
+    response = Load::Workloads::MissingIndexTodos::Actions::CloseTodo.new(rng: Random.new(42), ctx: { scale: }, client:).call
+
+    assert_equal "200", response.code
+    assert_equal [
+      [:get, "/api/todos?user_id=3&status=open", nil],
+      [:patch, "/api/todos/23", { status: "closed" }],
+    ], client.requests
+  end
+
+  def test_close_todo_reads_open_todos_from_api_items_envelope
+    client = FakeClient.new(
+      get_responses: {
+        "/api/todos?user_id=3&status=open" => Response.new("200", JSON.generate({ items: [{ "id" => 17 }, { "id" => 23 }] }))
       }
     )
     scale = Load::Scale.new(rows_per_table: 100_000, extra: { user_count: 3 }, seed: 42)
@@ -80,7 +97,7 @@ class MissingIndexTodosActionsTest < Minitest::Test
   def test_close_todo_returns_successful_no_op_when_user_has_no_open_todos
     client = FakeClient.new(
       get_responses: {
-        "/api/todos?user_id=3&status=open" => Response.new("200", JSON.generate([]))
+        "/api/todos?user_id=3&status=open" => Response.new("200", JSON.generate({ items: [] }))
       }
     )
     scale = Load::Scale.new(rows_per_table: 100_000, extra: { user_count: 3 }, seed: 42)
